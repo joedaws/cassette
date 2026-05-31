@@ -1,4 +1,5 @@
 {
+  "tracker_remote": "origin",
   "tracking_mode": "strict",
   "blocked_git_commands": [
     "git push", "git commit", "git merge", "git rebase", "git cherry-pick",
