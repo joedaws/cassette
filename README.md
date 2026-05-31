@@ -1,6 +1,6 @@
-# tape
+# cassette
 
-Freewrite with the tape TUI
+Freewrite with the cassette TUI
 
 ## Getting started
 
@@ -18,20 +18,20 @@ Install with
 stack install
 ```
 
-Once installed launch with `tape`.
+Once installed launch with `cassette`.
 
 ## Cassette interface
 
-Each tape is displayed as a cassette widget. Two reels flank a tape window: the left reel fills
+Each cassette is displayed as a cassette widget. Two reels flank a cassette window: the left reel fills
 as you write, the right reel depletes, and the hub animates on every keypress. A stats line inside
-the tape window shows your timer and word count.
+the cassette window shows your timer and word count.
 
 ## Timed sessions
 
 Start a timed session with the `-t` flag followed by the number of minutes:
 
 ```
-tape -t 10
+cassette -t 10
 ```
 
 A countdown timer appears inside each cassette in green. When time expires it turns red.
@@ -42,14 +42,14 @@ The session keeps running so you can finish your thought. Press `Esc` to quit as
 Set a word-count target with the `-w` flag:
 
 ```
-tape -w 500
+cassette -w 500
 ```
 
 Your current word count and the goal display inside the cassette stats line (`47 / 500`).
 Combine both flags to show timer and word count together:
 
 ```
-tape -t 10 -w 500
+cassette -t 10 -w 500
 ```
 
 ## Releasing a new version
@@ -60,7 +60,7 @@ tape -t 10 -w 500
 4. Write release notes, then click **Publish release**.
 
 The [Release workflow](.github/workflows/release.yml) will automatically build the Linux binary
-and attach `tape-linux-x86_64.tar.gz` to the release. First run may take longer (30–45 minutes) due to cache warming;
+and attach `cassette-linux-x86_64.tar.gz` to the release. First run may take longer (30–45 minutes) due to cache warming;
 subsequent releases are should hopefully be faster.
 
 ## Feature ideas
@@ -73,14 +73,14 @@ writing a certain amount of words
 ### Daily freewrite management
 What does it look like to use this tool to do a daily free-writing session?
 
-### Persist tapes between sessions
+### Persist cassettes between sessions
 In freewriting what data would you want to persist between sessions?
 
 ### Export for org mode and markdown
 Make it so that you can save your daily sessions to other formats and
 be able to view them that way.
 
-### Tapes return to the beginning after fixed number of characters so you can review what you
+### Cassettes return to the beginning after fixed number of characters so you can review what you
 
 ### Customise the hub animation
 The reel hub animation frames are defined in a top-level constant `reelFrames` in `app/Main.hs`.

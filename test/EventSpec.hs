@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module EventSpec (spec) where
 
-import qualified Tape
-import Tape (tapeText)
+import qualified Cassette
+import Cassette (cassetteText)
 import Event
 import Test.Hspec
 import Data.Maybe (isJust)
@@ -10,49 +10,49 @@ import Data.Maybe (isJust)
 spec :: Spec
 spec = do
   describe "initialState" $ do
-    it "starts with exactly 1 tape" $
-      length (_tapes initialState) `shouldBe` 1
+    it "starts with exactly 1 cassette" $
+      length (_cassettes initialState) `shouldBe` 1
 
-  describe "calcMaxTapes" $ do
+  describe "calcMaxCassettes" $ do
     it "returns 1 for a very short terminal" $
-      calcMaxTapes 5 `shouldBe` 1
+      calcMaxCassettes 5 `shouldBe` 1
     it "returns correct value for height 24" $
       -- (24 - 4) `div` 2 = 10
-      calcMaxTapes 24 `shouldBe` 10
+      calcMaxCassettes 24 `shouldBe` 10
     it "returns correct value for height 40" $
       -- (40 - 4) `div` 2 = 18
-      calcMaxTapes 40 `shouldBe` 18
+      calcMaxCassettes 40 `shouldBe` 18
 
-  describe "addTapeToSt" $ do
-    it "adds a tape below existing ones" $
-      length (_tapes (addTapeToSt st40)) `shouldBe` 2
-    it "sets focusIdx to the new tape's index" $
-      _focusIdx (addTapeToSt st40) `shouldBe` 1
-    it "new tape is empty" $
-      tapeText (last (_tapes (addTapeToSt st40))) `shouldBe` ""
+  describe "addCassetteToSt" $ do
+    it "adds a cassette below existing ones" $
+      length (_cassettes (addCassetteToSt st40)) `shouldBe` 2
+    it "sets focusIdx to the new cassette's index" $
+      _focusIdx (addCassetteToSt st40) `shouldBe` 1
+    it "new cassette is empty" $
+      cassetteText (last (_cassettes (addCassetteToSt st40))) `shouldBe` ""
     it "sets statusMsg at max capacity" $
-      isJust (_statusMsg (addTapeToSt st5)) `shouldBe` True
-    it "does not add a tape at max capacity" $
-      length (_tapes (addTapeToSt st5)) `shouldBe` 1
+      isJust (_statusMsg (addCassetteToSt st5)) `shouldBe` True
+    it "does not add a cassette at max capacity" $
+      length (_cassettes (addCassetteToSt st5)) `shouldBe` 1
 
   describe "focusNextSt" $ do
     it "advances focusIdx from 0 to 1" $
-      _focusIdx (focusNextSt (addTapeToSt st40){ _focusIdx = 0}) `shouldBe` 1
+      _focusIdx (focusNextSt (addCassetteToSt st40){ _focusIdx = 0}) `shouldBe` 1
     it "wraps focusIdx from last to 0" $
-      _focusIdx (focusNextSt (addTapeToSt st40)) `shouldBe` 0  -- focusIdx=1, n=2 → 0
+      _focusIdx (focusNextSt (addCassetteToSt st40)) `shouldBe` 0  -- focusIdx=1, n=2 → 0
 
   describe "focusPrevSt" $ do
     it "decrements focusIdx from 1 to 0" $
-      _focusIdx (focusPrevSt (addTapeToSt st40)) `shouldBe` 0
+      _focusIdx (focusPrevSt (addCassetteToSt st40)) `shouldBe` 0
     it "wraps focusIdx from 0 to last" $
-      _focusIdx (focusPrevSt (addTapeToSt st40){ _focusIdx = 0}) `shouldBe` 1
+      _focusIdx (focusPrevSt (addCassetteToSt st40){ _focusIdx = 0}) `shouldBe` 1
 
-  describe "modifyFocusedTapeSt" $ do
-    it "only modifies the tape at focusIdx" $ do
-      let st2  = addTapeToSt st40  -- focusIdx=1
-          st2' = modifyFocusedTapeSt (\t -> Tape.insert t 'x') st2
-      tapeText (_tapes st2' !! 0) `shouldBe` ""
-      tapeText (_tapes st2' !! 1) `shouldBe` "x"
+  describe "modifyFocusedCassetteSt" $ do
+    it "only modifies the cassette at focusIdx" $ do
+      let st2  = addCassetteToSt st40  -- focusIdx=1
+          st2' = modifyFocusedCassetteSt (\t -> Cassette.insert t 'x') st2
+      cassetteText (_cassettes st2' !! 0) `shouldBe` ""
+      cassetteText (_cassettes st2' !! 1) `shouldBe` "x"
 
   describe "tickTimer" $ do
     it "does nothing when no timer" $

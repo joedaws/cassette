@@ -1,6 +1,6 @@
-name:                tape
+name:                cassette
 version:             0.5.0.0
-github:              "joedaws/tape"
+github:              "joedaws/cassette"
 license:             BSD-3-Clause
 author:              "Joseph Daws, Jr."
 maintainer:          "jozzef@hey.com"
@@ -17,7 +17,7 @@ extra-source-files:
 # To avoid duplicated efforts in documentation and dealing with the
 # complications of embedding Haddock markup inside cabal files, it is
 # common to point users to the README.md file.
-description:         Please see the README on GitHub at <https://github.com/joedaws/tape#readme>
+description:         Please see the README on GitHub at <https://github.com/joedaws/cassette#readme>
 
 dependencies:
 - base >= 4.7 && < 5
@@ -47,7 +47,7 @@ library:
   source-dirs: src
 
 executables:
-  tape:
+  cassette:
     main:                Main.hs
     source-dirs:         app
     ghc-options:
@@ -55,10 +55,10 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - tape
+    - cassette
 
 tests:
-  tape-test:
+  cassette-test:
     main:                Spec.hs
     source-dirs:         test
     ghc-options:
@@ -66,7 +66,7 @@ tests:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - tape
+    - cassette
 
   lint:
     main:                HLint.hs

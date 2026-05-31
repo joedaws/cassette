@@ -4,11 +4,11 @@ cabal-version: 2.2
 --
 -- see: https://github.com/sol/hpack
 
-name:           tape
+name:           cassette
 version:        0.5.0.0
-description:    Please see the README on GitHub at <https://github.com/joedaws/tape#readme>
-homepage:       https://github.com/joedaws/tape#readme
-bug-reports:    https://github.com/joedaws/tape/issues
+description:    Please see the README on GitHub at <https://github.com/joedaws/cassette#readme>
+homepage:       https://github.com/joedaws/cassette#readme
+bug-reports:    https://github.com/joedaws/cassette/issues
 author:         Joseph Daws, Jr.
 maintainer:     jozzef@hey.com
 copyright:      2025
@@ -21,19 +21,19 @@ extra-source-files:
 
 source-repository head
   type: git
-  location: https://github.com/joedaws/tape
+  location: https://github.com/joedaws/cassette
 
 library
   exposed-modules:
+      Cassette
       Deck
       Document
       Event
       Render
-      Tape
   other-modules:
-      Paths_tape
+      Paths_cassette
   autogen-modules:
-      Paths_tape
+      Paths_cassette
   hs-source-dirs:
       src
   ghc-options: -threaded -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
@@ -50,24 +50,50 @@ library
     , vty-crossplatform
   default-language: Haskell2010
 
-executable tape
+executable cassette
   main-is: Main.hs
   other-modules:
-      Paths_tape
+      Paths_cassette
   autogen-modules:
-      Paths_tape
+      Paths_cassette
   hs-source-dirs:
       app
   ghc-options: -threaded -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , brick
+    , cassette
     , hspec
     , lens
     , microlens
     , microlens-mtl
     , microlens-th
-    , tape
+    , text
+    , vty
+    , vty-crossplatform
+  default-language: Haskell2010
+
+test-suite cassette-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      CassetteSpec
+      EventSpec
+      Paths_cassette
+  autogen-modules:
+      Paths_cassette
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , brick
+    , cassette
+    , hspec
+    , lens
+    , microlens
+    , microlens-mtl
+    , microlens-th
     , text
     , vty
     , vty-crossplatform
@@ -77,9 +103,9 @@ test-suite lint
   type: exitcode-stdio-1.0
   main-is: HLint.hs
   other-modules:
-      Paths_tape
+      Paths_cassette
   autogen-modules:
-      Paths_tape
+      Paths_cassette
   hs-source-dirs:
       lint
   ghc-options: -threaded -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
@@ -92,32 +118,6 @@ test-suite lint
     , microlens
     , microlens-mtl
     , microlens-th
-    , text
-    , vty
-    , vty-crossplatform
-  default-language: Haskell2010
-
-test-suite tape-test
-  type: exitcode-stdio-1.0
-  main-is: Spec.hs
-  other-modules:
-      EventSpec
-      TapeSpec
-      Paths_tape
-  autogen-modules:
-      Paths_tape
-  hs-source-dirs:
-      test
-  ghc-options: -threaded -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
-  build-depends:
-      base >=4.7 && <5
-    , brick
-    , hspec
-    , lens
-    , microlens
-    , microlens-mtl
-    , microlens-th
-    , tape
     , text
     , vty
     , vty-crossplatform

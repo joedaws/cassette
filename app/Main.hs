@@ -23,20 +23,20 @@ import Control.Monad (forever, void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Text as DT
 import qualified Data.Text.IO as TIO
-import Deck (tapeWidth)
+import Deck (cassetteWidth)
 import Event
   ( AppEvent (..),
     Name (..),
     St (..),
     appEvent,
+    cassettes,
     focusIdx,
     initialState,
     reelRotation,
     statusMsg,
-    tapes,
     termHeight,
     timerSecs,
-    wordCountTape,
+    wordCountCassette,
     wordGoal,
   )
 import qualified Graphics.Vty as V
@@ -45,7 +45,7 @@ import Lens.Micro ((&), (.~), (^.))
 import Lens.Micro.Mtl
 import qualified Render
 import System.Environment (getArgs)
-import Tape (Tape, initTape, leftText, printTape, tapeText, width)
+import Cassette (Cassette, initCassette, leftText, printCassette, cassetteText, width)
 
 timerActiveAttr :: A.AttrName
 timerActiveAttr = A.attrName "timerActive"
@@ -71,10 +71,10 @@ reelPattern r
   | otherwise = "▓▓▓▓▓"
 
 -- | Cursor position ratio: 0.0 = start, 1.0 = end.
-cursorRatio :: Tape -> Double
+cursorRatio :: Cassette -> Double
 cursorRatio t =
   let l = DT.length (t ^. leftText)
-      total = DT.length (tapeText t)
+      total = DT.length (cassetteText t)
    in fromIntegral l / fromIntegral (max 1 total)
 
 -- | Format the session stats content (timer and/or word goal).
@@ -95,12 +95,12 @@ formatStats st totalWc =
       _ -> ""
     pad x = (if x < 10 then "0" else "") ++ show x
 
--- | Draw a single tape: top separator + text line.
-drawTapeRow :: Bool -> Tape -> T.Widget Name
-drawTapeRow isFocused tape =
+-- | Draw a single cassette: top separator + text line.
+drawCassetteRow :: Bool -> Cassette -> T.Widget Name
+drawCassetteRow isFocused cassette =
   vBox
     [ vLimit 1 (fill (if isFocused then '═' else '─')),
-      hBox [str " ", Render.renderTapeText [Render.edgeFadeEffect] isFocused (printTape tape), str " "]
+      hBox [str " ", Render.renderCassetteText [Render.edgeFadeEffect] isFocused (printCassette cassette), str " "]
     ]
 
 -- | Draw the reel indicator + session stats bar.
@@ -108,14 +108,14 @@ drawReelStats :: St -> T.Widget Name
 drawReelStats st =
   hBox [str lStr, C.hCenter statsWidget, str rStr]
   where
-    ts = st ^. tapes
+    cs = st ^. cassettes
     focused = st ^. focusIdx
-    tape = if null ts then initTape "" 0 else ts !! min focused (length ts - 1)
-    ratio = cursorRatio tape
+    cassette = if null cs then initCassette "" 0 else cs !! min focused (length cs - 1)
+    ratio = cursorRatio cassette
     hub = hubFrames !! (st ^. reelRotation `mod` length hubFrames)
     lStr = hub : reelPattern ratio
     rStr = reelPattern (1.0 - ratio) ++ [hub]
-    totalWc = sum (map wordCountTape ts)
+    totalWc = sum (map wordCountCassette cs)
     content = formatStats st totalWc
     statsWidget = case st ^. timerSecs of
       Just 0 -> withAttr timerExpiredAttr (str content)
@@ -123,14 +123,14 @@ drawReelStats st =
       Nothing -> str content
 
 drawUI :: St -> [T.Widget Name]
-drawUI st = [vBox $ tapeWidgets ++ [vLimit 1 (fill '─'), drawReelStats st, statusRow, txt helpText]]
+drawUI st = [vBox $ cassetteWidgets ++ [vLimit 1 (fill '─'), drawReelStats st, statusRow, txt helpText]]
   where
     focused = st ^. focusIdx
-    tapeWidgets = zipWith (\i t -> drawTapeRow (i == focused) t) [0 ..] (st ^. tapes)
+    cassetteWidgets = zipWith (\i t -> drawCassetteRow (i == focused) t) [0 ..] (st ^. cassettes)
     statusRow = maybe (txt " ") txt (st ^. statusMsg)
 
 helpText :: DT.Text
-helpText = "Tab: next  Shift+Tab: prev  Ctrl+N: new tape  Esc: quit"
+helpText = "Tab: next  Shift+Tab: prev  Ctrl+N: new cassette  Esc: quit"
 
 focusColorMap :: A.AttrMap
 focusColorMap =
@@ -143,8 +143,8 @@ focusColorMap =
 appCursor :: St -> [T.CursorLocation Name] -> Maybe (T.CursorLocation Name)
 appCursor _ _ = Nothing
 
-tapeApp :: M.App St AppEvent Name
-tapeApp =
+cassetteApp :: M.App St AppEvent Name
+cassetteApp =
   M.App
     { M.appDraw = drawUI,
       M.appChooseCursor = appCursor,
@@ -153,7 +153,7 @@ tapeApp =
         vty <- M.getVtyHandle
         (w, h) <- liftIO $ V.displayBounds (V.outputIface vty)
         termHeight .= h
-        tapes %= fmap (width .~ tapeWidth w),
+        cassettes %= fmap (width .~ cassetteWidth w),
       M.appAttrMap = const focusColorMap
     }
 
@@ -184,10 +184,10 @@ main = do
     Nothing -> return ()
   let initSt = initialState & timerSecs .~ mSecs & wordGoal .~ mGoal
   vty <- VCP.mkVty mempty
-  st <- M.customMain vty (VCP.mkVty mempty) (Just chan) tapeApp initSt
-  mapM_ printTapeOutput (zip [1 ..] (st ^. tapes))
+  st <- M.customMain vty (VCP.mkVty mempty) (Just chan) cassetteApp initSt
+  mapM_ printCassetteOutput (zip [1 ..] (st ^. cassettes))
 
-printTapeOutput :: (Int, Tape) -> IO ()
-printTapeOutput (i, t) = do
-  putStrLn $ "Words recorded to Tape " ++ show i ++ ":\n"
-  TIO.putStrLn (tapeText t)
+printCassetteOutput :: (Int, Cassette) -> IO ()
+printCassetteOutput (i, t) = do
+  putStrLn $ "Words recorded to Cassette " ++ show i ++ ":\n"
+  TIO.putStrLn (cassetteText t)

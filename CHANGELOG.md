@@ -1,4 +1,4 @@
-# Changelog for `tape`
+# Changelog for `cassette`
 
 All notable changes to this project will be documented in this file.
 
@@ -8,4 +8,7 @@ and this project adheres to the
 
 ## 0.1.0.0 - 2025-11-13
 
-- Basic interface with Brick of the Tape.
+### Changed
+- Rename the project as cassette and make updates to the code base to replace tape with cassette for variables and types. (#1)
+
+- Basic interface with Brick of the Cassette.

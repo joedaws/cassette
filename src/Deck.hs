@@ -1,10 +1,10 @@
--- | Multiple tapes in a deck
-module Deck (tapeWidth, tapeRows) where
+-- | Multiple cassettes in a deck
+module Deck (cassetteWidth, cassetteRows) where
 
--- | Number of rows each tape widget occupies (separator + text)
-tapeRows :: Int
-tapeRows = 2
+-- | Number of rows each cassette widget occupies (separator + text)
+cassetteRows :: Int
+cassetteRows = 2
 
--- | Width of the tape text region (terminal width minus side padding)
-tapeWidth :: Int -> Int
-tapeWidth w = max 20 (w - 2)
+-- | Width of the cassette text region (terminal width minus side padding)
+cassetteWidth :: Int -> Int
+cassetteWidth w = max 20 (w - 2)

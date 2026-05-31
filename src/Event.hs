@@ -8,28 +8,28 @@ module Event
     AppEvent (..),
     Name (..),
     St (..),
-    tapes,
+    cassettes,
     focusIdx,
     termHeight,
     statusMsg,
     timerSecs,
     reelRotation,
     wordGoal,
-    modifyFocusedTape,
-    addTapeToSt,
+    modifyFocusedCassette,
+    addCassetteToSt,
     focusNextSt,
     focusPrevSt,
-    modifyFocusedTapeSt,
+    modifyFocusedCassetteSt,
     tickTimer,
     advanceReel,
-    calcMaxTapes,
+    calcMaxCassettes,
     initialState,
-    wordCountTape,
+    wordCountCassette,
     keyQuit,
-    keyNextTape,
-    keyPrevTape,
-    keyAddTape,
-    modAddTape,
+    keyNextCassette,
+    keyPrevCassette,
+    keyAddCassette,
+    modAddCassette,
   )
 where
 
@@ -37,12 +37,12 @@ import qualified Brick.Main as M
 import qualified Brick.Types as T
 import Data.Char (isPrint)
 import qualified Data.Text as DT
-import Deck (tapeRows, tapeWidth)
+import Deck (cassetteRows, cassetteWidth)
 import qualified Graphics.Vty as V
 import Lens.Micro ((.~), (%~))
 import Lens.Micro.Mtl
 import Lens.Micro.TH
-import Tape
+import Cassette
 
 data AppEvent = Tick
   deriving (Eq, Show)
@@ -51,7 +51,7 @@ newtype Name = Edit Int
   deriving (Ord, Show, Eq)
 
 data St = St
-  { _tapes        :: [Tape],
+  { _cassettes    :: [Cassette],
     _focusIdx     :: Int,
     _termHeight   :: Int,
     _statusMsg    :: Maybe DT.Text,
@@ -63,71 +63,71 @@ data St = St
 makeLenses ''St
 
 -- Key binding constants
-keyQuit        :: V.Key;  keyQuit        = V.KEsc
-keyNextTape    :: V.Key;  keyNextTape    = V.KChar '\t'
-keyPrevTape    :: V.Key;  keyPrevTape    = V.KBackTab
-keyAddTape     :: V.Key;  keyAddTape     = V.KChar 'n'
-modAddTape     :: [V.Modifier]; modAddTape = [V.MCtrl]
-keyBackspace   :: V.Key;  keyBackspace   = V.KBS
-keyDelete      :: V.Key;  keyDelete      = V.KDel
-keyCursorLeft  :: V.Key;  keyCursorLeft  = V.KLeft
-keyCursorRight :: V.Key;  keyCursorRight = V.KRight
+keyQuit           :: V.Key;  keyQuit           = V.KEsc
+keyNextCassette   :: V.Key;  keyNextCassette   = V.KChar '\t'
+keyPrevCassette   :: V.Key;  keyPrevCassette   = V.KBackTab
+keyAddCassette    :: V.Key;  keyAddCassette    = V.KChar 'n'
+modAddCassette    :: [V.Modifier]; modAddCassette = [V.MCtrl]
+keyBackspace      :: V.Key;  keyBackspace      = V.KBS
+keyDelete         :: V.Key;  keyDelete         = V.KDel
+keyCursorLeft     :: V.Key;  keyCursorLeft     = V.KLeft
+keyCursorRight    :: V.Key;  keyCursorRight    = V.KRight
 
 -- Vty 6 / vty-unix may report Ctrl+N as raw byte 0x0E with no modifiers
 -- rather than KChar 'n' [MCtrl], depending on terminal/platform.
-isAddTapeKey :: V.Key -> [V.Modifier] -> Bool
-isAddTapeKey k ms = (k == keyAddTape && ms == modAddTape)
-                 || (k == V.KChar '\x0e' && null ms)
+isAddCassetteKey :: V.Key -> [V.Modifier] -> Bool
+isAddCassetteKey k ms = (k == keyAddCassette && ms == modAddCassette)
+                     || (k == V.KChar '\x0e' && null ms)
 
--- Screen capacity: top separators per tape + bottom sep + reel stats + status + help
+-- Screen capacity: top separators per cassette + bottom sep + reel stats + status + help
 uiOverheadRows :: Int
 uiOverheadRows = 4
 
-calcMaxTapes :: Int -> Int
-calcMaxTapes termH = max 1 ((termH - uiOverheadRows) `div` tapeRows)
+calcMaxCassettes :: Int -> Int
+calcMaxCassettes termH = max 1 ((termH - uiOverheadRows) `div` cassetteRows)
 
--- | Word count for a tape
-wordCountTape :: Tape -> Int
-wordCountTape = length . DT.words . tapeText
+-- | Word count for a cassette
+wordCountCassette :: Cassette -> Int
+wordCountCassette = length . DT.words . cassetteText
 
 -- Pure state helpers
-addTapeToSt :: St -> St
-addTapeToSt st
-  | length (_tapes st) >= calcMaxTapes (_termHeight st) =
-      st { _statusMsg = Just (DT.pack "No more vertical space for additional tapes.") }
+addCassetteToSt :: St -> St
+addCassetteToSt st
+  | length (_cassettes st) >= calcMaxCassettes (_termHeight st) =
+      st { _statusMsg = Just (DT.pack "No more vertical space for additional cassettes.") }
   | otherwise =
-      let tw = case _tapes st of
+      let tw = case _cassettes st of
                  (t:_) -> _width t
                  []    -> 11
-          newTape = (initTape "" 0) { _width = tw }
-      in  st { _tapes     = _tapes st ++ [newTape],
-               _focusIdx  = length (_tapes st),
-               _statusMsg = Nothing }
+          newCassette = (initCassette "" 0) { _width = tw }
+      in  st { _cassettes  = _cassettes st ++ [newCassette],
+               _focusIdx   = length (_cassettes st),
+               _statusMsg  = Nothing }
 
 focusNextSt :: St -> St
 focusNextSt st =
-  st { _focusIdx  = (_focusIdx st + 1) `mod` max 1 (length (_tapes st)),
+  st { _focusIdx  = (_focusIdx st + 1) `mod` max 1 (length (_cassettes st)),
        _statusMsg = Nothing }
 
 focusPrevSt :: St -> St
 focusPrevSt st =
-  let n = length (_tapes st)
+  let n = length (_cassettes st)
   in  st { _focusIdx  = (_focusIdx st - 1 + n) `mod` max 1 n,
            _statusMsg = Nothing }
 
-modifyFocusedTapeSt :: (Tape -> Tape) -> St -> St
-modifyFocusedTapeSt f st
-  | idx < 0 || idx >= length ts = st
+modifyFocusedCassetteSt :: (Cassette -> Cassette) -> St -> St
+modifyFocusedCassetteSt f st
+  | idx < 0 || idx >= length cs = st
   | otherwise =
-      let (before, tape : after) = splitAt idx ts
-      in  st { _tapes = before ++ [f tape] ++ after }
+      let (before, cassette : after) = splitAt idx cs
+      in  st { _cassettes = before ++ [f cassette] ++ after }
   where
     idx = _focusIdx st
-    ts  = _tapes st
+    cs  = _cassettes st
 
 -- Monadic wrapper
-modifyFocusedTape :: (Tape -> Tape) -> T.EventM Name St ()
-modifyFocusedTape f = T.modify (modifyFocusedTapeSt f)
+modifyFocusedCassette :: (Cassette -> Cassette) -> T.EventM Name St ()
+modifyFocusedCassette f = T.modify (modifyFocusedCassetteSt f)
 
 -- | Advance the reel animation by one frame
 advanceReel :: St -> St
@@ -135,7 +135,7 @@ advanceReel = reelRotation %~ (\r -> succ r `mod` 4)
 
 initialState :: St
 initialState = St
-  { _tapes        = [initTape "" 0],
+  { _cassettes    = [initCassette "" 0],
     _focusIdx     = 0,
     _termHeight   = 24,
     _statusMsg    = Nothing,
@@ -152,26 +152,26 @@ tickTimer st =
     Just n  -> st { _timerSecs = Just (n - 1) }
 
 appEvent :: T.BrickEvent Name AppEvent -> T.EventM Name St ()
-appEvent (T.AppEvent Tick)                                  = T.modify tickTimer
-appEvent (T.VtyEvent (V.EvKey k [])) | k == keyQuit        = M.halt
-appEvent (T.VtyEvent (V.EvKey k [])) | k == keyNextTape    = T.modify focusNextSt
-appEvent (T.VtyEvent (V.EvKey k [])) | k == keyPrevTape    = T.modify focusPrevSt
-appEvent (T.VtyEvent (V.EvKey k ms)) | k == keyAddTape
-                                     , ms == modAddTape    = T.modify addTapeToSt
-appEvent (T.VtyEvent (V.EvKey k [])) | k == keyBackspace   = do
-  modifyFocusedTape backspace
+appEvent (T.AppEvent Tick)                                          = T.modify tickTimer
+appEvent (T.VtyEvent (V.EvKey k [])) | k == keyQuit                = M.halt
+appEvent (T.VtyEvent (V.EvKey k [])) | k == keyNextCassette        = T.modify focusNextSt
+appEvent (T.VtyEvent (V.EvKey k [])) | k == keyPrevCassette        = T.modify focusPrevSt
+appEvent (T.VtyEvent (V.EvKey k ms)) | k == keyAddCassette
+                                     , ms == modAddCassette         = T.modify addCassetteToSt
+appEvent (T.VtyEvent (V.EvKey k [])) | k == keyBackspace            = do
+  modifyFocusedCassette backspace
   T.modify advanceReel
-appEvent (T.VtyEvent (V.EvKey k [])) | k == keyDelete      = do
-  modifyFocusedTape delete
+appEvent (T.VtyEvent (V.EvKey k [])) | k == keyDelete               = do
+  modifyFocusedCassette delete
   T.modify advanceReel
-appEvent (T.VtyEvent (V.EvKey k [])) | k == keyCursorLeft  = modifyFocusedTape rewind
-appEvent (T.VtyEvent (V.EvKey k [])) | k == keyCursorRight = modifyFocusedTape forward
+appEvent (T.VtyEvent (V.EvKey k [])) | k == keyCursorLeft           = modifyFocusedCassette rewind
+appEvent (T.VtyEvent (V.EvKey k [])) | k == keyCursorRight          = modifyFocusedCassette forward
 appEvent (T.VtyEvent (V.EvResize w h)) = do
   termHeight .= h
-  let tw = tapeWidth w
-  tapes %= fmap (width .~ tw)
+  let tw = cassetteWidth w
+  cassettes %= fmap (width .~ tw)
 appEvent (T.VtyEvent (V.EvKey (V.KChar c) []))
   | isPrint c = do
-    modifyFocusedTape (`insert` c)
+    modifyFocusedCassette (`insert` c)
     T.modify advanceReel
 appEvent _ = return ()

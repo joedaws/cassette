@@ -1,29 +1,29 @@
-module TapeSpec (spec) where
+module CassetteSpec (spec) where
 
 import Control.Lens (view)
 import Data.Text as T
-import Tape
+import Cassette
 import Test.Hspec
 
 -- define some test text
 simpleText :: T.Text
 simpleText = T.pack "hello it is me"
 
-mkTp :: Int -> Tape
-mkTp = initTape simpleText
+mkTp :: Int -> Cassette
+mkTp = initCassette simpleText
 
-getText :: Tape -> T.Text
+getText :: Cassette -> T.Text
 getText t = view leftText t `T.append` view rightText t
 
 spec :: Spec
 spec = do
-  describe "printTape" $ do
+  describe "printCassette" $ do
     it "when left spacing is needed" $ do
-      printTape (mkTp 3) `shouldBe` T.pack "  hel|lo it"
+      printCassette (mkTp 3) `shouldBe` T.pack "  hel|lo it"
     it "when no spacing is needed" $ do
-      printTape (mkTp 7) `shouldBe` T.pack "llo i|t is "
+      printCassette (mkTp 7) `shouldBe` T.pack "llo i|t is "
     it "when right spacing is needed" $ do
-      printTape (mkTp 12) `shouldBe` T.pack "t is |me   "
+      printCassette (mkTp 12) `shouldBe` T.pack "t is |me   "
 
   describe "insert" $ do
     it "when cursor at the end" $ do

@@ -1,7 +1,7 @@
 module Render
   ( RenderCtx (..),
     Effect,
-    renderTapeText,
+    renderCassetteText,
     edgeFadeEffect,
   )
 where
@@ -23,8 +23,8 @@ data RenderCtx = RenderCtx
 type Effect = RenderCtx -> V.Attr -> V.Attr
 
 -- | Apply a list of effects in order and render each character.
-renderTapeText :: [Effect] -> Bool -> DT.Text -> T.Widget n
-renderTapeText effects isFocused text =
+renderCassetteText :: [Effect] -> Bool -> DT.Text -> T.Widget n
+renderCassetteText effects isFocused text =
   hBox
     [ modifyDefAttr (applyEffects ctx) (str [c])
       | (i, c) <- zip [0 ..] (DT.unpack text),
@@ -34,7 +34,7 @@ renderTapeText effects isFocused text =
     len = DT.length text
     applyEffects ctx attr = foldl (\a e -> e ctx a) attr effects
 
--- | Fades foreground toward the tape background color based on distance from center.
+-- | Fades foreground toward the cassette background color based on distance from center.
 -- Also sets the background explicitly so the gradient edge matches the bg exactly.
 edgeFadeEffect :: Effect
 edgeFadeEffect ctx attr =

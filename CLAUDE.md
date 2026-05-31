@@ -7,25 +7,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 stack build          # compile
 stack test           # run all tests (hspec + hlint)
-stack test tape:tape-test   # hspec tests only
-stack test tape:lint        # hlint only
+stack test cassette:cassette-test   # hspec tests only
+stack test cassette:lint            # hlint only
 stack run -- -t 10 -w 500  # run with 10-min timer and 500-word goal
-stack install        # install `tape` binary to PATH
+stack install        # install `cassette` binary to PATH
 ```
 
 ## Architecture
 
-`tape` is a Haskell TUI freewriting app built on [Brick](https://github.com/jtdaugherty/brick). The user writes on one or more "tapes" displayed as cassette-style widgets.
+`cassette` is a Haskell TUI freewriting app built on [Brick](https://github.com/jtdaugherty/brick). The user writes on one or more "cassettes" displayed as cassette-style widgets.
 
 ### Core data model
 
-**`src/Tape.hs`** — `Tape` is a cursor-zipper: text is split into `leftText` (before cursor) and `rightText` (after cursor). Operations like `insert`, `backspace`, `forward`, and `rewind` manipulate this split. `printTape` renders a fixed-width window centered on the cursor.
+**`src/Cassette.hs`** — `Cassette` is a cursor-zipper: text is split into `leftText` (before cursor) and `rightText` (after cursor). Operations like `insert`, `backspace`, `forward`, and `rewind` manipulate this split. `printCassette` renders a fixed-width window centered on the cursor.
 
 **`src/Event.hs`** — `St` is the Brick app state (all fields are `microlens-th` lenses). Pure state transformers (`addTapeToSt`, `focusNextSt`, etc.) are separated from the monadic `appEvent` handler so they can be tested directly. Key bindings are defined as constants at the top of this module.
 
-**`src/Deck.hs`** — Layout constants: `tapeRows` (rows per tape widget) and `tapeWidth` (text region width derived from terminal width). `calcMaxTapes` in `Event.hs` uses these to cap tape count to available vertical space.
+**`src/Deck.hs`** — Layout constants: `cassetteRows` (rows per cassette widget) and `cassetteWidth` (text region width derived from terminal width). `calcMaxCassettes` in `Event.hs` uses these to cap cassette count to available vertical space.
 
-**`src/Render.hs`** — Character-level rendering pipeline. `Effect = RenderCtx -> Attr -> Attr` is a composable function applied per character. `edgeFadeEffect` implements the focused/unfocused color gradient.
+**`src/Render.hs`** — Character-level rendering pipeline. `Effect = RenderCtx -> Attr -> Attr` is a composable function applied per character. `edgeFadeEffect` implements the focused/unfocused color gradient. `renderCassetteText` applies effects and renders a cassette's text.
 
 **`app/Main.hs`** — Brick app wiring: `drawUI`, `appEvent`, attr map, CLI arg parsing (`-t`, `-w`). The countdown timer runs on a background thread that pushes `Tick` events over a `BChan`. On quit, tape contents are printed to stdout.
 

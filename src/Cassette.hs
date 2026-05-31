@@ -1,13 +1,13 @@
 {-# LANGUAGE TemplateHaskell #-}
 
-module Tape
-  ( Tape (..),
-    initTape,
+module Cassette
+  ( Cassette (..),
+    initCassette,
     width,
     leftText,
     rightText,
-    printTape,
-    tapeText,
+    printCassette,
+    cassetteText,
     insert,
     backspace,
     delete,
@@ -34,18 +34,18 @@ cursorChar = '|'
 -- (hel) + | + (o it is me)
 -- leftText | rightText
 
-data Tape = Tape
+data Cassette = Cassette
   { _width :: Int,
     _leftText :: T.Text,
     _rightText :: T.Text
   }
   deriving (Eq, Show)
 
-makeLenses ''Tape
+makeLenses ''Cassette
 
-initTape :: T.Text -> Int -> Tape
-initTape txt cursorInt =
-  Tape
+initCassette :: T.Text -> Int -> Cassette
+initCassette txt cursorInt =
+  Cassette
     { _width = defaultWidth,
       _leftText = leftText',
       _rightText = rightText'
@@ -56,8 +56,8 @@ initTape txt cursorInt =
 defaultWidth :: Int
 defaultWidth = 11
 
-tapeText :: Tape -> T.Text
-tapeText t = view leftText t `T.append` view rightText t
+cassetteText :: Cassette -> T.Text
+cassetteText t = view leftText t `T.append` view rightText t
 
 -- n = 14
 -- exmample: width = 10, cursorInt = 3, text = "hello it is me"
@@ -75,8 +75,8 @@ tapeText t = view leftText t `T.append` view rightText t
 --             ^
 -- 0123456789
 -- t is me
-printTape :: Tape -> T.Text
-printTape t = T.replicate spaceLeft space `T.append` trimmed `T.append` T.replicate spaceRight space
+printCassette :: Cassette -> T.Text
+printCassette t = T.replicate spaceLeft space `T.append` trimmed `T.append` T.replicate spaceRight space
   where
     w = view width t
     space = T.pack " "
@@ -89,20 +89,20 @@ printTape t = T.replicate spaceLeft space `T.append` trimmed `T.append` T.replic
     takeRightn = min middle nCharRight
     trimmed = T.takeEnd takeLeftn (view leftText t) `T.append` T.cons cursorChar (T.take takeRightn (view rightText t))
 
-insert :: Tape -> Char -> Tape
+insert :: Cassette -> Char -> Cassette
 insert t toInsert = over leftText (`T.snoc` toInsert) t
 
-backspace :: Tape -> Tape
+backspace :: Cassette -> Cassette
 backspace t
   | view leftText t == T.pack "" = t
   | otherwise = over leftText T.init t
 
-delete :: Tape -> Tape
+delete :: Cassette -> Cassette
 delete t
   | view rightText t == T.pack "" = t
   | otherwise = over rightText T.tail t
 
-forward :: Tape -> Tape
+forward :: Cassette -> Cassette
 forward t =
   case T.uncons (view rightText t) of
     Just (c, rest) ->
@@ -111,7 +111,7 @@ forward t =
        in t''
     Nothing -> t
 
-rewind :: Tape -> Tape
+rewind :: Cassette -> Cassette
 rewind t =
   case T.unsnoc (view leftText t) of
     Just (rest, c) ->
