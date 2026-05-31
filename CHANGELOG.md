@@ -9,6 +9,7 @@ and this project adheres to the
 ## 0.1.0.0 - 2025-11-13
 
 ### Changed
+- update the .github workflows from stack and haskell working to new rust and cargo (#9)
 - update .gitignore so that it is appropriate for a rust project (#10)
 - Change the implementation so that we can configure N lines being shown. The initial behavior is that the cursor stays directly in the middle, but we should transition to something that is more like traditional editors, and show N lines (thinking about targeting 5 to 7 lines). The text show start to fade at the top. (#3)
 - Rewrite the applicatoin in Rust using the ratatui library (#2)
