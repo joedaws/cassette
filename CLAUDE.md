@@ -5,37 +5,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-stack build          # compile
-stack test           # run all tests (hspec + hlint)
-stack test cassette:cassette-test   # hspec tests only
-stack test cassette:lint            # hlint only
-stack run -- -t 10 -w 500  # run with 10-min timer and 500-word goal
-stack install        # install `cassette` binary to PATH
+cargo build                    # compile
+cargo test                     # run unit tests
+cargo run -- -t 10 -w 500      # run with 10-min timer and 500-word goal
+cargo install --path .         # install `cassette` binary to PATH
 ```
 
 ## Architecture
 
-`cassette` is a Haskell TUI freewriting app built on [Brick](https://github.com/jtdaugherty/brick). The user writes on one or more "cassettes" displayed as cassette-style widgets.
+`cassette` is a Rust TUI freewriting app built on [ratatui](https://ratatui.rs) with crossterm as the backend. The user writes on one or more "cassettes", each displayed as a colored multi-line widget with a top-fade effect.
 
-### Core data model
+### Source layout
 
-**`src/Cassette.hs`** — `Cassette` is a cursor-zipper: text is split into `leftText` (before cursor) and `rightText` (after cursor). Operations like `insert`, `backspace`, `forward`, and `rewind` manipulate this split. `printCassette` renders a fixed-width window centered on the cursor.
+**`src/cassette.rs`** — `Cassette` is a cursor-zipper: text is split into `left` (before cursor) and `right` (after cursor). Operations `insert`, `backspace`, `delete`, `move_left`, and `move_right` manipulate this split. Pure data model with no rendering logic.
 
-**`src/Event.hs`** — `St` is the Brick app state (all fields are `microlens-th` lenses). Pure state transformers (`addTapeToSt`, `focusNextSt`, etc.) are separated from the monadic `appEvent` handler so they can be tested directly. Key bindings are defined as constants at the top of this module.
+**`src/app.rs`** — `App` holds all application state: the list of cassettes, focus index, terminal dimensions, timer, word goal, and reel animation frame. State transitions (`add_cassette`, `focus_next`, `tick_timer`, etc.) are plain `&mut self` methods with no I/O. `modify_focused` accepts a closure so callers in `main.rs` can apply any `Cassette` operation.
 
-**`src/Deck.hs`** — Layout constants: `cassetteRows` (rows per cassette widget) and `cassetteWidth` (text region width derived from terminal width). `calcMaxCassettes` in `Event.hs` uses these to cap cassette count to available vertical space.
+**`src/ui.rs`** — All ratatui rendering. `render` builds a vertical layout with one chunk per cassette plus the stats bar, status line, and help row. Each cassette shows `VISIBLE_LINES` (6) rows of character-wrapped text; the viewport scrolls to keep the cursor at the bottom row and fades older lines toward the cassette background color.
 
-**`src/Render.hs`** — Character-level rendering pipeline. `Effect = RenderCtx -> Attr -> Attr` is a composable function applied per character. `edgeFadeEffect` implements the focused/unfocused color gradient. `renderCassetteText` applies effects and renders a cassette's text.
-
-**`app/Main.hs`** — Brick app wiring: `drawUI`, `appEvent`, attr map, CLI arg parsing (`-t`, `-w`). The countdown timer runs on a background thread that pushes `Tick` events over a `BChan`. On quit, tape contents are printed to stdout.
-
-**`src/Document.hs`** — Stub type, currently unused.
+**`src/main.rs`** — Terminal setup/teardown (raw mode, alternate screen), the crossterm event loop, key dispatch via `handle_key`, and CLI arg parsing (`-t`, `-w`). Prints cassette text to stdout on quit.
 
 ### Conventions
 
-- Lenses are generated with `makeLenses ''TypeName` (Template Haskell); use `microlens` operators (`^.`, `.~`, `%~`, `use`, `assign`).
-- Pure state logic lives in `Event.hs` as plain functions on `St`; the monadic `appEvent` calls `T.modify` on them. Keep this separation when adding new behavior.
-- GHC warnings are treated as errors (`-Wall` + compat flags in `package.yaml`); hlint runs as a separate test suite against `src/` and `app/`.
+- `App` and `Cassette` are pure: no I/O, no ratatui types. Keep rendering in `ui.rs` and I/O in `main.rs`.
+- The cursor is stored implicitly as the split between `left` and `right`; `cursor_pos()` is `left.chars().count()`.
+- Character wrapping uses `cassette_width()` (terminal width − 2); the cursor marker `│` occupies one display cell in the wrap calculation.
+- `VISIBLE_LINES` in `app.rs` controls how many text rows each cassette widget shows.
 
 ## Tools
 
