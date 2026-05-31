@@ -73,6 +73,12 @@ keyDelete      :: V.Key;  keyDelete      = V.KDel
 keyCursorLeft  :: V.Key;  keyCursorLeft  = V.KLeft
 keyCursorRight :: V.Key;  keyCursorRight = V.KRight
 
+-- Vty 6 / vty-unix may report Ctrl+N as raw byte 0x0E with no modifiers
+-- rather than KChar 'n' [MCtrl], depending on terminal/platform.
+isAddTapeKey :: V.Key -> [V.Modifier] -> Bool
+isAddTapeKey k ms = (k == keyAddTape && ms == modAddTape)
+                 || (k == V.KChar '\x0e' && null ms)
+
 -- Screen capacity: top separators per tape + bottom sep + reel stats + status + help
 uiOverheadRows :: Int
 uiOverheadRows = 4
