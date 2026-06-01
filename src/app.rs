@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use crate::cassette::Cassette;
 
 /// Number of text lines shown per cassette (excluding the separator row).
@@ -13,10 +15,12 @@ pub struct App {
     pub term_height: u16,
     pub status_msg: Option<String>,
     pub timer_secs: Option<u32>,
+    pub timer_original_secs: Option<u32>,
     pub reel_rotation: usize,
     pub word_goal: Option<usize>,
     pub should_quit: bool,
     pub visible_lines: usize,
+    pub started_at: SystemTime,
 }
 
 impl App {
@@ -28,10 +32,12 @@ impl App {
             term_height: 24,
             status_msg: None,
             timer_secs,
+            timer_original_secs: timer_secs,
             reel_rotation: 0,
             word_goal,
             should_quit: false,
             visible_lines: VISIBLE_LINES,
+            started_at: SystemTime::now(),
         }
     }
 

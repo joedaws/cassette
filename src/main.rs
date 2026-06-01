@@ -10,12 +10,15 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 mod app;
 mod cassette;
+mod config;
+mod output;
 mod ui;
 
 use app::App;
 
 fn main() -> io::Result<()> {
-    let (timer_secs, word_goal) = parse_args();
+    let (timer_secs, word_goal, note_name, print_stdout) = parse_args();
+    let cfg = config::load_config();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -36,9 +39,34 @@ fn main() -> io::Result<()> {
 
     result?;
 
-    for (i, cassette) in app.cassettes.iter().enumerate() {
-        println!("Words recorded to Cassette {}:\n", i + 1);
-        println!("{}", cassette.text());
+    if print_stdout {
+        for (i, cassette) in app.cassettes.iter().enumerate() {
+            println!("Words recorded to Cassette {}:\n", i + 1);
+            println!("{}", cassette.text());
+        }
+    } else {
+        let effective_notes_dir = cfg
+            .notes_dir
+            .clone()
+            .or_else(config::default_notes_dir);
+        let desired = config::resolve_output_path(
+            note_name.as_deref(),
+            &app.started_at,
+            effective_notes_dir.as_deref(),
+        );
+        let (path, conflicted) = config::find_available_path(&desired);
+        if conflicted {
+            eprintln!(
+                "cassette: '{}' already exists — saved to '{}' instead",
+                desired.display(),
+                path.display()
+            );
+        }
+        match output::write_markdown(&app, &path) {
+            Ok(()) if !conflicted => eprintln!("cassette: saved to '{}'", path.display()),
+            Ok(()) => {}
+            Err(e) => eprintln!("cassette: could not write '{}': {}", path.display(), e),
+        }
     }
 
     Ok(())
@@ -102,10 +130,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn parse_args() -> (Option<u32>, Option<usize>) {
+fn parse_args() -> (Option<u32>, Option<usize>, Option<String>, bool) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut timer = None;
     let mut word_goal = None;
+    let mut note_name: Option<String> = None;
+    let mut print_stdout = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -125,8 +155,16 @@ fn parse_args() -> (Option<u32>, Option<usize>) {
                 }
                 i += 2;
             }
+            "-o" | "--output" => {
+                print_stdout = true;
+                i += 1;
+            }
+            arg if !arg.starts_with('-') => {
+                note_name = Some(arg.to_string());
+                i += 1;
+            }
             _ => i += 1,
         }
     }
-    (timer, word_goal)
+    (timer, word_goal, note_name, print_stdout)
 }

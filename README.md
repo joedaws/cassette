@@ -50,6 +50,58 @@ Combine both flags to show timer and word count together:
 cassette -t 10 -w 500
 ```
 
+## Saving output
+
+When you quit, cassette saves your session as a markdown file. By default the file is
+written to `~/.local/share/cassette/notes/` with a timestamp filename:
+
+```
+~/.local/share/cassette/notes/2026-05-31T10-30-00.md
+```
+
+Pass a name to choose the filename:
+
+```
+cassette myjournal
+```
+
+Pass a path (anything containing `/`) to write to a specific location:
+
+```
+cassette ~/Documents/draft.md
+cassette /tmp/scratch
+```
+
+Add `-o` to print to stdout instead of saving a file:
+
+```
+cassette -o
+```
+
+### Configuration
+
+Create `~/.config/cassette/config.toml` to set a custom notes directory:
+
+```toml
+notes_dir = "/home/you/notes/cassette"
+```
+
+### Frontmatter
+
+Every saved file includes YAML frontmatter with session metadata:
+
+```markdown
+---
+date: 2026-05-31T10:30:00
+timer: 10m
+word_goal: 500
+word_count: 347
+cassettes: 2
+---
+```
+
+`timer` and `word_goal` are only included when those flags were passed.
+
 ## Releasing a new version
 
 1. Bump `version` in `Cargo.toml` (e.g. `0.7.0`) and merge all changes to `main`.
@@ -96,13 +148,6 @@ writing a certain amount of words
 
 ### Daily freewrite management
 What does it look like to use this tool to do a daily free-writing session?
-
-### Persist cassettes between sessions
-In freewriting what data would you want to persist between sessions?
-
-### Export for org mode and markdown
-Make it so that you can save your daily sessions to other formats and
-be able to view them that way.
 
 ### Cassettes return to the beginning after fixed number of characters so you can review what you
 
