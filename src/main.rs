@@ -1,4 +1,6 @@
-use std::io;
+use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -19,9 +21,40 @@ mod ui;
 
 use app::{App, Mode};
 
+/// Seconds between autosaves of a dirty session.
+const AUTOSAVE_SECS: u64 = 30;
+
+/// Where the session's markdown goes on quit (and during autosave).
+struct Sink {
+    path: PathBuf,
+    desired: PathBuf,
+    conflicted: bool,
+    /// Whether an autosave has created `path` already.
+    wrote: bool,
+}
+
+/// Best-effort terminal restore; must be safe to call twice and mid-panic.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+}
+
 fn main() -> io::Result<()> {
     let args = parse_args();
     let cfg = config::load_config();
+
+    // Restore the terminal before the default hook prints, so the panic
+    // message is readable and the shell isn't left in raw mode.
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -45,19 +78,45 @@ fn main() -> io::Result<()> {
     let mut app = App::new(args.timer_secs, args.word_goal, visible_lines);
     app.resize(size.width, size.height);
 
-    let result = run(&mut terminal, &mut app);
+    // Resolve the output file up front so the session can autosave to it.
+    let mut sink = if args.print_stdout {
+        None
+    } else {
+        let effective_notes_dir = cfg.notes_dir.clone().or_else(config::default_notes_dir);
+        let desired = config::resolve_output_path(
+            args.note_name.as_deref(),
+            &app.started_at,
+            effective_notes_dir.as_deref(),
+        );
+        let (path, conflicted) = config::find_available_path(&desired);
+        Some(Sink {
+            path,
+            desired,
+            conflicted,
+            wrote: false,
+        })
+    };
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        PopKeyboardEnhancementFlags,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        run(&mut terminal, &mut app, sink.as_mut())
+    }));
 
-    result?;
+    restore_terminal();
 
-    if args.print_stdout {
+    // Save before propagating any error or panic: the words matter most.
+    finish_session(&app, sink.as_mut());
+
+    match result {
+        Ok(r) => r?,
+        Err(payload) => panic::resume_unwind(payload),
+    }
+    Ok(())
+}
+
+/// Deliver the session's words: stdout in `-o` mode, the sink file otherwise.
+/// Empty sessions write nothing (and clean up an autosaved draft).
+fn finish_session(app: &App, sink: Option<&mut Sink>) {
+    let Some(sink) = sink else {
         for (i, cassette) in app.cassettes.iter().enumerate() {
             println!("Words recorded to Cassette {}:\n", i + 1);
             println!("{}", cassette.side_a_text());
@@ -66,40 +125,39 @@ fn main() -> io::Result<()> {
                 println!("\nSide B:\n\n{}", side_b);
             }
         }
-    } else {
-        let effective_notes_dir = cfg
-            .notes_dir
-            .clone()
-            .or_else(config::default_notes_dir);
-        let desired = config::resolve_output_path(
-            args.note_name.as_deref(),
-            &app.started_at,
-            effective_notes_dir.as_deref(),
-        );
-        let (path, conflicted) = config::find_available_path(&desired);
-        if conflicted {
-            eprintln!(
-                "cassette: '{}' already exists — saved to '{}' instead",
-                desired.display(),
-                path.display()
-            );
+        return;
+    };
+
+    if app.is_empty() {
+        if sink.wrote {
+            let _ = std::fs::remove_file(&sink.path);
         }
-        match output::write_markdown(&app, &path) {
-            Ok(()) if !conflicted => eprintln!("cassette: saved to '{}'", path.display()),
-            Ok(()) => {}
-            Err(e) => eprintln!("cassette: could not write '{}': {}", path.display(), e),
-        }
+        eprintln!("cassette: nothing recorded — no file written");
+        return;
     }
 
-    Ok(())
+    if sink.conflicted {
+        eprintln!(
+            "cassette: '{}' already exists — saved to '{}' instead",
+            sink.desired.display(),
+            sink.path.display()
+        );
+    }
+    match output::write_markdown(app, &sink.path) {
+        Ok(()) if !sink.conflicted => eprintln!("cassette: saved to '{}'", sink.path.display()),
+        Ok(()) => {}
+        Err(e) => eprintln!("cassette: could not write '{}': {}", sink.path.display(), e),
+    }
 }
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    mut sink: Option<&mut Sink>,
 ) -> io::Result<()> {
     let tick_rate = Duration::from_secs(1);
     let mut last_tick = Instant::now();
+    let mut last_autosave = Instant::now();
 
     loop {
         terminal.draw(|f| ui::render(f, app))?;
@@ -107,7 +165,10 @@ fn run(
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             match event::read()? {
-                Event::Key(key) => handle_key(app, key),
+                Event::Key(key) => {
+                    handle_key(app, key);
+                    app.check_goal();
+                }
                 Event::Resize(w, h) => app.resize(w, h),
                 _ => {}
             }
@@ -115,9 +176,30 @@ fn run(
 
         if last_tick.elapsed() >= tick_rate {
             app.tick_timer();
+            app.tick_status();
             // The tape rolls while the session runs, not only on keystrokes.
             app.advance_reel();
             last_tick = Instant::now();
+        }
+
+        if std::mem::take(&mut app.bell) {
+            let mut out = io::stdout();
+            let _ = out.write_all(b"\x07");
+            let _ = out.flush();
+        }
+
+        // Crash safety: flush dirty text to the note file every AUTOSAVE_SECS.
+        if let Some(s) = sink.as_deref_mut() {
+            if app.dirty
+                && !app.is_empty()
+                && last_autosave.elapsed() >= Duration::from_secs(AUTOSAVE_SECS)
+            {
+                if output::write_markdown(app, &s.path).is_ok() {
+                    s.wrote = true;
+                    app.dirty = false;
+                }
+                last_autosave = Instant::now();
+            }
         }
 
         if app.should_quit {
@@ -185,9 +267,22 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
             app.modify_focused(|c| c.delete());
             app.advance_reel();
         }
-        (KeyCode::Char(c), mods)
-            if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
+        // Readline muscle memory: delete word / to line start.
+        (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+            app.modify_focused(|c| {
+                c.snapshot();
+                c.delete_word_back();
+            });
+            app.advance_reel();
+        }
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+            app.modify_focused(|c| {
+                c.snapshot();
+                c.delete_to_line_start();
+            });
+            app.advance_reel();
+        }
+        (KeyCode::Char(c), mods) if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.modify_focused(|cas| cas.insert(c));
             app.advance_reel();
         }
@@ -204,7 +299,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         if let KeyCode::Char(c) = key.code {
             match (prefix, c) {
                 ('d', 'd') => {
-                    app.modify_focused(|c| c.delete_line());
+                    app.modify_focused(|c| {
+                        c.snapshot();
+                        c.delete_line();
+                    });
                     app.advance_reel();
                     return;
                 }
@@ -225,29 +323,49 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         {
             match c {
                 'q' => app.should_quit = true,
-                'i' => app.mode = Mode::Insert,
+                // Entering insert mode snapshots, so `u` undoes the whole burst.
+                'i' => {
+                    app.modify_focused(|c| c.snapshot());
+                    app.mode = Mode::Insert;
+                }
                 'a' => {
-                    app.modify_focused(|c| c.move_right());
+                    app.modify_focused(|c| {
+                        c.snapshot();
+                        c.move_right();
+                    });
                     app.mode = Mode::Insert;
                 }
                 'I' => {
-                    app.modify_focused(|c| c.move_row_start(cw));
+                    app.modify_focused(|c| {
+                        c.snapshot();
+                        c.move_row_start(cw);
+                    });
                     app.mode = Mode::Insert;
                 }
                 'A' => {
-                    app.modify_focused(|c| c.move_row_end(cw));
+                    app.modify_focused(|c| {
+                        c.snapshot();
+                        c.move_row_end(cw);
+                    });
                     app.mode = Mode::Insert;
                 }
                 'o' => {
-                    app.modify_focused(|c| c.open_below());
+                    app.modify_focused(|c| {
+                        c.snapshot();
+                        c.open_below();
+                    });
                     app.mode = Mode::Insert;
                     app.advance_reel();
                 }
                 'O' => {
-                    app.modify_focused(|c| c.open_above());
+                    app.modify_focused(|c| {
+                        c.snapshot();
+                        c.open_above();
+                    });
                     app.mode = Mode::Insert;
                     app.advance_reel();
                 }
+                'u' => app.modify_focused(|c| c.undo()),
                 'h' => app.modify_focused(|c| c.move_left()),
                 'l' => app.modify_focused(|c| c.move_right()),
                 'j' => app.modify_focused(|c| c.move_down(cw)),
@@ -258,7 +376,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                 'b' => app.modify_focused(|c| c.move_word_back()),
                 'G' => app.modify_focused(|c| c.move_text_end()),
                 'x' => {
-                    app.modify_focused(|c| c.delete());
+                    app.modify_focused(|c| {
+                        c.snapshot();
+                        c.delete();
+                    });
                     app.advance_reel();
                 }
                 'd' => app.pending = Some('d'),
@@ -271,7 +392,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Up => app.modify_focused(|c| c.move_up(cw)),
         KeyCode::Down => app.modify_focused(|c| c.move_down(cw)),
         KeyCode::Delete => {
-            app.modify_focused(|c| c.delete());
+            app.modify_focused(|c| {
+                c.snapshot();
+                c.delete();
+            });
             app.advance_reel();
         }
         _ => {}
@@ -286,6 +410,43 @@ struct Args {
     visible_lines: Option<usize>,
 }
 
+const USAGE: &str = "\
+cassette — a freewriting TUI
+
+Usage: cassette [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]         output note name or path
+                 (default: timestamped file in the notes dir)
+
+Options:
+  -t <MINUTES>   countdown timer in minutes
+  -w <WORDS>     word goal (winds the tape reel)
+  -l <LINES>     visible text rows per cassette (2-40)
+  -o, --output   print to stdout on quit instead of writing a file
+  -h, --help     print this help
+  -V, --version  print version
+";
+
+fn die(msg: &str) -> ! {
+    eprintln!("cassette: {msg}");
+    eprintln!("try 'cassette --help'");
+    std::process::exit(2);
+}
+
+/// Parse the value after a flag as a positive number, or exit with an error.
+fn positive<T: std::str::FromStr + PartialOrd + From<u8>>(flag: &str, val: Option<&String>) -> T {
+    let Some(v) = val else {
+        die(&format!("option '{flag}' needs a value"));
+    };
+    match v.parse::<T>() {
+        Ok(n) if n >= T::from(1u8) => n,
+        _ => die(&format!(
+            "invalid value '{v}' for '{flag}': expected a number >= 1"
+        )),
+    }
+}
+
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut timer = None;
@@ -296,39 +457,40 @@ fn parse_args() -> Args {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "-t" if i + 1 < args.len() => {
-                if let Ok(mins) = args[i + 1].parse::<u32>() {
-                    if mins > 0 {
-                        timer = Some(mins * 60);
-                    }
-                }
+            "-h" | "--help" => {
+                print!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("cassette {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "-t" => {
+                timer = Some(positive::<u32>("-t", args.get(i + 1)) * 60);
                 i += 2;
             }
-            "-w" if i + 1 < args.len() => {
-                if let Ok(goal) = args[i + 1].parse::<usize>() {
-                    if goal > 0 {
-                        word_goal = Some(goal);
-                    }
-                }
+            "-w" => {
+                word_goal = Some(positive::<u32>("-w", args.get(i + 1)) as usize);
                 i += 2;
             }
-            "-l" if i + 1 < args.len() => {
-                if let Ok(lines) = args[i + 1].parse::<usize>() {
-                    if lines > 0 {
-                        visible_lines = Some(lines);
-                    }
-                }
+            "-l" => {
+                visible_lines = Some(positive::<u32>("-l", args.get(i + 1)) as usize);
                 i += 2;
             }
             "-o" | "--output" => {
                 print_stdout = true;
                 i += 1;
             }
-            arg if !arg.starts_with('-') => {
+            arg if arg.starts_with('-') => {
+                die(&format!("unknown option '{arg}'"));
+            }
+            arg => {
+                if note_name.is_some() {
+                    die(&format!("unexpected extra argument '{arg}'"));
+                }
                 note_name = Some(arg.to_string());
                 i += 1;
             }
-            _ => i += 1,
         }
     }
     Args {

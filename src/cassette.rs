@@ -19,16 +19,34 @@ pub struct Cassette {
     back_left: String,
     back_right: String,
     pub side: Side,
+    /// Undo snapshots of the active side, oldest first.
+    undo: Vec<(String, String)>,
+    /// Undo snapshots of the side currently flipped away.
+    back_undo: Vec<(String, String)>,
+}
+
+/// Maximum undo snapshots kept per cassette side.
+const UNDO_DEPTH: usize = 100;
+
+/// Terminal cells occupied by `c` (0 for combining marks, 2 for CJK/emoji).
+pub fn char_width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+fn cells(chars: &[char]) -> usize {
+    chars.iter().map(|&c| char_width(c)).sum()
 }
 
 /// Display rows for `chars` word-wrapped at `width` columns, breaking on '\n'.
 /// Returns `(start, end)` char-index spans; a terminating '\n' is not part of its span.
 ///
-/// Wrapping happens at word boundaries: when a word overflows the row it moves
-/// whole to the next row, and the space before it stays (trailing) on the previous
-/// row, so wrapped rows never start with a space. Words longer than `width` are
-/// hard-broken. Runs of trailing spaces hang past the right edge rather than wrap
-/// (renderers clip them), like classic word processors.
+/// Columns are terminal cells, not chars: CJK and emoji count as 2, combining
+/// marks as 0 (`char_width`). Wrapping happens at word boundaries: when a word
+/// overflows the row it moves whole to the next row, and the space before it
+/// stays (trailing) on the previous row, so wrapped rows never start with a
+/// space. Words longer than `width` are hard-broken. Runs of trailing spaces
+/// hang past the right edge rather than wrap (renderers clip them), like
+/// classic word processors.
 pub fn wrap_spans(chars: &[char], width: usize) -> Vec<(usize, usize)> {
     let width = width.max(1);
     let mut spans = Vec::new();
@@ -44,7 +62,7 @@ pub fn wrap_spans(chars: &[char], width: usize) -> Vec<(usize, usize)> {
             last_break = None;
             continue;
         }
-        col += 1;
+        col += char_width(c);
         if col > width && c != ' ' {
             match last_break {
                 Some(b) if b > start => {
@@ -57,7 +75,7 @@ pub fn wrap_spans(chars: &[char], width: usize) -> Vec<(usize, usize)> {
                     start = i;
                 }
             }
-            col = i - start + 1;
+            col = cells(&chars[start..=i]);
             last_break = None;
         }
         if c == ' ' {
@@ -128,10 +146,29 @@ impl Cassette {
     pub fn flip(&mut self) {
         std::mem::swap(&mut self.left, &mut self.back_left);
         std::mem::swap(&mut self.right, &mut self.back_right);
+        std::mem::swap(&mut self.undo, &mut self.back_undo);
         self.side = match self.side {
             Side::A => Side::B,
             Side::B => Side::A,
         };
+    }
+
+    /// Record the active side's state so `undo` can restore it.
+    /// Call before a destructive edit or when entering insert mode.
+    pub fn snapshot(&mut self) {
+        if self.undo.len() >= UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+        self.undo.push((self.left.clone(), self.right.clone()));
+    }
+
+    /// Restore the most recent snapshot of the active side (vim `u`).
+    /// Text and cursor come back together; a no-op with no history.
+    pub fn undo(&mut self) {
+        if let Some((left, right)) = self.undo.pop() {
+            self.left = left;
+            self.right = right;
+        }
     }
 
     /// Text of the side currently flipped away.
@@ -159,7 +196,6 @@ impl Cassette {
         let col = self.left.chars().rev().take_while(|&c| c != '\n').count() + 1;
         (line, col)
     }
-
 
     fn chars_and_pos(&self) -> (Vec<char>, usize) {
         let pos = self.left.chars().count();
@@ -307,6 +343,34 @@ impl Cassette {
         let (_, end) = line_bounds(&chars, pos);
         self.set_cursor(end);
         self.insert('\n');
+    }
+
+    /// Delete the word before the cursor (readline Ctrl+W).
+    /// Stops at a line boundary; at the start of a line it removes the '\n',
+    /// joining onto the previous line.
+    pub fn delete_word_back(&mut self) {
+        let before = self.left.len();
+        while self
+            .left
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_whitespace() && c != '\n')
+        {
+            self.left.pop();
+        }
+        while self.left.chars().last().is_some_and(|c| !c.is_whitespace()) {
+            self.left.pop();
+        }
+        if self.left.len() == before && self.left.ends_with('\n') {
+            self.left.pop();
+        }
+    }
+
+    /// Delete from the cursor back to the start of the logical line (readline Ctrl+U).
+    pub fn delete_to_line_start(&mut self) {
+        while self.left.chars().last().is_some_and(|c| c != '\n') {
+            self.left.pop();
+        }
     }
 
     /// Open a new logical line above the current one and move onto it (vim `O`).
@@ -588,6 +652,80 @@ mod tests {
         c.delete_line();
         assert_eq!(c.text(), "");
         assert_eq!(c.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn wrap_counts_wide_chars_as_two_cells() {
+        // Four CJK chars are 8 cells: at width 4 they wrap two per row.
+        let chars: Vec<char> = "日本語字".chars().collect();
+        assert_eq!(wrap_spans(&chars, 4), vec![(0, 2), (2, 4)]);
+    }
+
+    #[test]
+    fn wrap_word_boundary_uses_cell_width() {
+        // "日本 " is 5 cells; "kana" would end at cell 9 > 8, so it wraps whole.
+        let chars: Vec<char> = "日本 kana".chars().collect();
+        assert_eq!(wrap_spans(&chars, 8), vec![(0, 3), (3, 7)]);
+    }
+
+    #[test]
+    fn wrap_ignores_zero_width_chars() {
+        // Combining acute accents take no cells: "e\u{301}" repeated stays one row.
+        let chars: Vec<char> = "e\u{301}e\u{301}e\u{301}".chars().collect();
+        assert_eq!(wrap_spans(&chars, 3), vec![(0, 6)]);
+    }
+
+    #[test]
+    fn undo_restores_text_and_cursor() {
+        let mut c = cassette_with("one\ntwo\nthree", 5); // on "two"
+        c.snapshot();
+        c.delete_line();
+        assert_eq!(c.text(), "one\nthree");
+        c.undo();
+        assert_eq!(c.text(), "one\ntwo\nthree");
+        assert_eq!(c.cursor_pos(), 5, "cursor comes back with the text");
+        c.undo(); // empty history: no-op
+        assert_eq!(c.text(), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn undo_history_is_per_side() {
+        let mut c = cassette_with("side a", 6);
+        c.snapshot();
+        c.insert('!');
+        c.flip();
+        c.undo(); // side B has no history: no-op
+        assert_eq!(c.text(), "");
+        c.flip();
+        c.undo();
+        assert_eq!(c.text(), "side a", "side A history survives the flip");
+    }
+
+    #[test]
+    fn delete_word_back_takes_word_and_trailing_space() {
+        let mut c = cassette_with("hello world ", 12);
+        c.delete_word_back();
+        assert_eq!(c.text(), "hello ");
+        c.delete_word_back();
+        assert_eq!(c.text(), "");
+    }
+
+    #[test]
+    fn delete_word_back_stops_at_line_start_then_joins() {
+        let mut c = cassette_with("one\ntwo", 7);
+        c.delete_word_back();
+        assert_eq!(c.text(), "one\n", "deletes the word, not past the newline");
+        c.delete_word_back();
+        assert_eq!(c.text(), "one", "at line start it removes the newline");
+    }
+
+    #[test]
+    fn delete_to_line_start_spares_previous_lines() {
+        let mut c = cassette_with("one\ntwo three", 13);
+        c.delete_to_line_start();
+        assert_eq!(c.text(), "one\n");
+        c.delete_to_line_start(); // already at line start: no-op
+        assert_eq!(c.text(), "one\n");
     }
 
     #[test]

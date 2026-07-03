@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Mode, GUTTER_WIDTH, MINIMIZED_ROWS};
-use crate::cassette::{pos_to_row_col, wrap_spans, Cassette, Side};
+use crate::cassette::{char_width, pos_to_row_col, wrap_spans, Cassette, Side};
 
 /// Accent color for all "you are on side B" cues.
 const SIDE_B_ACCENT: Color = Color::Yellow;
@@ -25,7 +25,9 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // Only the window of cassettes starting at `cassette_scroll` is laid out:
     // the focused one full-height, the others minimized to their last line.
-    let first = app.cassette_scroll.min(app.cassettes.len().saturating_sub(1));
+    let first = app
+        .cassette_scroll
+        .min(app.cassettes.len().saturating_sub(1));
     let n = app
         .visible_cassette_count()
         .min(app.cassettes.len() - first);
@@ -113,9 +115,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(status), chunks[n + 2]);
 
     let help = match app.mode {
-        Mode::Insert => "Esc:normal  Enter:newline  ^F:flip side  Tab:next  ^N:new  ^C:quit",
+        Mode::Insert => "Esc:normal  Enter:newline  ^W:del word  ^F:flip side  Tab:next  ^N:new  ^C:quit",
         Mode::Normal => {
-            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  gg/G:jump  ^F:flip  q:quit"
+            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  ^F:flip  q:quit"
         }
     };
     frame.render_widget(Paragraph::new(help), chunks[n + 3]);
@@ -223,10 +225,14 @@ fn render_cassette_focused(
         ..area
     };
 
-    // Display = left chars + cursor marker cell + right chars, wrapped at cw columns.
+    // Insert mode shows the cursor as a dedicated bar cell between left and
+    // right. Normal mode overlays a block on the char under the cursor instead,
+    // so columns stay true; the text may reflow by one cell on mode switch.
     let cursor_disp = cassette.cursor_pos();
     let mut display: Vec<char> = cassette.left.chars().collect();
-    display.push('│');
+    if mode == Mode::Insert {
+        display.push('│');
+    }
     display.extend(cassette.right.chars());
 
     let row_spans = wrap_spans(&display, cw);
@@ -276,21 +282,25 @@ fn render_cassette_focused(
         let mut rendered = 0;
         if let Some(&(disp_start, disp_end)) = row_spans.get(line_idx) {
             for (offset, &ch) in display[disp_start..disp_end].iter().enumerate() {
+                // Insert mode: the bar cell. Normal mode: block over the char.
                 let is_cursor = disp_start + offset == cursor_disp;
-                // In normal mode the cursor is a solid block; in insert mode a bar.
-                let c = if is_cursor && mode == Mode::Normal {
-                    ' '
-                } else {
-                    ch
-                };
                 let style = if is_cursor {
                     Style::new().add_modifier(Modifier::REVERSED)
                 } else {
                     text_style
                 };
-                spans.push(Span::styled(c.to_string(), style));
+                spans.push(Span::styled(ch.to_string(), style));
+                rendered += char_width(ch);
             }
-            rendered = disp_end - disp_start;
+            // Normal-mode cursor at the row's end (before a '\n' or at the end
+            // of the text) has no char to sit on: draw a block on a space.
+            if mode == Mode::Normal && line_idx == cursor_row && cursor_disp >= disp_end {
+                spans.push(Span::styled(
+                    " ",
+                    Style::new().add_modifier(Modifier::REVERSED),
+                ));
+                rendered += 1;
+            }
         }
 
         if rendered < cw {
@@ -318,7 +328,11 @@ fn render_cassette_min(frame: &mut Frame, area: Rect, cassette: &Cassette, cw: u
     };
 
     let (bg, fg) = (UNFOCUSED_BG, UNFOCUSED_FG);
-    let chars: Vec<char> = cassette.left.chars().chain(cassette.right.chars()).collect();
+    let chars: Vec<char> = cassette
+        .left
+        .chars()
+        .chain(cassette.right.chars())
+        .collect();
     let row_spans = wrap_spans(&chars, cw);
     let line_nums = span_line_numbers(&row_spans);
     let last = row_spans.len() - 1;
@@ -332,7 +346,7 @@ fn render_cassette_min(frame: &mut Frame, area: Rect, cassette: &Cassette, cw: u
         Style::new().fg(gutter_fg).bg(bg),
     ));
     let text: String = chars[start..end].iter().collect();
-    let rendered = end - start;
+    let rendered: usize = chars[start..end].iter().map(|&c| char_width(c)).sum();
     spans.push(Span::styled(text, Style::new().fg(fg).bg(bg)));
     if rendered < cw {
         spans.push(Span::styled(" ".repeat(cw - rendered), Style::new().bg(bg)));
@@ -366,10 +380,17 @@ fn render_reel_stats(frame: &mut Frame, area: Rect, app: &App) {
     let left_pad = center_w.saturating_sub(stats_len) / 2;
     let right_pad = center_w.saturating_sub(left_pad + stats_len);
 
-    let stats_style = match app.timer_secs {
-        Some(0) => Style::new().fg(Color::Black).bg(Color::Red),
-        Some(_) => Style::new().fg(Color::Green),
-        None => Style::new(),
+    // A reached word goal is the happiest state and wins over the expired-timer
+    // red; the reel staying fully wound keeps the durable cue.
+    let goal_met = app.word_goal.is_some_and(|g| app.total_word_count() >= g);
+    let stats_style = if goal_met {
+        Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        match app.timer_secs {
+            Some(0) => Style::new().fg(Color::Black).bg(Color::Red),
+            Some(_) => Style::new().fg(Color::Green),
+            None => Style::new(),
+        }
     };
 
     let line = Line::from(vec![
@@ -406,11 +427,7 @@ fn reel_pattern(r: f64) -> String {
 fn lerp_color(t: f64, a: Color, b: Color) -> Color {
     let (ar, ag, ab) = rgb(a);
     let (br, bg, bb) = rgb(b);
-    Color::Rgb(
-        lerp_u8(t, ar, br),
-        lerp_u8(t, ag, bg),
-        lerp_u8(t, ab, bb),
-    )
+    Color::Rgb(lerp_u8(t, ar, br), lerp_u8(t, ag, bg), lerp_u8(t, ab, bb))
 }
 
 fn rgb(c: Color) -> (u8, u8, u8) {

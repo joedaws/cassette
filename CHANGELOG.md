@@ -28,6 +28,16 @@ and this project adheres to the
 ## 0.1.0.0 - 2025-11-13
 
 ### Changed
+- Normal-mode block cursor hides nothing and shifts text by a cell (#28)
+- Insert-mode writer shortcuts: Ctrl+W delete word, Ctrl+U delete to line start (#27)
+- Do not write a note file for an empty session (#26)
+- Add -h/--help and --version; stop silently ignoring bad flags (#25)
+- Celebrate reaching the word goal (#24)
+- Timer expiry gives no signal beyond the stats bar turning red (#23)
+- Undo: dd/x/backspace deletions are irrecoverable (#22)
+- Autosave session to a draft file while writing (#21)
+- Wide chars (CJK, emoji) break wrapping and cursor alignment (#20)
+- Writing is lost when run() errors or the app panics (#19)
 - Update the graphics and animation. The progress bar appears to do nothing and is not helpful. It could just be that I don't understand it and that is the issue. (#17)
 - Add B side to each cassette accessible by shift + enter or return. This flips the current cassette to a new buffer that you can use as a scratch pad to get some words out before flipping back to side A to continue the main thought (#14)
 - The cassette in focus should not have a custom background color, instead it should just use the same background as the shell or terminal from which it was spawned. The out of focus cassettes can keep their background to visually separate themselves from the other ones. (#16)

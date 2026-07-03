@@ -49,7 +49,18 @@ pub struct App {
     pub mode: Mode,
     /// First key of a pending two-key normal-mode sequence (`dd`, `gg`).
     pub pending: Option<char>,
+    /// Set on any cassette mutation; cleared by the autosaver in `main.rs`.
+    pub dirty: bool,
+    /// One-shot request for a terminal bell, consumed by `main.rs`.
+    pub bell: bool,
+    /// Remaining seconds before a transient `status_msg` clears itself.
+    status_ticks: Option<u32>,
+    /// The word-goal celebration fires once per session.
+    goal_announced: bool,
 }
+
+/// How long transient status messages (timer up, goal reached) stay visible.
+const STATUS_FLASH_SECS: u32 = 8;
 
 impl App {
     pub fn new(
@@ -75,6 +86,54 @@ impl App {
             started_at: SystemTime::now(),
             mode: Mode::Insert,
             pending: None,
+            dirty: false,
+            bell: false,
+            status_ticks: None,
+            goal_announced: false,
+        }
+    }
+
+    /// Show `msg` on the status line for `STATUS_FLASH_SECS`, with a bell.
+    fn flash(&mut self, msg: String) {
+        self.status_msg = Some(msg);
+        self.status_ticks = Some(STATUS_FLASH_SECS);
+        self.bell = true;
+    }
+
+    fn clear_status(&mut self) {
+        self.status_msg = None;
+        self.status_ticks = None;
+    }
+
+    /// True when nothing has been written on any side of any cassette.
+    pub fn is_empty(&self) -> bool {
+        self.cassettes
+            .iter()
+            .all(|c| c.side_a_text().trim().is_empty() && c.side_b_text().trim().is_empty())
+    }
+
+    /// Announce the word goal the first time total words reach it.
+    pub fn check_goal(&mut self) {
+        if self.goal_announced {
+            return;
+        }
+        if let Some(goal) = self.word_goal {
+            let words = self.total_word_count();
+            if words >= goal {
+                self.goal_announced = true;
+                self.flash(format!("goal reached — {} words. keep rolling!", words));
+            }
+        }
+    }
+
+    /// Count down a transient status message; clears it when time is up.
+    pub fn tick_status(&mut self) {
+        if let Some(t) = self.status_ticks {
+            if t <= 1 {
+                self.clear_status();
+            } else {
+                self.status_ticks = Some(t - 1);
+            }
         }
     }
 
@@ -121,27 +180,29 @@ impl App {
         }
         self.cassettes.push(Cassette::new());
         self.focus_idx = self.cassettes.len() - 1;
-        self.status_msg = None;
+        self.dirty = true;
+        self.clear_status();
         self.ensure_focus_visible();
     }
 
     pub fn focus_next(&mut self) {
         let n = self.cassettes.len().max(1);
         self.focus_idx = (self.focus_idx + 1) % n;
-        self.status_msg = None;
+        self.clear_status();
         self.ensure_focus_visible();
     }
 
     pub fn focus_prev(&mut self) {
         let n = self.cassettes.len().max(1);
         self.focus_idx = (self.focus_idx + n - 1) % n;
-        self.status_msg = None;
+        self.clear_status();
         self.ensure_focus_visible();
     }
 
     pub fn modify_focused<F: FnOnce(&mut Cassette)>(&mut self, f: F) {
         if let Some(c) = self.cassettes.get_mut(self.focus_idx) {
             f(c);
+            self.dirty = true;
         }
     }
 
@@ -149,6 +210,9 @@ impl App {
         if let Some(n) = self.timer_secs {
             if n > 0 {
                 self.timer_secs = Some(n - 1);
+                if n == 1 {
+                    self.flash("time — keep going, or q to save".into());
+                }
             }
         }
     }
@@ -287,7 +351,75 @@ mod tests {
 
         let app = App::new(None, None, Some(VISIBLE_LINES));
         assert_eq!(app.word_goal, None);
-        assert_eq!(app.tape_ratio(), 0.0, "no goal: measured against default spool");
+        assert_eq!(
+            app.tape_ratio(),
+            0.0,
+            "no goal: measured against default spool"
+        );
+    }
+
+    #[test]
+    fn timer_expiry_flashes_status_and_bell_once() {
+        let mut app = App::new(Some(2), None, Some(VISIBLE_LINES));
+        app.tick_timer();
+        assert!(app.status_msg.is_none());
+        app.tick_timer(); // 1 -> 0
+        assert!(app.status_msg.as_deref().unwrap().contains("time"));
+        assert!(app.bell);
+        app.bell = false;
+        app.tick_timer(); // already 0: stays quiet
+        assert!(!app.bell);
+        assert_eq!(app.timer_secs, Some(0));
+    }
+
+    #[test]
+    fn goal_reached_announces_once() {
+        let mut app = App::new(None, Some(3), Some(VISIBLE_LINES));
+        app.modify_focused(|c| {
+            for ch in "one two three".chars() {
+                c.insert(ch);
+            }
+        });
+        app.check_goal();
+        assert!(app.status_msg.as_deref().unwrap().contains("goal reached"));
+        assert!(app.bell);
+        app.bell = false;
+        app.status_msg = None;
+        app.check_goal(); // one-shot: no second announcement
+        assert!(app.status_msg.is_none());
+        assert!(!app.bell);
+    }
+
+    #[test]
+    fn transient_status_clears_after_countdown() {
+        let mut app = App::new(Some(1), None, Some(VISIBLE_LINES));
+        app.tick_timer(); // fires the flash
+        assert!(app.status_msg.is_some());
+        for _ in 0..20 {
+            app.tick_status();
+        }
+        assert!(app.status_msg.is_none(), "flash expires on its own");
+    }
+
+    #[test]
+    fn is_empty_ignores_whitespace_and_sees_side_b() {
+        let mut app = test_app();
+        assert!(app.is_empty());
+        app.modify_focused(|c| c.insert(' '));
+        assert!(app.is_empty(), "whitespace-only still counts as empty");
+        app.modify_focused(|c| {
+            c.flip();
+            c.insert('x');
+        });
+        assert!(!app.is_empty(), "side B text counts");
+    }
+
+    #[test]
+    fn modify_focused_marks_dirty() {
+        let mut app = test_app();
+        assert!(!app.dirty);
+        app.modify_focused(|c| c.insert('a'));
+        assert!(app.dirty);
     }
 
     #[test]
