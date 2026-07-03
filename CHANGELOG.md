@@ -28,6 +28,7 @@ and this project adheres to the
 ## 0.1.0.0 - 2025-11-13
 
 ### Changed
+- Update the graphics and animation. The progress bar appears to do nothing and is not helpful. It could just be that I don't understand it and that is the issue. (#17)
 - Add B side to each cassette accessible by shift + enter or return. This flips the current cassette to a new buffer that you can use as a scratch pad to get some words out before flipping back to side A to continue the main thought (#14)
 - The cassette in focus should not have a custom background color, instead it should just use the same background as the shell or terminal from which it was spawned. The out of focus cassettes can keep their background to visually separate themselves from the other ones. (#16)
 - add minimization of cassette not in focus to last line. Still show the line number (#15)

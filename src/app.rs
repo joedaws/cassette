@@ -21,6 +21,9 @@ pub const GUTTER_WIDTH: usize = 4;
 /// Rows of a minimized (unfocused) cassette: separator + its last text line.
 pub const MINIMIZED_ROWS: u16 = 2;
 
+/// Reel "tape length" in words when no word goal is set.
+pub const DEFAULT_SPOOL_WORDS: usize = 500;
+
 /// Vim-style editing mode for the focused cassette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -164,12 +167,12 @@ impl App {
         self.cassettes.iter().map(|c| c.word_count()).sum()
     }
 
-    /// Cursor position as a ratio 0.0..=1.0 for the focused cassette.
-    pub fn focused_cursor_ratio(&self) -> f64 {
-        let c = &self.cassettes[self.focus_idx];
-        let left = c.cursor_pos();
-        let total = c.text().chars().count().max(1);
-        left as f64 / total as f64
+    /// How much tape has wound onto the take-up reel: total words written over
+    /// the word goal, or over a default spool of `DEFAULT_SPOOL_WORDS` when no
+    /// goal is set. 0.0..=1.0.
+    pub fn tape_ratio(&self) -> f64 {
+        let spool = self.word_goal.unwrap_or(DEFAULT_SPOOL_WORDS).max(1);
+        (self.total_word_count() as f64 / spool as f64).min(1.0)
     }
 
     /// Number of cassettes hidden above and below the visible window.
@@ -258,6 +261,33 @@ mod tests {
         app.focus_prev();
         assert_eq!(app.focus_idx, 2);
         assert_eq!(app.cassette_scroll, 2);
+    }
+
+    #[test]
+    fn tape_ratio_tracks_words_against_goal() {
+        let mut app = App::new(None, Some(10), Some(VISIBLE_LINES));
+        assert_eq!(app.tape_ratio(), 0.0);
+        app.modify_focused(|c| {
+            for ch in "one two three four five".chars() {
+                c.insert(ch);
+            }
+        });
+        assert_eq!(app.tape_ratio(), 0.5);
+    }
+
+    #[test]
+    fn tape_ratio_clamps_and_defaults_to_spool() {
+        let mut app = App::new(None, Some(2), Some(VISIBLE_LINES));
+        app.modify_focused(|c| {
+            for ch in "a b c d".chars() {
+                c.insert(ch);
+            }
+        });
+        assert_eq!(app.tape_ratio(), 1.0, "past the goal the reel stays full");
+
+        let app = App::new(None, None, Some(VISIBLE_LINES));
+        assert_eq!(app.word_goal, None);
+        assert_eq!(app.tape_ratio(), 0.0, "no goal: measured against default spool");
     }
 
     #[test]

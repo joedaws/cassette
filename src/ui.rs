@@ -224,7 +224,7 @@ fn render_cassette_focused(
     };
 
     // Display = left chars + cursor marker cell + right chars, wrapped at cw columns.
-    let cursor_disp = cassette.left.chars().count();
+    let cursor_disp = cassette.cursor_pos();
     let mut display: Vec<char> = cassette.left.chars().collect();
     display.push('│');
     display.extend(cassette.right.chars());
@@ -346,10 +346,16 @@ fn render_cassette_min(frame: &mut Frame, area: Rect, cassette: &Cassette, cw: u
 }
 
 fn render_reel_stats(frame: &mut Frame, area: Rect, app: &App) {
-    let ratio = app.focused_cursor_ratio();
+    // Tape winds from the supply reel (right) onto the take-up reel (left)
+    // as words are recorded; both reels fill/empty from the hub outward.
+    let ratio = app.tape_ratio();
     let hub = HUB_FRAMES[app.reel_rotation % HUB_FRAMES.len()];
     let left_reel = format!("{}{}", hub, reel_pattern(ratio));
-    let right_reel = format!("{}{}", reel_pattern(1.0 - ratio), hub);
+    let right_reel = format!(
+        "{}{}",
+        reel_pattern(1.0 - ratio).chars().rev().collect::<String>(),
+        hub
+    );
     let stats = app.format_stats();
 
     let total_w = area.width as usize;
@@ -377,18 +383,23 @@ fn render_reel_stats(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn reel_pattern(r: f64) -> &'static str {
-    if r <= 0.0 {
-        "·····"
-    } else if r <= 0.25 {
-        "·░░░·"
-    } else if r <= 0.50 {
-        "░░░░░"
-    } else if r <= 0.75 {
-        "▒▒▒▒▒"
-    } else {
-        "▓▓▓▓▓"
-    }
+/// Five tape cells that fill `·→░→▒→▓` from the hub outward, so the reel
+/// visibly winds a step for every ~1/15th of the spool.
+fn reel_pattern(r: f64) -> String {
+    (0..5)
+        .map(|i| {
+            let cell = (r.clamp(0.0, 1.0) * 5.0) - i as f64;
+            if cell >= 1.0 {
+                '▓'
+            } else if cell >= 0.5 {
+                '▒'
+            } else if cell > 0.0 {
+                '░'
+            } else {
+                '·'
+            }
+        })
+        .collect()
 }
 
 /// Linearly interpolate between two colors: t=1.0 gives `a`, t=0.0 gives `b`.

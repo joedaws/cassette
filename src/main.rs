@@ -115,6 +115,8 @@ fn run(
 
         if last_tick.elapsed() >= tick_rate {
             app.tick_timer();
+            // The tape rolls while the session runs, not only on keystrokes.
+            app.advance_reel();
             last_tick = Instant::now();
         }
 
