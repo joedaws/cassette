@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cargo build                    # compile
 cargo test                     # run unit tests
 cargo run -- -t 10 -w 500      # run with 10-min timer and 500-word goal
+cargo run -- -l 8              # run with 8 visible text rows per cassette
 cargo install --path .         # install `cassette` binary to PATH
 ```
 
@@ -17,20 +18,26 @@ cargo install --path .         # install `cassette` binary to PATH
 
 ### Source layout
 
-**`src/cassette.rs`** — `Cassette` is a cursor-zipper: text is split into `left` (before cursor) and `right` (after cursor). Operations `insert`, `backspace`, `delete`, `move_left`, and `move_right` manipulate this split. Pure data model with no rendering logic.
+**`src/cassette.rs`** — `Cassette` is a cursor-zipper: text is split into `left` (before cursor) and `right` (after cursor); text may contain `\n`. Each cassette has two sides like a tape: the zipper always holds the active side, and `flip()` swaps it with the stored back buffer (`Side::A`/`Side::B`), so each side keeps its own cursor. Side B is a scratch pad; output writes it under a `## Side B` heading when non-empty, and `word_count` covers both sides. Basic ops (`insert`, `backspace`, `delete`, `move_left/right`) plus vim motions (`move_up/down`, `move_row_start/end`, `move_word_forward/back`, `move_text_start/end`, `delete_line`, `open_below/above`). Width-aware motions take the wrap width as a parameter. `wrap_spans`/`pos_to_row_col` compute display rows (character wrap at width, hard break on `\n`) and are shared with `ui.rs`. Pure data model with no rendering logic.
 
-**`src/app.rs`** — `App` holds all application state: the list of cassettes, focus index, terminal dimensions, timer, word goal, and reel animation frame. State transitions (`add_cassette`, `focus_next`, `tick_timer`, etc.) are plain `&mut self` methods with no I/O. `modify_focused` accepts a closure so callers in `main.rs` can apply any `Cassette` operation.
+**`src/app.rs`** — `App` holds all application state: the list of cassettes, focus index, terminal dimensions, timer, word goal, reel animation frame, editing `Mode` (`Insert`/`Normal`), and `pending` prefix key for two-key sequences (`dd`, `gg`). State transitions are plain `&mut self` methods with no I/O. `modify_focused` accepts a closure so callers in `main.rs` can apply any `Cassette` operation.
 
-**`src/ui.rs`** — All ratatui rendering. `render` builds a vertical layout with one chunk per cassette plus the stats bar, status line, and help row. Each cassette shows `VISIBLE_LINES` (6) rows of character-wrapped text; the viewport scrolls to keep the cursor at the bottom row and fades older lines toward the cassette background color.
+**`src/ui.rs`** — All ratatui rendering. `render` builds a vertical layout with one chunk per *visible* cassette plus the stats bar, a vim-style info line (mode, ln/col, char count, cassette i/n — overridden by `status_msg`), and help row. Cassettes can exceed the screen (up to `MAX_CASSETTES`, 36): `App.cassette_scroll` is the first visible cassette, `ensure_focus_visible` keeps the focused one in the window, and separator rows show "N more ↑/↓" hints for cassettes scrolled out of view. The focused cassette renders full-height on the terminal's default background with a line-number gutter (`GUTTER_WIDTH` cols, `~` on rows past the end); its viewport scrolls typewriter-style (cursor row centered, clamped at the ends) and rows fade toward both viewport edges via `DIM`/`DarkGray` steps. Unfocused cassettes are minimized to their last line (colored background, line number shown). The cursor renders as a bar `│` in insert mode and a solid block in normal mode (both `REVERSED`).
 
-**`src/main.rs`** — Terminal setup/teardown (raw mode, alternate screen), the crossterm event loop, key dispatch via `handle_key`, and CLI arg parsing (`-t`, `-w`). Prints cassette text to stdout on quit.
+**`src/main.rs`** — Terminal setup/teardown (raw mode, alternate screen), the crossterm event loop, modal key dispatch (`handle_key` → `handle_insert_key`/`handle_normal_key`), and CLI arg parsing (`-t`, `-w`, `-l`, `-o`). Writes markdown on quit (or stdout with `-o`).
+
+### Key bindings
+
+- Both modes: Tab/Shift+Tab switch cassettes, Ctrl+N new cassette, Ctrl+F (or Shift+Enter on kitty-protocol terminals) flips the cassette to its other side, Ctrl+C quit. Side B cues: yellow `╡ SIDE B ╞` woven into the separator, yellow line-number gutter, `· side B` in the info line, `╡ B ╞` tag on minimized cassettes.
+- Insert: type to write, Enter for newline, Esc → normal mode.
+- Normal (mini vim): `h j k l`, `w b`, `0 $`, `gg G`, `x`, `dd`, `i a I A o O`, `q` quits.
 
 ### Conventions
 
 - `App` and `Cassette` are pure: no I/O, no ratatui types. Keep rendering in `ui.rs` and I/O in `main.rs`.
 - The cursor is stored implicitly as the split between `left` and `right`; `cursor_pos()` is `left.chars().count()`.
-- Character wrapping uses `cassette_width()` (terminal width − 2); the cursor marker `│` occupies one display cell in the wrap calculation.
-- `VISIBLE_LINES` in `app.rs` controls how many text rows each cassette widget shows.
+- Wrapping is word-boundary (`wrap_spans`): overflowing words move whole to the next row, the space stays trailing on the previous row (wrapped rows never start with a space), words longer than the width hard-break, and trailing space runs hang past the edge. Width comes from `cassette_width()` (terminal width − 2 − `GUTTER_WIDTH`); the cursor marker occupies one display cell in the wrap calculation. `j`/`k`/`0`/`$` operate on display rows; `dd`/`o`/`O` operate on logical (`\n`-delimited) lines.
+- Rows per cassette default to `VISIBLE_LINES` (5) and are configurable via the `-l` CLI flag or `visible_lines` in `~/.config/cassette/config.toml`, clamped to `MIN_VISIBLE_LINES..=MAX_VISIBLE_LINES`.
 
 ## Tools
 

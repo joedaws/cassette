@@ -28,6 +28,12 @@ and this project adheres to the
 ## 0.1.0.0 - 2025-11-13
 
 ### Changed
+- Add B side to each cassette accessible by shift + enter or return. This flips the current cassette to a new buffer that you can use as a scratch pad to get some words out before flipping back to side A to continue the main thought (#14)
+- The cassette in focus should not have a custom background color, instead it should just use the same background as the shell or terminal from which it was spawned. The out of focus cassettes can keep their background to visually separate themselves from the other ones. (#16)
+- add minimization of cassette not in focus to last line. Still show the line number (#15)
+- add line numbering for each casset and also a similar to vim info line with number of characters (#13)
+- Update the datastructure for each cassettes to be better for multiline. Right now sometimes the new line can start with a space, this looks awkward but I think there are classic solutions to this from word editors, even though this is a freewriting app and not a word editor. (#18)
+- Currently you can only create the same number of cassettes as will fit in the current size of the terminal. Let the user create as many cassettes as they like and implement somekind of scorlling view to accommodate new cassettes that require more space. (#8)
 - When users submit a file name when invoking cassette, store the output of the session in that file as markdown. Store some basic metadata like time of writing and the parameters of the sessoin in frontmatter of the markdown (#7)
 - update the .github workflows from stack and haskell working to new rust and cargo (#9)
 - update .gitignore so that it is appropriate for a rust project (#10)

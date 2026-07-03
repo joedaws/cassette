@@ -5,6 +5,8 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
     pub notes_dir: Option<PathBuf>,
+    /// Text rows shown per cassette; overridden by the `-l` CLI flag.
+    pub visible_lines: Option<usize>,
 }
 
 pub fn load_config() -> Config {

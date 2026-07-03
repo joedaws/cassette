@@ -43,8 +43,14 @@ fn build_body(app: &App) -> String {
     let mut out = String::new();
     for (i, cassette) in app.cassettes.iter().enumerate() {
         out.push_str(&format!("# Cassette {}\n\n", i + 1));
-        out.push_str(&cassette.text());
+        out.push_str(&cassette.side_a_text());
         out.push_str("\n\n");
+        let side_b = cassette.side_b_text();
+        if !side_b.trim().is_empty() {
+            out.push_str("## Side B\n\n");
+            out.push_str(&side_b);
+            out.push_str("\n\n");
+        }
     }
     out
 }

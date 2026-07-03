@@ -1,31 +1,47 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::Paragraph,
     Frame,
 };
 
-use crate::app::App;
-use crate::cassette::Cassette;
+use crate::app::{App, Mode, GUTTER_WIDTH, MINIMIZED_ROWS};
+use crate::cassette::{pos_to_row_col, wrap_spans, Cassette, Side};
+
+/// Accent color for all "you are on side B" cues.
+const SIDE_B_ACCENT: Color = Color::Yellow;
 
 const HUB_FRAMES: [char; 4] = ['◓', '◐', '◒', '◑'];
 
-// Focused cassette: black text on yellow; unfocused: white text on blue.
-const FOCUSED_BG: Color = Color::Rgb(170, 170, 0);
-const FOCUSED_FG: Color = Color::Rgb(0, 0, 0);
+// Focused cassette uses the terminal's default colors (issue #16); unfocused
+// cassettes keep a colored background to visually separate themselves.
 const UNFOCUSED_BG: Color = Color::Rgb(0, 0, 170);
 const UNFOCUSED_FG: Color = Color::Rgb(255, 255, 255);
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let n = app.cassettes.len();
     let rpc = app.rows_per_cassette();
 
-    let mut constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Length(rpc)).collect();
+    // Only the window of cassettes starting at `cassette_scroll` is laid out:
+    // the focused one full-height, the others minimized to their last line.
+    let first = app.cassette_scroll.min(app.cassettes.len().saturating_sub(1));
+    let n = app
+        .visible_cassette_count()
+        .min(app.cassettes.len() - first);
+
+    let mut constraints: Vec<Constraint> = (first..first + n)
+        .map(|i| {
+            if i == app.focus_idx {
+                Constraint::Length(rpc)
+            } else {
+                Constraint::Length(MINIMIZED_ROWS)
+            }
+        })
+        .collect();
     constraints.push(Constraint::Length(1)); // bottom separator
     constraints.push(Constraint::Length(1)); // reel stats
-    constraints.push(Constraint::Length(1)); // status message
+    constraints.push(Constraint::Length(1)); // status / info line
     constraints.push(Constraint::Length(1)); // help text
     constraints.push(Constraint::Min(0)); // absorb leftover space
 
@@ -36,43 +52,167 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let cw = app.cassette_width();
 
-    for (i, cassette) in app.cassettes.iter().enumerate() {
-        render_cassette(frame, chunks[i], cassette, i == app.focus_idx, cw, app.visible_lines);
+    for (chunk_idx, cassette_idx) in (first..first + n).enumerate() {
+        let cassette = &app.cassettes[cassette_idx];
+        if cassette_idx == app.focus_idx {
+            render_cassette_focused(
+                frame,
+                chunks[chunk_idx],
+                cassette,
+                cw,
+                app.visible_lines,
+                app.mode,
+            );
+        } else {
+            render_cassette_min(frame, chunks[chunk_idx], cassette, cw);
+        }
     }
 
     let sep = "─".repeat(area.width as usize);
     frame.render_widget(Paragraph::new(sep), chunks[n]);
 
+    // Overflow indicators for cassettes scrolled out of view.
+    let (above, below) = app.hidden_cassettes();
+    if above > 0 {
+        render_overflow_hint(frame, chunks[0], above, '↑');
+    }
+    if below > 0 {
+        render_overflow_hint(frame, chunks[n], below, '↓');
+    }
+
     render_reel_stats(frame, chunks[n + 1], app);
 
-    let status = app.status_msg.as_deref().unwrap_or(" ");
+    // Status messages take precedence; otherwise show a vim-style info line.
+    let info;
+    let status = match &app.status_msg {
+        Some(m) => m.as_str(),
+        None => {
+            let c = &app.cassettes[app.focus_idx];
+            let (ln, col) = c.cursor_line_col();
+            let mode_str = match app.mode {
+                Mode::Insert => "-- INSERT --",
+                Mode::Normal => "-- NORMAL --",
+            };
+            let side = match c.side {
+                Side::A => "",
+                Side::B => "  ·  side B",
+            };
+            info = format!(
+                "{}  ln {}, col {}  ·  {} chars  ·  cassette {}/{}{}",
+                mode_str,
+                ln,
+                col,
+                c.char_count(),
+                app.focus_idx + 1,
+                app.cassettes.len(),
+                side
+            );
+            info.as_str()
+        }
+    };
     frame.render_widget(Paragraph::new(status), chunks[n + 2]);
 
+    let help = match app.mode {
+        Mode::Insert => "Esc:normal  Enter:newline  ^F:flip side  Tab:next  ^N:new  ^C:quit",
+        Mode::Normal => {
+            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  gg/G:jump  ^F:flip  q:quit"
+        }
+    };
+    frame.render_widget(Paragraph::new(help), chunks[n + 3]);
+}
+
+/// Overlay a right-aligned "N more ↑/↓" hint on a separator row.
+fn render_overflow_hint(frame: &mut Frame, sep_area: Rect, count: usize, arrow: char) {
+    let hint = format!(" {} more {} ", count, arrow);
+    let w = hint.chars().count() as u16;
+    if sep_area.width <= w + 2 {
+        return;
+    }
+    let hint_area = Rect {
+        x: sep_area.x + sep_area.width - w - 2,
+        y: sep_area.y,
+        width: w,
+        height: 1,
+    };
     frame.render_widget(
-        Paragraph::new("Tab: next  Shift+Tab: prev  Ctrl+N: new cassette  Esc: quit"),
-        chunks[n + 3],
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::new().fg(Color::Black).bg(Color::Gray),
+        ))),
+        hint_area,
     );
 }
 
-/// Render one cassette: a separator row followed by `visible_lines` rows of text.
-///
-/// Text is character-wrapped at `cw` columns. The viewport scrolls so the cursor
-/// stays at the bottom row. Lines further from the cursor (older text, toward the top)
-/// fade toward the cassette background color.
-fn render_cassette(
+/// A cassette's top separator row; on side B a yellow label is woven into it.
+fn render_separator(frame: &mut Frame, area: Rect, ch: char, side: Side, label: &str) {
+    let sep_area = Rect { height: 1, ..area };
+    let total = area.width as usize;
+    if side == Side::B {
+        let used = 2 + label.chars().count();
+        let line = Line::from(vec![
+            Span::raw(ch.to_string().repeat(2)),
+            Span::styled(label.to_string(), Style::new().fg(SIDE_B_ACCENT)),
+            Span::raw(ch.to_string().repeat(total.saturating_sub(used))),
+        ]);
+        frame.render_widget(Paragraph::new(line), sep_area);
+    } else {
+        frame.render_widget(Paragraph::new(ch.to_string().repeat(total)), sep_area);
+    }
+}
+
+/// Logical line number and whether the row starts that line, for each wrap span.
+/// A gap between consecutive spans means a '\n' separated them.
+fn span_line_numbers(spans: &[(usize, usize)]) -> Vec<(usize, bool)> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut line = 0usize;
+    let mut prev_end: Option<usize> = None;
+    for &(s, e) in spans {
+        let is_start = prev_end.is_none_or(|pe| s > pe);
+        if is_start {
+            line += 1;
+        }
+        out.push((line, is_start));
+        prev_end = Some(e);
+    }
+    out
+}
+
+fn fmt_line_no(n: usize) -> String {
+    if n <= 999 {
+        format!("{:>3} ", n)
+    } else {
+        "··· ".into()
+    }
+}
+
+/// Terminal-default-colors fade: rows near the viewport edges step down in
+/// brightness via modifiers instead of RGB lerp, since the real background
+/// color of the terminal is unknown.
+fn fade_style(t: f64) -> Style {
+    if t >= 0.9 {
+        Style::new()
+    } else if t >= 0.55 {
+        Style::new().add_modifier(Modifier::DIM)
+    } else if t >= 0.3 {
+        Style::new().fg(Color::DarkGray)
+    } else {
+        Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+    }
+}
+
+/// Render the focused cassette: a `═` separator followed by `visible_lines`
+/// rows of word-wrapped text on the terminal's default background, with a
+/// line-number gutter. The viewport scrolls typewriter-style (cursor row
+/// centered, clamped at the ends) and rows fade toward both viewport edges.
+fn render_cassette_focused(
     frame: &mut Frame,
     area: Rect,
     cassette: &Cassette,
-    focused: bool,
     cw: usize,
     visible_lines: usize,
+    mode: Mode,
 ) {
-    let sep_char = if focused { '═' } else { '─' };
-    let sep = sep_char.to_string().repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(sep),
-        Rect { height: 1, ..area },
-    );
+    render_separator(frame, area, '═', cassette.side, "╡ SIDE B ╞");
 
     if area.height <= 1 {
         return;
@@ -83,66 +223,124 @@ fn render_cassette(
         ..area
     };
 
-    let (bg, fg) = if focused {
-        (FOCUSED_BG, FOCUSED_FG)
-    } else {
-        (UNFOCUSED_BG, UNFOCUSED_FG)
-    };
+    // Display = left chars + cursor marker cell + right chars, wrapped at cw columns.
+    let cursor_disp = cassette.left.chars().count();
+    let mut display: Vec<char> = cassette.left.chars().collect();
+    display.push('│');
+    display.extend(cassette.right.chars());
 
-    let left_chars: Vec<char> = cassette.left.chars().collect();
-    let right_chars: Vec<char> = cassette.right.chars().collect();
-    // Display = left chars + cursor marker '│' + right chars
-    let cursor_disp = left_chars.len();
-    let display_len = left_chars.len() + 1 + right_chars.len();
+    let row_spans = wrap_spans(&display, cw);
+    let line_nums = span_line_numbers(&row_spans);
+    let (cursor_row, _) = pos_to_row_col(&row_spans, cursor_disp);
 
-    let cursor_line = cursor_disp / cw;
-    // Traditional scroll: cursor stays at the bottom of the viewport.
-    let scroll_top = cursor_line.saturating_sub(visible_lines.saturating_sub(1));
+    // Typewriter scroll: keep the cursor row centered, clamped so the viewport
+    // never scrolls past the last row of text. While appending at the end this
+    // degenerates to the classic cursor-at-bottom behavior.
+    let scroll_top = cursor_row
+        .saturating_sub(visible_lines / 2)
+        .min(row_spans.len().saturating_sub(visible_lines));
+
+    // Rows this many steps from a viewport edge (or closer) fade toward the background.
+    let fade_zone = (visible_lines / 2).max(1);
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_lines);
 
-    for line_idx in scroll_top..scroll_top + visible_lines {
-        let disp_start = line_idx * cw;
-        let disp_end = (disp_start + cw).min(display_len);
+    for vp_row in 0..visible_lines {
+        let line_idx = scroll_top + vp_row;
 
-        // Lines above the cursor fade toward the background; cursor line is full brightness.
-        let dist_above = cursor_line.saturating_sub(line_idx);
-        let fade_t = (1.0 - dist_above as f64 / visible_lines as f64).clamp(0.15, 1.0);
-        let line_fg = lerp_color(fade_t, fg, bg);
+        // Fade toward both viewport edges; the cursor row stays at full brightness.
+        let t_top = (vp_row + 1) as f64 / (fade_zone + 1) as f64;
+        let t_bot = (visible_lines - vp_row) as f64 / (fade_zone + 1) as f64;
+        let fade_t = if line_idx == cursor_row {
+            1.0
+        } else {
+            t_top.min(t_bot).clamp(0.15, 1.0)
+        };
+        let text_style = fade_style(fade_t);
+        // The gutter doubles as a persistent side indicator while writing.
+        let gutter_style = match cassette.side {
+            Side::A => Style::new().fg(Color::DarkGray),
+            Side::B => Style::new().fg(SIDE_B_ACCENT),
+        };
 
-        let mut spans: Vec<Span> = Vec::new();
-        spans.push(Span::styled(" ", Style::new().bg(bg)));
+        let mut spans: Vec<Span> = vec![Span::raw(" ")];
 
-        for di in disp_start..disp_end {
-            let (c, is_cursor) = if di < cursor_disp {
-                (left_chars[di], false)
-            } else if di == cursor_disp {
-                ('│', true)
-            } else {
-                (right_chars[di - cursor_disp - 1], false)
-            };
+        let gutter = match (row_spans.get(line_idx), line_nums.get(line_idx)) {
+            (Some(_), Some(&(n, true))) => fmt_line_no(n),
+            (Some(_), _) => " ".repeat(GUTTER_WIDTH),
+            // vim-style '~' marker for rows past the end of the text
+            (None, _) => format!("{:>2}  ", '~'),
+        };
+        spans.push(Span::styled(gutter, gutter_style));
 
-            let style = if is_cursor {
-                // Invert colors at the cursor position.
-                Style::new().fg(bg).bg(line_fg)
-            } else {
-                Style::new().fg(line_fg).bg(bg)
-            };
-            spans.push(Span::styled(c.to_string(), style));
+        let mut rendered = 0;
+        if let Some(&(disp_start, disp_end)) = row_spans.get(line_idx) {
+            for (offset, &ch) in display[disp_start..disp_end].iter().enumerate() {
+                let is_cursor = disp_start + offset == cursor_disp;
+                // In normal mode the cursor is a solid block; in insert mode a bar.
+                let c = if is_cursor && mode == Mode::Normal {
+                    ' '
+                } else {
+                    ch
+                };
+                let style = if is_cursor {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    text_style
+                };
+                spans.push(Span::styled(c.to_string(), style));
+            }
+            rendered = disp_end - disp_start;
         }
 
-        // Pad the remainder of the line with the background color.
-        let rendered = disp_end.saturating_sub(disp_start);
         if rendered < cw {
-            spans.push(Span::styled(" ".repeat(cw - rendered), Style::new().bg(bg)));
+            spans.push(Span::raw(" ".repeat(cw - rendered)));
         }
-
-        spans.push(Span::styled(" ", Style::new().bg(bg)));
+        spans.push(Span::raw(" "));
         lines.push(Line::from(spans));
     }
 
+    frame.render_widget(Paragraph::new(Text::from(lines)), text_area);
+}
+
+/// Render an unfocused cassette minimized to a `─` separator plus its last
+/// text row, keeping the colored background and showing the line number.
+fn render_cassette_min(frame: &mut Frame, area: Rect, cassette: &Cassette, cw: usize) {
+    render_separator(frame, area, '─', cassette.side, "╡ B ╞");
+
+    if area.height <= 1 {
+        return;
+    }
+    let text_area = Rect {
+        y: area.y + 1,
+        height: 1,
+        ..area
+    };
+
+    let (bg, fg) = (UNFOCUSED_BG, UNFOCUSED_FG);
+    let chars: Vec<char> = cassette.left.chars().chain(cassette.right.chars()).collect();
+    let row_spans = wrap_spans(&chars, cw);
+    let line_nums = span_line_numbers(&row_spans);
+    let last = row_spans.len() - 1;
+    let (line_no, _) = line_nums[last];
+    let (start, end) = row_spans[last];
+
+    let gutter_fg = lerp_color(0.55, fg, bg);
+    let mut spans: Vec<Span> = vec![Span::styled(" ", Style::new().bg(bg))];
+    spans.push(Span::styled(
+        fmt_line_no(line_no),
+        Style::new().fg(gutter_fg).bg(bg),
+    ));
+    let text: String = chars[start..end].iter().collect();
+    let rendered = end - start;
+    spans.push(Span::styled(text, Style::new().fg(fg).bg(bg)));
+    if rendered < cw {
+        spans.push(Span::styled(" ".repeat(cw - rendered), Style::new().bg(bg)));
+    }
+    spans.push(Span::styled(" ", Style::new().bg(bg)));
+
     frame.render_widget(
-        Paragraph::new(Text::from(lines)).style(Style::new().bg(bg)),
+        Paragraph::new(Line::from(spans)).style(Style::new().bg(bg)),
         text_area,
     );
 }
