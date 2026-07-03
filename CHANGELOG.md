@@ -28,6 +28,10 @@ and this project adheres to the
 ## 0.1.0.0 - 2025-11-13
 
 ### Changed
+- simplify the animation showing progress to goal and other show the progress bar when a word count or time session is set. When not set those animations should not play. When it is shown just use the bars and remove the spinners;2;13~
+ (#32)
+- move the line containing commands and help to the bottom of the window and not directly beneath the cassette (#31)
+- faded lines are set by distances from the center line not the current cursor focus. The fade should occur away from the cursor not from the center line in each cassette (#30)
 - Normal-mode block cursor hides nothing and shifts text by a cell (#28)
 - Insert-mode writer shortcuts: Ctrl+W delete word, Ctrl+U delete to line start (#27)
 - Do not write a note file for an empty session (#26)

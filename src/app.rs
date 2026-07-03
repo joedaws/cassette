@@ -21,9 +21,6 @@ pub const GUTTER_WIDTH: usize = 4;
 /// Rows of a minimized (unfocused) cassette: separator + its last text line.
 pub const MINIMIZED_ROWS: u16 = 2;
 
-/// Reel "tape length" in words when no word goal is set.
-pub const DEFAULT_SPOOL_WORDS: usize = 500;
-
 /// Vim-style editing mode for the focused cassette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -41,7 +38,6 @@ pub struct App {
     pub status_msg: Option<String>,
     pub timer_secs: Option<u32>,
     pub timer_original_secs: Option<u32>,
-    pub reel_rotation: usize,
     pub word_goal: Option<usize>,
     pub should_quit: bool,
     pub visible_lines: usize,
@@ -77,7 +73,6 @@ impl App {
             status_msg: None,
             timer_secs,
             timer_original_secs: timer_secs,
-            reel_rotation: 0,
             word_goal,
             should_quit: false,
             visible_lines: visible_lines
@@ -217,10 +212,6 @@ impl App {
         }
     }
 
-    pub fn advance_reel(&mut self) {
-        self.reel_rotation = (self.reel_rotation + 1) % 4;
-    }
-
     pub fn resize(&mut self, width: u16, height: u16) {
         self.term_width = width;
         self.term_height = height;
@@ -231,12 +222,20 @@ impl App {
         self.cassettes.iter().map(|c| c.word_count()).sum()
     }
 
-    /// How much tape has wound onto the take-up reel: total words written over
-    /// the word goal, or over a default spool of `DEFAULT_SPOOL_WORDS` when no
-    /// goal is set. 0.0..=1.0.
-    pub fn tape_ratio(&self) -> f64 {
-        let spool = self.word_goal.unwrap_or(DEFAULT_SPOOL_WORDS).max(1);
-        (self.total_word_count() as f64 / spool as f64).min(1.0)
+    /// How much tape has wound onto the take-up reel, 0.0..=1.0: progress
+    /// toward the word goal, or elapsed time when only a timer is set.
+    /// `None` when neither is set — the session has no bar to show.
+    pub fn tape_ratio(&self) -> Option<f64> {
+        if let Some(goal) = self.word_goal {
+            let goal = goal.max(1);
+            return Some((self.total_word_count() as f64 / goal as f64).min(1.0));
+        }
+        if let (Some(orig), Some(left)) = (self.timer_original_secs, self.timer_secs) {
+            if orig > 0 {
+                return Some(f64::from(orig - left) / f64::from(orig));
+            }
+        }
+        None
     }
 
     /// Number of cassettes hidden above and below the visible window.
@@ -330,32 +329,43 @@ mod tests {
     #[test]
     fn tape_ratio_tracks_words_against_goal() {
         let mut app = App::new(None, Some(10), Some(VISIBLE_LINES));
-        assert_eq!(app.tape_ratio(), 0.0);
+        assert_eq!(app.tape_ratio(), Some(0.0));
         app.modify_focused(|c| {
             for ch in "one two three four five".chars() {
                 c.insert(ch);
             }
         });
-        assert_eq!(app.tape_ratio(), 0.5);
+        assert_eq!(app.tape_ratio(), Some(0.5));
     }
 
     #[test]
-    fn tape_ratio_clamps_and_defaults_to_spool() {
+    fn tape_ratio_clamps_at_full() {
         let mut app = App::new(None, Some(2), Some(VISIBLE_LINES));
         app.modify_focused(|c| {
             for ch in "a b c d".chars() {
                 c.insert(ch);
             }
         });
-        assert_eq!(app.tape_ratio(), 1.0, "past the goal the reel stays full");
-
-        let app = App::new(None, None, Some(VISIBLE_LINES));
-        assert_eq!(app.word_goal, None);
         assert_eq!(
             app.tape_ratio(),
-            0.0,
-            "no goal: measured against default spool"
+            Some(1.0),
+            "past the goal the reel stays full"
         );
+    }
+
+    #[test]
+    fn tape_ratio_follows_timer_when_no_goal() {
+        let mut app = App::new(Some(4), None, Some(VISIBLE_LINES));
+        assert_eq!(app.tape_ratio(), Some(0.0));
+        app.tick_timer();
+        app.tick_timer();
+        assert_eq!(app.tape_ratio(), Some(0.5), "half the session elapsed");
+    }
+
+    #[test]
+    fn tape_ratio_absent_without_goal_or_timer() {
+        let app = App::new(None, None, Some(VISIBLE_LINES));
+        assert_eq!(app.tape_ratio(), None, "no goal, no timer: no bar");
     }
 
     #[test]

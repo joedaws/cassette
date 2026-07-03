@@ -177,8 +177,6 @@ fn run(
         if last_tick.elapsed() >= tick_rate {
             app.tick_timer();
             app.tick_status();
-            // The tape rolls while the session runs, not only on keystrokes.
-            app.advance_reel();
             last_tick = Instant::now();
         }
 
@@ -232,7 +230,6 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // Flip to the other side: Shift+Enter (kitty-protocol terminals) or Ctrl+F.
         (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
             app.modify_focused(|c| c.flip());
-            app.advance_reel();
             return;
         }
         _ => {}
@@ -253,7 +250,6 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         }
         (KeyCode::Enter, _) => {
             app.modify_focused(|c| c.insert('\n'));
-            app.advance_reel();
         }
         (KeyCode::Left, KeyModifiers::NONE) => app.modify_focused(|c| c.move_left()),
         (KeyCode::Right, KeyModifiers::NONE) => app.modify_focused(|c| c.move_right()),
@@ -261,11 +257,9 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
         (KeyCode::Down, KeyModifiers::NONE) => app.modify_focused(|c| c.move_down(cw)),
         (KeyCode::Backspace, KeyModifiers::NONE) => {
             app.modify_focused(|c| c.backspace());
-            app.advance_reel();
         }
         (KeyCode::Delete, KeyModifiers::NONE) => {
             app.modify_focused(|c| c.delete());
-            app.advance_reel();
         }
         // Readline muscle memory: delete word / to line start.
         (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
@@ -273,18 +267,15 @@ fn handle_insert_key(app: &mut App, key: KeyEvent) {
                 c.snapshot();
                 c.delete_word_back();
             });
-            app.advance_reel();
         }
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
             app.modify_focused(|c| {
                 c.snapshot();
                 c.delete_to_line_start();
             });
-            app.advance_reel();
         }
         (KeyCode::Char(c), mods) if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.modify_focused(|cas| cas.insert(c));
-            app.advance_reel();
         }
         _ => {}
     }
@@ -303,7 +294,6 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         c.snapshot();
                         c.delete_line();
                     });
-                    app.advance_reel();
                     return;
                 }
                 ('g', 'g') => {
@@ -355,7 +345,6 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         c.open_below();
                     });
                     app.mode = Mode::Insert;
-                    app.advance_reel();
                 }
                 'O' => {
                     app.modify_focused(|c| {
@@ -363,7 +352,6 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         c.open_above();
                     });
                     app.mode = Mode::Insert;
-                    app.advance_reel();
                 }
                 'u' => app.modify_focused(|c| c.undo()),
                 'h' => app.modify_focused(|c| c.move_left()),
@@ -380,7 +368,6 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         c.snapshot();
                         c.delete();
                     });
-                    app.advance_reel();
                 }
                 'd' => app.pending = Some('d'),
                 'g' => app.pending = Some('g'),
@@ -396,7 +383,6 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                 c.snapshot();
                 c.delete();
             });
-            app.advance_reel();
         }
         _ => {}
     }

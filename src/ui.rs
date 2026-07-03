@@ -12,8 +12,6 @@ use crate::cassette::{char_width, pos_to_row_col, wrap_spans, Cassette, Side};
 /// Accent color for all "you are on side B" cues.
 const SIDE_B_ACCENT: Color = Color::Yellow;
 
-const HUB_FRAMES: [char; 4] = ['◓', '◐', '◒', '◑'];
-
 // Focused cassette uses the terminal's default colors (issue #16); unfocused
 // cassettes keep a colored background to visually separate themselves.
 const UNFOCUSED_BG: Color = Color::Rgb(0, 0, 170);
@@ -41,11 +39,11 @@ pub fn render(frame: &mut Frame, app: &App) {
             }
         })
         .collect();
-    constraints.push(Constraint::Length(1)); // bottom separator
+    constraints.push(Constraint::Length(1)); // bottom separator (closes the stack)
+    constraints.push(Constraint::Min(0)); // filler: pins the footer to the window bottom
     constraints.push(Constraint::Length(1)); // reel stats
     constraints.push(Constraint::Length(1)); // status / info line
     constraints.push(Constraint::Length(1)); // help text
-    constraints.push(Constraint::Min(0)); // absorb leftover space
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -82,7 +80,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_overflow_hint(frame, chunks[n], below, '↓');
     }
 
-    render_reel_stats(frame, chunks[n + 1], app);
+    render_reel_stats(frame, chunks[n + 2], app);
 
     // Status messages take precedence; otherwise show a vim-style info line.
     let info;
@@ -112,7 +110,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             info.as_str()
         }
     };
-    frame.render_widget(Paragraph::new(status), chunks[n + 2]);
+    frame.render_widget(Paragraph::new(status), chunks[n + 3]);
 
     let help = match app.mode {
         Mode::Insert => "Esc:normal  Enter:newline  ^W:del word  ^F:flip side  Tab:next  ^N:new  ^C:quit",
@@ -120,7 +118,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  ^F:flip  q:quit"
         }
     };
-    frame.render_widget(Paragraph::new(help), chunks[n + 3]);
+    frame.render_widget(Paragraph::new(help), chunks[n + 4]);
 }
 
 /// Overlay a right-aligned "N more ↑/↓" hint on a separator row.
@@ -205,7 +203,9 @@ fn fade_style(t: f64) -> Style {
 /// Render the focused cassette: a `═` separator followed by `visible_lines`
 /// rows of word-wrapped text on the terminal's default background, with a
 /// line-number gutter. The viewport scrolls typewriter-style (cursor row
-/// centered, clamped at the ends) and rows fade toward both viewport edges.
+/// centered, clamped at the ends) and rows fade with distance from the
+/// cursor row, so the bright band follows the cursor even when the scroll
+/// clamp leaves it off-center.
 fn render_cassette_focused(
     frame: &mut Frame,
     area: Rect,
@@ -246,7 +246,7 @@ fn render_cassette_focused(
         .saturating_sub(visible_lines / 2)
         .min(row_spans.len().saturating_sub(visible_lines));
 
-    // Rows this many steps from a viewport edge (or closer) fade toward the background.
+    // Rows this many steps from the cursor row (or further) fade toward the background.
     let fade_zone = (visible_lines / 2).max(1);
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_lines);
@@ -254,14 +254,9 @@ fn render_cassette_focused(
     for vp_row in 0..visible_lines {
         let line_idx = scroll_top + vp_row;
 
-        // Fade toward both viewport edges; the cursor row stays at full brightness.
-        let t_top = (vp_row + 1) as f64 / (fade_zone + 1) as f64;
-        let t_bot = (visible_lines - vp_row) as f64 / (fade_zone + 1) as f64;
-        let fade_t = if line_idx == cursor_row {
-            1.0
-        } else {
-            t_top.min(t_bot).clamp(0.15, 1.0)
-        };
+        // Fade with distance from the cursor row, which stays at full brightness.
+        let dist = line_idx.abs_diff(cursor_row);
+        let fade_t = (1.0 - dist as f64 / (fade_zone + 1) as f64).clamp(0.15, 1.0);
         let text_style = fade_style(fade_t);
         // The gutter doubles as a persistent side indicator while writing.
         let gutter_style = match cassette.side {
@@ -360,16 +355,16 @@ fn render_cassette_min(frame: &mut Frame, area: Rect, cassette: &Cassette, cw: u
 }
 
 fn render_reel_stats(frame: &mut Frame, area: Rect, app: &App) {
-    // Tape winds from the supply reel (right) onto the take-up reel (left)
-    // as words are recorded; both reels fill/empty from the hub outward.
-    let ratio = app.tape_ratio();
-    let hub = HUB_FRAMES[app.reel_rotation % HUB_FRAMES.len()];
-    let left_reel = format!("{}{}", hub, reel_pattern(ratio));
-    let right_reel = format!(
-        "{}{}",
-        reel_pattern(1.0 - ratio).chars().rev().collect::<String>(),
-        hub
-    );
+    // Tape winds from the supply reel (right) onto the take-up reel (left):
+    // toward the word goal, or through the timer when only a timer is set.
+    // Without either there is no progress to measure and no bars are drawn.
+    let (left_reel, right_reel) = match app.tape_ratio() {
+        Some(ratio) => (
+            reel_pattern(ratio),
+            reel_pattern(1.0 - ratio).chars().rev().collect::<String>(),
+        ),
+        None => (String::new(), String::new()),
+    };
     let stats = app.format_stats();
 
     let total_w = area.width as usize;
@@ -439,4 +434,98 @@ fn rgb(c: Color) -> (u8, u8, u8) {
 
 fn lerp_u8(t: f64, a: u8, b: u8) -> u8 {
     (a as f64 * t + b as f64 * (1.0 - t)).round() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// The reel/status/help footer pins to the bottom of the window; the
+    /// filler sits between the cassette stack and the footer, not below it.
+    #[test]
+    fn footer_pins_to_window_bottom() {
+        let mut app = App::new(None, None, Some(5));
+        app.resize(80, 24);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let row_text =
+            |y: u16| -> String { (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+
+        // Cassette stack: separator, 5 text rows, closing separator right below.
+        assert!(row_text(6).starts_with("─"), "stack closes at row 6");
+        // The gap down to the footer is blank filler.
+        assert!(row_text(10).trim().is_empty(), "filler stays blank");
+        // Footer occupies the last three rows of the window.
+        assert!(row_text(21).contains("◆"), "stats row");
+        assert!(row_text(22).contains("-- INSERT --"), "info line");
+        assert!(row_text(23).contains("Esc:normal"), "help line");
+    }
+
+    /// Progress bars render only when a word goal or timer gives them
+    /// something to measure; without either the stats row shows no bars.
+    #[test]
+    fn progress_bars_only_with_goal_or_timer() {
+        let bars = ['·', '░', '▒', '▓'];
+        let stats_row = |app: &App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| render(f, app)).unwrap();
+            let buf = terminal.backend().buffer();
+            (0..80)
+                .map(|x| buf[(x, 21u16)].symbol().to_string())
+                .collect()
+        };
+
+        let mut app = App::new(None, None, Some(5));
+        app.resize(80, 24);
+        let row = stats_row(&app);
+        assert!(!row.contains(bars), "no goal, no timer: no bars");
+
+        let mut app = App::new(None, Some(100), Some(5));
+        app.resize(80, 24);
+        let row = stats_row(&app);
+        assert!(row.contains(bars), "word goal set: bars render");
+        assert!(row.contains("0 / 100"), "goal stats render");
+    }
+
+    /// With the cursor at the start of a long text the scroll clamp pins the
+    /// viewport to the top, leaving the cursor row off-center: the fade must
+    /// still be brightest at the cursor, not at the middle of the cassette.
+    #[test]
+    fn fade_follows_cursor_when_scroll_clamps() {
+        let mut app = App::new(None, None, Some(5));
+        app.resize(40, 20);
+        app.modify_focused(|c| {
+            for ch in "a\nb\nc\nd\ne\nf\ng".chars() {
+                c.insert(ch);
+            }
+            c.move_text_start();
+        });
+        app.mode = Mode::Normal;
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        // Text rows start at y=1 (below the separator); text at x=5 (pad + gutter).
+        let style_at = |y: u16| buf[(5, y)].style();
+
+        // Cursor row at the viewport top: the block cursor.
+        assert!(style_at(1).add_modifier.contains(Modifier::REVERSED));
+        // One row down: dimmed but not grayed yet.
+        assert!(style_at(2).add_modifier.contains(Modifier::DIM));
+        assert_ne!(style_at(2).fg, Some(Color::DarkGray));
+        // Two rows down — the viewport center. Under center-based fading this
+        // was full brightness; it must fade like any row two steps away.
+        assert_eq!(style_at(3).fg, Some(Color::DarkGray));
+        assert!(!style_at(3).add_modifier.contains(Modifier::DIM));
+        // Three or more rows down: darkest step.
+        assert_eq!(style_at(4).fg, Some(Color::DarkGray));
+        assert!(style_at(4).add_modifier.contains(Modifier::DIM));
+        assert_eq!(style_at(5).fg, Some(Color::DarkGray));
+        assert!(style_at(5).add_modifier.contains(Modifier::DIM));
+    }
 }
