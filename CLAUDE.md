@@ -84,6 +84,26 @@ chainlink session end --notes "handoff context"
 3. Work, add comments
 4. `session end --notes "..."` → save context
 
+## Implementation plans (`docs/plans/`)
+
+Some issues have a pre-written plan at `docs/plans/issue-NN-<slug>.md`, referenced in a
+comment on the issue (`chainlink show <id>` surfaces it). When implementing an issue:
+
+- Read the plan first and follow it — steps, file paths, and acceptance criteria were
+  written against this repo. Verify claims about the code against the current source
+  before acting; the code may have moved since the plan was written.
+- Plans flag **human steps** (browser logins, tokens, pushes to external services).
+  Don't attempt these — do the agent-executable parts, then tell the user exactly what
+  remains.
+- Check the plan's acceptance criteria before closing the issue, and note in the closing
+  comment anything that deviated from the plan or couldn't be verified.
+- If a plan turns out to be wrong or stale, update the plan file in the same change and
+  say so in an issue comment — the files are the durable record, not this session.
+- **Delete the plan file when closing its issue** (same change). First promote any
+  durable decisions out of it into real docs (`docs/distribution.md`, README) — the plan
+  is scaffolding, not documentation. Git history is the archive; `docs/plans/` should
+  only ever contain live, actionable plans.
+
 ## Best Practices
 
 - Start sessions when beginning work
