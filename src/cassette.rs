@@ -131,6 +131,17 @@ impl Cassette {
         Self::default()
     }
 
+    /// Rebuild a cassette from saved text (resume): side A active with the
+    /// cursor at its end, side B stored, no undo history.
+    pub fn from_sides(side_a: String, side_b: String, topic: Option<String>) -> Self {
+        Self {
+            left: side_a,
+            back_left: side_b,
+            topic,
+            ..Self::default()
+        }
+    }
+
     pub fn text(&self) -> String {
         format!("{}{}", self.left, self.right)
     }
@@ -220,6 +231,12 @@ impl Cassette {
 
     pub fn insert(&mut self, c: char) {
         self.left.push(c);
+    }
+
+    /// Insert a whole string at the cursor (bracketed paste): one edit,
+    /// so callers can wrap it in a single undo snapshot.
+    pub fn insert_str(&mut self, s: &str) {
+        self.left.push_str(s);
     }
 
     pub fn backspace(&mut self) {

@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -17,6 +17,7 @@ mod app;
 mod cassette;
 mod config;
 mod output;
+mod stats;
 mod theme;
 mod ui;
 
@@ -25,6 +26,27 @@ use app::{App, Mode};
 /// Seconds between autosaves of a dirty session.
 const AUTOSAVE_SECS: u64 = 30;
 
+/// Signal flags checked by the event loop (unix only): SIGTERM/SIGHUP ask for
+/// a save-and-quit, SIGTSTP for a clean suspend. Registered handlers only set
+/// these `AtomicBool`s; all real work happens on the main thread.
+#[cfg(unix)]
+struct SignalFlags {
+    terminate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    suspend: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(unix)]
+fn install_signal_handlers() -> io::Result<SignalFlags> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    let terminate = Arc::new(AtomicBool::new(false));
+    let suspend = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, terminate.clone())?;
+    signal_hook::flag::register(signal_hook::consts::SIGHUP, terminate.clone())?;
+    signal_hook::flag::register(signal_hook::consts::SIGTSTP, suspend.clone())?;
+    Ok(SignalFlags { terminate, suspend })
+}
+
 /// Where the session's markdown goes on quit (and during autosave).
 struct Sink {
     path: PathBuf,
@@ -32,6 +54,51 @@ struct Sink {
     conflicted: bool,
     /// Whether an autosave has created `path` already.
     wrote: bool,
+    /// Daily mode: the existing note this session appends to.
+    append: Option<output::AppendBase>,
+}
+
+/// Write the session to the sink: a fresh note, or appended onto the
+/// daily note's existing content. `draft` marks autosaves so a crashed
+/// session's note can be recognized and offered for resume.
+fn save_note(app: &App, sink: &Sink, draft: bool) -> io::Result<()> {
+    match &sink.append {
+        Some(base) => output::write_markdown_appended(app, &sink.path, base, draft),
+        None => output::write_markdown(app, &sink.path, draft),
+    }
+}
+
+/// Newest `.md` note in the notes dir, optionally only ones whose frontmatter
+/// still carries the autosave `draft: true` marker (i.e. crashed sessions).
+fn newest_note(dir: &std::path::Path, drafts_only: bool) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .filter(|p| !drafts_only || std::fs::read_to_string(p).is_ok_and(|c| output::is_draft(&c)))
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+}
+
+/// Drop the `draft: true` marker from a declined draft so it isn't offered
+/// again on every launch (`--resume <file>` still works on it).
+fn clear_draft_flag(path: &std::path::Path) {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let mut in_fm = false;
+        let cleaned: String = content
+            .split_inclusive('\n')
+            .enumerate()
+            .filter(|(i, l)| {
+                if l.trim_end() == "---" {
+                    in_fm = *i == 0;
+                    return true;
+                }
+                !(in_fm && l.trim_end() == "draft: true")
+            })
+            .map(|(_, l)| l)
+            .collect();
+        let _ = std::fs::write(path, cleaned);
+    }
 }
 
 /// Best-effort terminal restore; must be safe to call twice and mid-panic.
@@ -39,6 +106,7 @@ fn restore_terminal() {
     let _ = disable_raw_mode();
     let _ = execute!(
         io::stdout(),
+        DisableBracketedPaste,
         PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         crossterm::cursor::Show
@@ -47,10 +115,24 @@ fn restore_terminal() {
 
 fn main() -> io::Result<()> {
     let args = parse_args();
-    let cfg = config::load_config();
+    let cfg = config::load_config().unwrap_or_else(|e| die(&e));
 
     if args.list_themes {
         print_themes(&cfg);
+        return Ok(());
+    }
+
+    let notes_dir = cfg.notes_dir.clone().or_else(config::default_notes_dir);
+
+    if args.stats {
+        let metas = notes_dir
+            .as_deref()
+            .map(stats::scan_notes_dir)
+            .unwrap_or_default();
+        println!(
+            "{}",
+            stats::render(&metas, chrono::Local::now().date_naive())
+        );
         return Ok(());
     }
 
@@ -60,6 +142,13 @@ fn main() -> io::Result<()> {
         Ok(t) => t,
         Err(e) => die(&e),
     };
+    let daily_name: Option<String> = args.daily.then(|| {
+        let fmt = cfg.daily_format.as_deref().unwrap_or("%Y-%m-%d");
+        match daily_note_name(fmt) {
+            Ok(n) => n,
+            Err(e) => die(&e),
+        }
+    });
     let template_topics: Option<Vec<String>> = args.template.as_deref().map(|name| {
         cfg.templates.get(name).cloned().unwrap_or_else(|| {
             die(&format!(
@@ -67,6 +156,58 @@ fn main() -> io::Result<()> {
             ))
         })
     });
+
+    // Resolve --resume (or the crashed-draft offer) before touching the
+    // terminal: errors can still die() cleanly and the prompt can read stdin.
+    let mut resume_target: Option<PathBuf> = match &args.resume {
+        Some(_) if args.daily => die("--resume cannot be combined with 'today'"),
+        Some(_) if args.template.is_some() => die("--resume cannot be combined with '-T'"),
+        Some(Some(name)) => Some(config::resolve_output_path(
+            Some(name),
+            &std::time::SystemTime::now(),
+            notes_dir.as_deref(),
+        )),
+        Some(None) => Some(
+            notes_dir
+                .as_deref()
+                .and_then(|d| newest_note(d, false))
+                .unwrap_or_else(|| die("no notes to resume in the notes dir")),
+        ),
+        None => None,
+    };
+    if resume_target.is_none() && !args.print_stdout && !args.daily {
+        if let Some(draft) = notes_dir.as_deref().and_then(|d| newest_note(d, true)) {
+            if std::io::IsTerminal::is_terminal(&io::stdin()) {
+                eprint!(
+                    "cassette: found a draft from an unfinished session — resume '{}'? [y/N] ",
+                    draft.display()
+                );
+                let mut answer = String::new();
+                let _ = io::stdin().read_line(&mut answer);
+                if answer.trim().eq_ignore_ascii_case("y") {
+                    resume_target = Some(draft);
+                } else {
+                    clear_draft_flag(&draft);
+                }
+            }
+        }
+    }
+    let (resume_path, resume_cassettes): (Option<PathBuf>, Option<Vec<cassette::Cassette>>) =
+        match resume_target {
+            Some(p) => {
+                let content = std::fs::read_to_string(&p)
+                    .unwrap_or_else(|e| die(&format!("cannot read '{}': {e}", p.display())));
+                let cassettes = output::parse_markdown(&content);
+                if cassettes.is_empty() {
+                    die(&format!(
+                        "'{}' has no '# Cassette' sections to resume",
+                        p.display()
+                    ));
+                }
+                (Some(p), Some(cassettes))
+            }
+            None => (None, None),
+        };
 
     // Restore the terminal before the default hook prints, so the panic
     // message is readable and the shell isn't left in raw mode.
@@ -87,7 +228,8 @@ fn main() -> io::Result<()> {
     // these sequences by design.
     execute!(
         stdout,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        EnableBracketedPaste
     )?;
 
     let backend = CrosstermBackend::new(stdout);
@@ -101,23 +243,50 @@ fn main() -> io::Result<()> {
     if let Some(topics) = &template_topics {
         app.apply_topics(topics);
     }
+    if let Some(cassettes) = resume_cassettes {
+        app.load_cassettes(cassettes);
+    }
 
     // Resolve the output file up front so the session can autosave to it.
     let mut sink = if args.print_stdout {
         None
+    } else if let Some(path) = resume_path {
+        // Resume writes straight back to the note it loaded.
+        Some(Sink {
+            desired: path.clone(),
+            path,
+            conflicted: false,
+            wrote: false,
+            append: None,
+        })
     } else {
-        let effective_notes_dir = cfg.notes_dir.clone().or_else(config::default_notes_dir);
         let desired = config::resolve_output_path(
-            args.note_name.as_deref(),
+            daily_name.as_deref().or(args.note_name.as_deref()),
             &app.started_at,
-            effective_notes_dir.as_deref(),
+            notes_dir.as_deref(),
         );
-        let (path, conflicted) = config::find_available_path(&desired);
+        // Daily mode appends to today's existing note; explicit names keep
+        // the conflict-rename (`_1.md`) behavior.
+        let existing_daily = (args.daily && desired.exists())
+            .then(|| std::fs::read_to_string(&desired).ok())
+            .flatten();
+        let (path, conflicted, append) = match existing_daily {
+            Some(content) => (
+                desired.clone(),
+                false,
+                Some(output::parse_append_base(content)),
+            ),
+            None => {
+                let (path, conflicted) = config::find_available_path(&desired);
+                (path, conflicted, None)
+            }
+        };
         Some(Sink {
             path,
             desired,
             conflicted,
             wrote: false,
+            append,
         })
     };
 
@@ -188,7 +357,16 @@ fn finish_session(app: &App, sink: Option<&mut Sink>) {
 
     if app.is_empty() {
         if sink.wrote {
-            let _ = std::fs::remove_file(&sink.path);
+            // An empty appending session must put the daily note back as it
+            // was, never delete it.
+            match &sink.append {
+                Some(base) => {
+                    let _ = std::fs::write(&sink.path, &base.content);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&sink.path);
+                }
+            }
         }
         eprintln!("cassette: nothing recorded — no file written");
         return;
@@ -201,9 +379,18 @@ fn finish_session(app: &App, sink: Option<&mut Sink>) {
             sink.path.display()
         );
     }
-    match output::write_markdown(app, &sink.path) {
-        Ok(()) if !sink.conflicted => eprintln!("cassette: saved to '{}'", sink.path.display()),
-        Ok(()) => {}
+    match save_note(app, sink, false) {
+        Ok(()) => match &sink.append {
+            Some(base) => eprintln!(
+                "cassette: appended session {} to '{}'",
+                base.session_no,
+                sink.path.display()
+            ),
+            None if !sink.conflicted => {
+                eprintln!("cassette: saved to '{}'", sink.path.display())
+            }
+            None => {}
+        },
         Err(e) => eprintln!("cassette: could not write '{}': {}", sink.path.display(), e),
     }
 }
@@ -245,6 +432,8 @@ fn run(
     let tick_rate = Duration::from_secs(1);
     let mut last_tick = Instant::now();
     let mut last_autosave = Instant::now();
+    #[cfg(unix)]
+    let signals = install_signal_handlers()?;
 
     loop {
         terminal.draw(|f| ui::render(f, app, theme))?;
@@ -254,6 +443,10 @@ fn run(
             match event::read()? {
                 Event::Key(key) => {
                     handle_key(app, key);
+                    app.check_goal();
+                }
+                Event::Paste(text) => {
+                    handle_paste(app, &text);
                     app.check_goal();
                 }
                 Event::Resize(w, h) => app.resize(w, h),
@@ -268,6 +461,23 @@ fn run(
             last_tick = Instant::now();
         }
 
+        #[cfg(unix)]
+        {
+            use std::sync::atomic::Ordering;
+            // SIGTERM/SIGHUP: quit through the normal path — main() saves the
+            // session and restores the terminal on the way out.
+            if signals.terminate.load(Ordering::Relaxed) {
+                app.should_quit = true;
+            }
+            if signals.suspend.swap(false, Ordering::Relaxed) || std::mem::take(&mut app.suspend) {
+                suspend_session(terminal, app, sink.as_deref_mut())?;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            app.suspend = false;
+        }
+
         if std::mem::take(&mut app.bell) {
             let mut out = io::stdout();
             let _ = out.write_all(b"\x07");
@@ -280,7 +490,7 @@ fn run(
                 && !app.is_empty()
                 && last_autosave.elapsed() >= Duration::from_secs(AUTOSAVE_SECS)
             {
-                if output::write_markdown(app, &s.path).is_ok() {
+                if save_note(app, s, true).is_ok() {
                     s.wrote = true;
                     app.dirty = false;
                 }
@@ -293,6 +503,35 @@ fn run(
         }
     }
 
+    Ok(())
+}
+
+/// Ctrl+Z / SIGTSTP: flush the session to disk, hand the terminal back to the
+/// shell, and stop. When the shell resumes us (`fg` → SIGCONT), re-enter raw
+/// mode and the alternate screen and force a full redraw.
+#[cfg(unix)]
+fn suspend_session(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    sink: Option<&mut Sink>,
+) -> io::Result<()> {
+    if let Some(s) = sink {
+        if !app.is_empty() && save_note(app, s, true).is_ok() {
+            s.wrote = true;
+            app.dirty = false;
+        }
+    }
+    restore_terminal();
+    // SIGSTOP cannot be caught: execution halts here until SIGCONT.
+    let _ = signal_hook::low_level::raise(signal_hook::consts::SIGSTOP);
+    enable_raw_mode()?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        EnableBracketedPaste
+    )?;
+    terminal.clear()?;
     Ok(())
 }
 
@@ -310,6 +549,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             app.should_quit = true;
+            return;
+        }
+        // Raw mode swallows the tty's Ctrl+Z, so suspend is an explicit binding.
+        (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+            app.suspend = true;
             return;
         }
         (KeyCode::Tab, KeyModifiers::NONE) => {
@@ -342,6 +586,23 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Normal => handle_normal_key(app, key),
         Mode::Topic => unreachable!("topic mode is dispatched above"),
     }
+}
+
+/// Insert pasted text as one edit: line endings normalized to '\n' and a
+/// single undo snapshot for the whole chunk. In the topic prompt the paste
+/// joins onto one line. Pasting is forward-only insertion, so record mode
+/// allows it.
+fn handle_paste(app: &mut App, text: &str) {
+    app.idle_secs = 0;
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if app.mode == Mode::Topic {
+        app.topic_input.push_str(&text.replace('\n', " "));
+        return;
+    }
+    app.modify_focused(|c| {
+        c.snapshot();
+        c.insert_str(&text);
+    });
 }
 
 /// Open the topic prompt pre-filled with the focused cassette's topic,
@@ -556,6 +817,23 @@ struct Args {
     theme: Option<String>,
     list_themes: bool,
     record: bool,
+    daily: bool,
+    stats: bool,
+    /// `--resume` with an optional note name: `Some(None)` resumes the most
+    /// recently modified note.
+    resume: Option<Option<String>>,
+}
+
+/// Today's note filename from the (config-overridable) chrono format string.
+/// A malformed format is a config error, not a panic mid-render.
+fn daily_note_name(fmt: &str) -> Result<String, String> {
+    use chrono::format::{Item, StrftimeItems};
+    if StrftimeItems::new(fmt).any(|i| matches!(i, Item::Error)) {
+        return Err(format!(
+            "invalid daily_format '{fmt}' in config.toml — expected a chrono date format like %Y-%m-%d"
+        ));
+    }
+    Ok(chrono::Local::now().format(fmt).to_string())
 }
 
 const USAGE: &str = "\
@@ -575,11 +853,17 @@ Options:
                  [templates] entry in config.toml
   --theme <NAME> color theme for this session (overrides config)
   -R, --record   record mode: no deletions, the tape only rolls forward
+  --resume [FILE] load a saved note back into the TUI and keep writing
+                 (default: the most recently modified note)
   -o, --output   print to stdout on quit instead of writing a file
   -h, --help     print this help
   -V, --version  print version
 
 Actions:
+  today          open today's note (named by date); a later session the
+                 same day appends as a new '## Session' section
+  stats          streak, weekly/monthly notes and words, totals — read
+                 from the frontmatter of everything in the notes dir
   +themes        list available themes (built-in and from config.toml)
 ";
 
@@ -613,9 +897,20 @@ fn parse_args() -> Args {
     let mut theme = None;
     let mut list_themes = false;
     let mut record = false;
+    let mut daily = false;
+    let mut stats = false;
+    let mut resume = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "today" if !daily && !stats && note_name.is_none() => {
+                daily = true;
+                i += 1;
+            }
+            "stats" if !daily && !stats && note_name.is_none() => {
+                stats = true;
+                i += 1;
+            }
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -658,6 +953,11 @@ fn parse_args() -> Args {
                 record = true;
                 i += 1;
             }
+            "--resume" => {
+                let val = args.get(i + 1).filter(|v| !v.starts_with('-'));
+                i += if val.is_some() { 2 } else { 1 };
+                resume = Some(val.cloned());
+            }
             "-o" | "--output" => {
                 print_stdout = true;
                 i += 1;
@@ -666,7 +966,7 @@ fn parse_args() -> Args {
                 die(&format!("unknown option '{arg}'"));
             }
             arg => {
-                if note_name.is_some() {
+                if note_name.is_some() || daily || stats {
                     die(&format!("unexpected extra argument '{arg}'"));
                 }
                 note_name = Some(arg.to_string());
@@ -684,6 +984,9 @@ fn parse_args() -> Args {
         theme,
         list_themes,
         record,
+        daily,
+        stats,
+        resume,
     }
 }
 
@@ -801,6 +1104,36 @@ mod tests {
         assert_eq!(app.mode, Mode::Insert);
         handle_key(&mut app, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn paste_inserts_chunk_normalizes_newlines_one_undo() {
+        let mut app = App::new(None, None, None);
+        type_str(&mut app, "start ");
+        handle_paste(&mut app, "one\r\ntwo\rthree");
+        assert_eq!(app.cassettes[0].text(), "start one\ntwo\nthree");
+        // One `u` takes back the whole paste.
+        handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
+        type_str(&mut app, "u");
+        assert_eq!(app.cassettes[0].text(), "start ");
+    }
+
+    #[test]
+    fn paste_into_topic_prompt_stays_one_line() {
+        let mut app = App::new(None, None, None);
+        handle_key(&mut app, key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        handle_paste(&mut app, "two\nlines");
+        handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.cassettes[0].topic.as_deref(), Some("two lines"));
+        assert_eq!(app.cassettes[0].text(), "", "paste stays out of the tape");
+    }
+
+    #[test]
+    fn paste_allowed_in_record_mode() {
+        let mut app = App::new(None, None, None);
+        app.record = true;
+        handle_paste(&mut app, "quoted material\n");
+        assert_eq!(app.cassettes[0].text(), "quoted material\n");
     }
 
     #[test]

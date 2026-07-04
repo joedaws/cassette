@@ -12,6 +12,8 @@ pub struct Config {
     pub visible_lines: Option<usize>,
     /// Name of the theme to use; overridden by the `--theme` CLI flag.
     pub theme: Option<String>,
+    /// chrono format string for the `today` note's filename (default `%Y-%m-%d`).
+    pub daily_format: Option<String>,
     /// User-defined themes: `[themes.<name>]` tables with color fields
     /// (`text`, `background`, `unfocused_bg`, `unfocused_fg`, `accent_a`,
     /// `accent_b`). A name matching a built-in overrides it field-by-field.
@@ -28,15 +30,29 @@ pub struct Config {
     pub templates: HashMap<String, Vec<String>>,
 }
 
-pub fn load_config() -> Config {
-    let Some(config_dir) = dirs::config_dir() else {
-        return Config::default();
+/// XDG-style config path on every platform: `$XDG_CONFIG_HOME/cassette/config.toml`,
+/// falling back to `~/.config/cassette/config.toml`. Deliberately not
+/// `dirs::config_dir()`: on macOS that is ~/Library/Application Support, and
+/// terminal tools conventionally live in ~/.config there too.
+pub fn config_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
+    Some(base.join("cassette").join("config.toml"))
+}
+
+/// A missing config file is the default config; a file that exists but does
+/// not parse is an error the user must see, not a silent fallback.
+pub fn load_config() -> Result<Config, String> {
+    let Some(config_path) = config_path() else {
+        return Ok(Config::default());
     };
-    let config_path = config_dir.join("cassette").join("config.toml");
     let Ok(contents) = std::fs::read_to_string(&config_path) else {
-        return Config::default();
+        return Ok(Config::default());
     };
-    toml::from_str(&contents).unwrap_or_default()
+    toml::from_str(&contents)
+        .map_err(|e| format!("invalid config '{}':\n{}", config_path.display(), e))
 }
 
 pub fn default_notes_dir() -> Option<PathBuf> {
@@ -146,6 +162,22 @@ mod tests {
     fn extension_not_doubled() {
         let path = resolve_output_path(Some("myjournal.md"), &dummy_time(), None);
         assert_eq!(path, PathBuf::from("myjournal.md"));
+    }
+
+    #[test]
+    fn config_path_honors_xdg_config_home_and_falls_back_to_dot_config() {
+        // Single test for both env states: parallel tests must not race on env.
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-test");
+        assert_eq!(
+            config_path(),
+            Some(PathBuf::from("/tmp/xdg-test/cassette/config.toml"))
+        );
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let home = dirs::home_dir().expect("test env has a home dir");
+        assert_eq!(
+            config_path(),
+            Some(home.join(".config").join("cassette").join("config.toml"))
+        );
     }
 
     #[test]

@@ -44,6 +44,7 @@ dependencies = [
  "dirs",
  "ratatui",
  "serde",
+ "signal-hook",
  "toml",
  "unicode-width 0.2.0",
 ]

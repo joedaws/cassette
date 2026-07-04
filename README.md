@@ -32,13 +32,19 @@ them.
   (`t`), or start from a template: define `morning = ["gratitude",
   "priorities", "loose thoughts"]` in your config and `cassette -T morning`
   opens a labeled cassette for each.
+- **A daily practice** — `cassette today` keeps one note per day and appends
+  each sitting as its own session; `cassette stats` reads your streak and
+  weekly/monthly word counts straight out of the notes' frontmatter. Left a
+  thought unfinished? `cassette --resume` loads the note back onto the tape.
 - **Mini vim** — insert and normal modes, `hjkl`/`w`/`b`/`0`/`$`/`gg`/`G`
   motions, `x`/`dd`, and undo. Enough vim to feel at home, not enough to
   tempt you into editing when you should be writing.
-- **Your words are safe** — dirty sessions autosave every 30 seconds, the
-  terminal is restored and the session saved even on a crash, and quitting
-  writes clean markdown with YAML frontmatter — ready for your notes vault.
-  Empty sessions write nothing.
+- **Your words are safe** — dirty sessions autosave every 30 seconds; the
+  terminal is restored and the session saved on crashes, `kill`, and a
+  closed terminal window alike; Ctrl+Z suspends cleanly with your words
+  already flushed; and if a session dies before finishing, the next launch
+  offers to resume the draft. Quitting writes clean markdown with YAML
+  frontmatter — ready for your notes vault. Empty sessions write nothing.
 - **Themes** — six built-ins (gruvbox, nord, dracula, solarized…), full
   custom themes from the config file, and a ghostty-style `cassette +themes`
   listing with color swatches. The default stays true to your terminal's own
@@ -88,12 +94,15 @@ sheet that follows the current mode.
 | `Ctrl+N` | both | new cassette |
 | `Ctrl+T` | both | set the cassette's topic |
 | `Ctrl+B` (or `Shift+Enter`¹) | both | flip the cassette to its other side |
+| `Ctrl+Z` | both | suspend to the shell (words flushed first); `fg` resumes |
 | `Ctrl+C` | both | quit and save |
 
 ¹ on terminals with the kitty keyboard protocol (kitty, ghostty, foot, …).
 
 Undo is per side, per cassette, and entering insert mode takes one snapshot —
-so a single `u` takes back the whole burst you just typed.
+so a single `u` takes back the whole burst you just typed. Pasting works the
+same way: a bracketed paste lands as one edit, so one `u` takes back the
+whole paste.
 
 ### Side B
 
@@ -139,6 +148,47 @@ Quit with `Ctrl+C` (which saves, as always).
 Record mode is opt-in by design. Plenty of freewriters stay in flow better
 when they *can* fix a stray typo; the default session leaves editing alone.
 
+## A daily practice
+
+One note per day, however many sittings it takes:
+
+```
+cassette today                # opens (or continues) 2026-07-03.md
+cassette today -T morning     # morning pages, straight into today's note
+```
+
+The first `today` session of the day creates a note named after the date in
+the notes dir. Later sessions the same day append to it as their own
+`## Session 2 — 14:30` section — nothing is renamed, nothing overwritten —
+and the note's frontmatter word count keeps the running total. Set
+`daily_format` in the config to change the filename pattern.
+
+Your history is queryable from the frontmatter alone:
+
+```
+$ cassette stats
+streak:      4 days
+this week:   5 notes · 2183 words
+this month:  11 notes · 4907 words
+total:       48 notes · 22410 words · since 2026-05-02
+```
+
+The streak counts consecutive days with at least one note and doesn't break
+until a full day is missed — an unwritten *today* is still yours to write.
+
+### Picking a thought back up
+
+```
+cassette --resume             # continue the most recently modified note
+cassette --resume myjournal   # continue a specific note
+```
+
+Resume loads a saved note back into the TUI — cassettes, topics, both sides,
+cursor at the end of the text — and keeps writing to the same file. And if a
+session dies without finishing (power loss, a killed terminal), its autosave
+still carries a `draft: true` marker, so the next launch notices and offers
+to resume it.
+
 ## Saving
 
 On quit, the session is written as markdown. By default it goes to
@@ -174,7 +224,9 @@ cassette -o                   # print to stdout, write no file
 If the name is taken, cassette saves to `myjournal_1.md` rather than
 overwrite. Sessions with no words write no file at all. While you write,
 dirty sessions autosave every 30 seconds, and the saved-on-crash guarantee
-means even a panic won't eat your words.
+covers more than panics: SIGTERM and a closed terminal window (SIGHUP) both
+save the session and restore the terminal on the way out, and Ctrl+Z flushes
+your words to disk before handing control back to the shell.
 
 After every session, a recap prints to the terminal — words, duration, pace
 (for sessions over 30 seconds), and a per-cassette breakdown when you used
@@ -187,8 +239,10 @@ more than one:
 
 ## Configuration
 
-Cassette reads `~/.config/cassette/config.toml` on startup. The file is never
-created for you — no config means all defaults — so to customize anything:
+Cassette reads `$XDG_CONFIG_HOME/cassette/config.toml` — that's
+`~/.config/cassette/config.toml` on every platform, including macOS — on
+startup. The file is never created for you — no config means all defaults —
+so to customize anything:
 
 ```bash
 mkdir -p ~/.config/cassette
@@ -200,6 +254,10 @@ Every key is optional:
 ```toml
 # Where session notes are saved (default: ~/.local/share/cassette/notes).
 notes_dir = "/home/you/notes/cassette"
+
+# Filename pattern for `cassette today`, in chrono strftime syntax
+# (default: %Y-%m-%d, e.g. 2026-07-03.md).
+daily_format = "%Y-%m-%d"
 
 # Visible text rows per cassette, 2-40 (default: 5). The -l flag overrides this.
 visible_lines = 8
@@ -267,11 +325,17 @@ Options:
                  [templates] entry in config.toml
   --theme <NAME> color theme for this session (overrides config)
   -R, --record   record mode: no deletions, the tape only rolls forward
+  --resume [FILE] load a saved note back into the TUI and keep writing
+                 (default: the most recently modified note)
   -o, --output   print to stdout on quit instead of writing a file
   -h, --help     print this help
   -V, --version  print version
 
 Actions:
+  today          open today's note (named by date); a later session the
+                 same day appends as a new '## Session' section
+  stats          streak, weekly/monthly notes and words, totals — read
+                 from the frontmatter of everything in the notes dir
   +themes        list available themes (built-in and from config.toml)
 ```
 
@@ -316,6 +380,5 @@ stays readable.
 
 ## Ideas
 
-- **Daily freewrite management** — what does it look like to use cassette for
-  a daily practice? Streaks, a `cassette today` entry point, reviewing
-  yesterday's session before starting.
+- **Publishing the practice** — packaging for the AUR and crates.io, a demo
+  GIF, man page and shell completions, macOS builds.

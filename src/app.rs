@@ -61,6 +61,8 @@ pub struct App {
     pub dirty: bool,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
+    /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
+    pub suspend: bool,
     /// Remaining seconds before a transient `status_msg` clears itself.
     status_ticks: Option<u32>,
     /// The word-goal celebration fires once per session.
@@ -99,6 +101,7 @@ impl App {
             idle_secs: 0,
             dirty: false,
             bell: false,
+            suspend: false,
             status_ticks: None,
             goal_announced: false,
         }
@@ -210,6 +213,19 @@ impl App {
             self.cassettes[i].topic = Some(topic.clone());
         }
         self.focus_idx = 0;
+        self.ensure_focus_visible();
+    }
+
+    /// Replace the session's cassettes with ones loaded from a saved note
+    /// (`--resume`). Focus lands on the last cassette, whose cursor is
+    /// already at the end of side A — ready to keep writing.
+    pub fn load_cassettes(&mut self, cassettes: Vec<Cassette>) {
+        if cassettes.is_empty() {
+            return;
+        }
+        self.cassettes = cassettes;
+        self.cassettes.truncate(MAX_CASSETTES);
+        self.focus_idx = self.cassettes.len() - 1;
         self.ensure_focus_visible();
     }
 
