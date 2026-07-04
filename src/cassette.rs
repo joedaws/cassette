@@ -19,6 +19,8 @@ pub struct Cassette {
     back_left: String,
     back_right: String,
     pub side: Side,
+    /// Optional label for what this cassette is about; shared by both sides.
+    pub topic: Option<String>,
     /// Undo snapshots of the active side, oldest first.
     undo: Vec<(String, String)>,
     /// Undo snapshots of the side currently flipped away.

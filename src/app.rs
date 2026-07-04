@@ -21,11 +21,13 @@ pub const GUTTER_WIDTH: usize = 4;
 /// Rows of a minimized (unfocused) cassette: separator + its last text line.
 pub const MINIMIZED_ROWS: u16 = 2;
 
-/// Vim-style editing mode for the focused cassette.
+/// Vim-style editing mode for the focused cassette. `Topic` captures a topic
+/// label for the focused cassette on the status line instead of editing text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Insert,
     Normal,
+    Topic,
 }
 
 pub struct App {
@@ -45,6 +47,16 @@ pub struct App {
     pub mode: Mode,
     /// First key of a pending two-key normal-mode sequence (`dd`, `gg`).
     pub pending: Option<char>,
+    /// Topic text being typed while in `Mode::Topic`.
+    pub topic_input: String,
+    /// Mode to return to when the topic prompt closes (it can be opened
+    /// from insert mode via Ctrl+T or normal mode via `t`).
+    pub topic_return: Mode,
+    /// Record mode (`--record`): the tape only rolls forward — no deletions,
+    /// no normal mode. Opt-in; plain sessions keep full editing.
+    pub record: bool,
+    /// Seconds since the last keypress; drives the idle nudge.
+    pub idle_secs: u32,
     /// Set on any cassette mutation; cleared by the autosaver in `main.rs`.
     pub dirty: bool,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
@@ -81,6 +93,10 @@ impl App {
             started_at: SystemTime::now(),
             mode: Mode::Insert,
             pending: None,
+            topic_input: String::new(),
+            topic_return: Mode::Normal,
+            record: false,
+            idle_secs: 0,
             dirty: false,
             bell: false,
             status_ticks: None,
@@ -119,6 +135,21 @@ impl App {
                 self.flash(format!("goal reached — {} words. keep rolling!", words));
             }
         }
+    }
+
+    /// Seconds of idleness before the "keep the tape rolling" nudge shows.
+    pub const IDLE_NUDGE_SECS: u32 = 10;
+
+    /// One second of no keypresses has passed.
+    pub fn tick_idle(&mut self) {
+        self.idle_secs = self.idle_secs.saturating_add(1);
+    }
+
+    /// Gentle nudge when a timed or record session has gone quiet: shown in
+    /// the info line, no bell, cleared by the next keypress. Plain untimed
+    /// sessions are never nudged — wandering off is allowed there.
+    pub fn idle_nudge(&self) -> bool {
+        (self.timer_secs.is_some() || self.record) && self.idle_secs >= Self::IDLE_NUDGE_SECS
     }
 
     /// Count down a transient status message; clears it when time is up.
@@ -168,6 +199,20 @@ impl App {
         }
     }
 
+    /// Seed the session from a topic template: one cassette per topic, in
+    /// order, capped at `MAX_CASSETTES`. The first topic lands on the initial
+    /// cassette; focus stays on it.
+    pub fn apply_topics(&mut self, topics: &[String]) {
+        for (i, topic) in topics.iter().take(MAX_CASSETTES).enumerate() {
+            if i >= self.cassettes.len() {
+                self.cassettes.push(Cassette::new());
+            }
+            self.cassettes[i].topic = Some(topic.clone());
+        }
+        self.focus_idx = 0;
+        self.ensure_focus_visible();
+    }
+
     pub fn add_cassette(&mut self) {
         if self.cassettes.len() >= MAX_CASSETTES {
             self.status_msg = Some(format!("Cassette limit reached ({}).", MAX_CASSETTES));
@@ -206,7 +251,9 @@ impl App {
             if n > 0 {
                 self.timer_secs = Some(n - 1);
                 if n == 1 {
-                    self.flash("time — keep going, or q to save".into());
+                    // Record mode has no normal mode, so no `q`.
+                    let quit_key = if self.record { "^C" } else { "q" };
+                    self.flash(format!("time — keep going, or {quit_key} to save"));
                 }
             }
         }
@@ -430,6 +477,60 @@ mod tests {
         assert!(!app.dirty);
         app.modify_focused(|c| c.insert('a'));
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn idle_nudge_needs_a_timed_or_record_session() {
+        // Plain session: never nudged, wandering off is allowed.
+        let mut app = test_app();
+        for _ in 0..App::IDLE_NUDGE_SECS + 5 {
+            app.tick_idle();
+        }
+        assert!(!app.idle_nudge());
+
+        // Timed session: nudged after the threshold.
+        let mut app = App::new(Some(60), None, None);
+        for _ in 0..App::IDLE_NUDGE_SECS {
+            app.tick_idle();
+        }
+        assert!(app.idle_nudge());
+
+        // Record session (untimed) also qualifies.
+        let mut app = test_app();
+        app.record = true;
+        for _ in 0..App::IDLE_NUDGE_SECS {
+            app.tick_idle();
+        }
+        assert!(app.idle_nudge());
+        app.idle_secs = 0;
+        assert!(!app.idle_nudge());
+    }
+
+    #[test]
+    fn timer_expiry_message_matches_record_mode() {
+        let mut app = App::new(Some(1), None, None);
+        app.record = true;
+        app.tick_timer();
+        assert!(app.status_msg.as_deref().unwrap().contains("^C to save"));
+    }
+
+    #[test]
+    fn apply_topics_creates_labeled_cassettes() {
+        let mut app = test_app();
+        let topics: Vec<String> = ["one", "two", "three"].map(String::from).into();
+        app.apply_topics(&topics);
+        assert_eq!(app.cassettes.len(), 3);
+        assert_eq!(app.cassettes[0].topic.as_deref(), Some("one"));
+        assert_eq!(app.cassettes[2].topic.as_deref(), Some("three"));
+        assert_eq!(app.focus_idx, 0, "session starts on the first topic");
+    }
+
+    #[test]
+    fn apply_topics_caps_at_max_cassettes() {
+        let mut app = test_app();
+        let topics: Vec<String> = (0..MAX_CASSETTES + 5).map(|i| format!("t{i}")).collect();
+        app.apply_topics(&topics);
+        assert_eq!(app.cassettes.len(), MAX_CASSETTES);
     }
 
     #[test]

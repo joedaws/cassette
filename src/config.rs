@@ -1,12 +1,31 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+use crate::theme::ThemeSpec;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
     pub notes_dir: Option<PathBuf>,
     /// Text rows shown per cassette; overridden by the `-l` CLI flag.
     pub visible_lines: Option<usize>,
+    /// Name of the theme to use; overridden by the `--theme` CLI flag.
+    pub theme: Option<String>,
+    /// User-defined themes: `[themes.<name>]` tables with color fields
+    /// (`text`, `background`, `unfocused_bg`, `unfocused_fg`, `accent_a`,
+    /// `accent_b`). A name matching a built-in overrides it field-by-field.
+    #[serde(default)]
+    pub themes: HashMap<String, ThemeSpec>,
+    /// Named topic templates selectable with `-T`: each entry is a list of
+    /// topics, and the session starts with one cassette per topic.
+    ///
+    /// ```toml
+    /// [templates]
+    /// morning = ["gratitude", "priorities", "loose thoughts"]
+    /// ```
+    #[serde(default)]
+    pub templates: HashMap<String, Vec<String>>,
 }
 
 pub fn load_config() -> Config {

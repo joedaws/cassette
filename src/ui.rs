@@ -8,16 +8,13 @@ use ratatui::{
 
 use crate::app::{App, Mode, GUTTER_WIDTH, MINIMIZED_ROWS};
 use crate::cassette::{char_width, pos_to_row_col, wrap_spans, Cassette, Side};
+use crate::theme::Theme;
 
-/// Accent color for all "you are on side B" cues.
-const SIDE_B_ACCENT: Color = Color::Yellow;
+// All colors come from the active `Theme` (side accents, unfocused cassette
+// colors, and — when set — focused text/background; the default theme keeps
+// the terminal's own colors for the focused cassette, issue #16).
 
-// Focused cassette uses the terminal's default colors (issue #16); unfocused
-// cassettes keep a colored background to visually separate themselves.
-const UNFOCUSED_BG: Color = Color::Rgb(0, 0, 170);
-const UNFOCUSED_FG: Color = Color::Rgb(255, 255, 255);
-
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let area = frame.area();
     let rpc = app.rows_per_cassette();
 
@@ -62,9 +59,10 @@ pub fn render(frame: &mut Frame, app: &App) {
                 cw,
                 app.visible_lines,
                 app.mode,
+                theme,
             );
         } else {
-            render_cassette_min(frame, chunks[chunk_idx], cassette, cw);
+            render_cassette_min(frame, chunks[chunk_idx], cassette, cw, theme);
         }
     }
 
@@ -82,43 +80,86 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     render_reel_stats(frame, chunks[n + 2], app);
 
-    // Status messages take precedence; otherwise show a vim-style info line.
+    // The topic prompt owns the line while open; then status messages; then
+    // the idle nudge; otherwise a vim-style info line.
     let info;
-    let status = match &app.status_msg {
-        Some(m) => m.as_str(),
-        None => {
-            let c = &app.cassettes[app.focus_idx];
-            let (ln, col) = c.cursor_line_col();
-            let mode_str = match app.mode {
-                Mode::Insert => "-- INSERT --",
-                Mode::Normal => "-- NORMAL --",
-            };
-            let side = match c.side {
-                Side::A => "",
-                Side::B => "  ·  side B",
-            };
-            info = format!(
-                "{}  ln {}, col {}  ·  {} chars  ·  cassette {}/{}{}",
-                mode_str,
-                ln,
-                col,
-                c.char_count(),
-                app.focus_idx + 1,
-                app.cassettes.len(),
-                side
-            );
-            info.as_str()
-        }
+    let mut info_style = Style::new();
+    let status = if app.mode == Mode::Topic {
+        info = format!("topic: {}▏", app.topic_input);
+        info.as_str()
+    } else if let Some(m) = &app.status_msg {
+        m.as_str()
+    } else if app.idle_nudge() {
+        info_style = Style::new().fg(Color::DarkGray);
+        "· · ·  tape's still rolling — keep writing  · · ·"
+    } else {
+        let c = &app.cassettes[app.focus_idx];
+        let (ln, col) = c.cursor_line_col();
+        let mode_str = match app.mode {
+            Mode::Insert if app.record => "-- RECORD --",
+            Mode::Insert => "-- INSERT --",
+            Mode::Normal => "-- NORMAL --",
+            Mode::Topic => unreachable!("handled above"),
+        };
+        let side = match c.side {
+            Side::A => "  ·  side A",
+            Side::B => "  ·  side B",
+        };
+        info = format!(
+            "{}  ln {}, col {}  ·  {} chars  ·  cassette {}/{}{}",
+            mode_str,
+            ln,
+            col,
+            c.char_count(),
+            app.focus_idx + 1,
+            app.cassettes.len(),
+            side
+        );
+        info.as_str()
     };
-    frame.render_widget(Paragraph::new(status), chunks[n + 3]);
+    frame.render_widget(Paragraph::new(status).style(info_style), chunks[n + 3]);
 
     let help = match app.mode {
-        Mode::Insert => "Esc:normal  Enter:newline  ^W:del word  ^F:flip side  Tab:next  ^N:new  ^C:quit",
-        Mode::Normal => {
-            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  ^F:flip  q:quit"
+        Mode::Insert if app.record => {
+            "type:the tape only rolls forward  Enter:newline  ^T:topic  ^B:flip side  Tab:next  ^N:new  ^C:quit & save"
         }
+        Mode::Insert => "Esc:normal  Enter:newline  ^W:del word  ^T:topic  ^B:flip side  Tab:next  ^N:new  ^C:quit",
+        Mode::Normal => {
+            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  t:topic  ^B:flip  q:quit"
+        }
+        Mode::Topic => "Enter:set topic  Esc:cancel  (empty input clears the topic)",
     };
-    frame.render_widget(Paragraph::new(help), chunks[n + 4]);
+    frame.render_widget(Paragraph::new(help_line(help, theme)), chunks[n + 4]);
+}
+
+/// Style a `key:description  key:description` help string: key combos get
+/// the theme's `help_key` color (bold), descriptions and anything without a
+/// `:` get the dimmer `help_text` color.
+fn help_line<'a>(help: &'a str, theme: &Theme) -> Line<'a> {
+    let mut key_style = Style::new().add_modifier(Modifier::BOLD);
+    if let Some(c) = theme.help_key {
+        key_style = key_style.fg(c);
+    }
+    let mut text_style = Style::new();
+    if let Some(c) = theme.help_text {
+        text_style = text_style.fg(c);
+    }
+
+    let mut spans = Vec::new();
+    for (i, group) in help.split("  ").enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        match group.split_once(':') {
+            Some((keys, desc)) => {
+                spans.push(Span::styled(keys, key_style));
+                spans.push(Span::styled(":", text_style));
+                spans.push(Span::styled(desc, text_style));
+            }
+            None => spans.push(Span::styled(group, text_style)),
+        }
+    }
+    Line::from(spans)
 }
 
 /// Overlay a right-aligned "N more ↑/↓" hint on a separator row.
@@ -143,21 +184,48 @@ fn render_overflow_hint(frame: &mut Frame, sep_area: Rect, count: usize, arrow: 
     );
 }
 
-/// A cassette's top separator row; on side B a yellow label is woven into it.
-fn render_separator(frame: &mut Frame, area: Rect, ch: char, side: Side, label: &str) {
+/// A cassette's top separator row: the active side's tag is woven into it
+/// (accents from the theme; side A carries the loud one), followed by the
+/// topic label when one is set. `short` picks the compact tags used on
+/// minimized cassettes.
+fn render_separator(
+    frame: &mut Frame,
+    area: Rect,
+    ch: char,
+    cassette: &Cassette,
+    short: bool,
+    theme: &Theme,
+) {
     let sep_area = Rect { height: 1, ..area };
     let total = area.width as usize;
-    if side == Side::B {
-        let used = 2 + label.chars().count();
-        let line = Line::from(vec![
-            Span::raw(ch.to_string().repeat(2)),
-            Span::styled(label.to_string(), Style::new().fg(SIDE_B_ACCENT)),
-            Span::raw(ch.to_string().repeat(total.saturating_sub(used))),
-        ]);
-        frame.render_widget(Paragraph::new(line), sep_area);
-    } else {
-        frame.render_widget(Paragraph::new(ch.to_string().repeat(total)), sep_area);
+    let accent = match cassette.side {
+        Side::A => theme.accent_a,
+        Side::B => theme.accent_b,
+    };
+    let tag = match (cassette.side, short) {
+        (Side::A, false) => "╡ SIDE A ╞",
+        (Side::A, true) => "╡ A ╞",
+        (Side::B, false) => "╡ SIDE B ╞",
+        (Side::B, true) => "╡ B ╞",
+    };
+    let tag_style = Style::new().fg(accent);
+
+    let mut used = 2 + tag.chars().count();
+    let mut spans = vec![
+        Span::raw(ch.to_string().repeat(2)),
+        Span::styled(tag, tag_style),
+    ];
+    if let Some(topic) = &cassette.topic {
+        let label = format!("╡ {} ╞", topic);
+        used += 1 + label.chars().count();
+        spans.push(Span::raw(ch.to_string()));
+        spans.push(Span::styled(
+            label,
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
     }
+    spans.push(Span::raw(ch.to_string().repeat(total.saturating_sub(used))));
+    frame.render_widget(Paragraph::new(Line::from(spans)), sep_area);
 }
 
 /// Logical line number and whether the row starts that line, for each wrap span.
@@ -200,12 +268,32 @@ fn fade_style(t: f64) -> Style {
     }
 }
 
+/// Fade for the focused text under the active theme. With explicit text and
+/// background colors the row fg lerps between them (floored so text stays
+/// readable); with only a text color, DIM approximates the fade; with
+/// neither, the terminal-default modifier fade applies.
+fn themed_fade(t: f64, theme: &Theme) -> Style {
+    match (theme.text, theme.background) {
+        (Some(fg), Some(bg)) => Style::new().fg(lerp_color(t.clamp(0.35, 1.0), fg, bg)),
+        (Some(fg), None) => {
+            let s = Style::new().fg(fg);
+            if t >= 0.9 {
+                s
+            } else {
+                s.add_modifier(Modifier::DIM)
+            }
+        }
+        _ => fade_style(t),
+    }
+}
+
 /// Render the focused cassette: a `═` separator followed by `visible_lines`
 /// rows of word-wrapped text on the terminal's default background, with a
 /// line-number gutter. The viewport scrolls typewriter-style (cursor row
 /// centered, clamped at the ends) and rows fade with distance from the
 /// cursor row, so the bright band follows the cursor even when the scroll
 /// clamp leaves it off-center.
+#[allow(clippy::too_many_arguments)]
 fn render_cassette_focused(
     frame: &mut Frame,
     area: Rect,
@@ -213,8 +301,9 @@ fn render_cassette_focused(
     cw: usize,
     visible_lines: usize,
     mode: Mode,
+    theme: &Theme,
 ) {
-    render_separator(frame, area, '═', cassette.side, "╡ SIDE B ╞");
+    render_separator(frame, area, '═', cassette, false, theme);
 
     if area.height <= 1 {
         return;
@@ -257,12 +346,12 @@ fn render_cassette_focused(
         // Fade with distance from the cursor row, which stays at full brightness.
         let dist = line_idx.abs_diff(cursor_row);
         let fade_t = (1.0 - dist as f64 / (fade_zone + 1) as f64).clamp(0.15, 1.0);
-        let text_style = fade_style(fade_t);
+        let text_style = themed_fade(fade_t, theme);
         // The gutter doubles as a persistent side indicator while writing.
-        let gutter_style = match cassette.side {
-            Side::A => Style::new().fg(Color::DarkGray),
-            Side::B => Style::new().fg(SIDE_B_ACCENT),
-        };
+        let gutter_style = Style::new().fg(match cassette.side {
+            Side::A => theme.accent_a,
+            Side::B => theme.accent_b,
+        });
 
         let mut spans: Vec<Span> = vec![Span::raw(" ")];
 
@@ -274,26 +363,29 @@ fn render_cassette_focused(
         };
         spans.push(Span::styled(gutter, gutter_style));
 
+        // The cursor cell reverses the theme's own colors so the block reads
+        // correctly on themed backgrounds too.
+        let mut cursor_style = Style::new().add_modifier(Modifier::REVERSED);
+        if let Some(fg) = theme.text {
+            cursor_style = cursor_style.fg(fg);
+        }
+        if let Some(bg) = theme.background {
+            cursor_style = cursor_style.bg(bg);
+        }
+
         let mut rendered = 0;
         if let Some(&(disp_start, disp_end)) = row_spans.get(line_idx) {
             for (offset, &ch) in display[disp_start..disp_end].iter().enumerate() {
                 // Insert mode: the bar cell. Normal mode: block over the char.
                 let is_cursor = disp_start + offset == cursor_disp;
-                let style = if is_cursor {
-                    Style::new().add_modifier(Modifier::REVERSED)
-                } else {
-                    text_style
-                };
+                let style = if is_cursor { cursor_style } else { text_style };
                 spans.push(Span::styled(ch.to_string(), style));
                 rendered += char_width(ch);
             }
             // Normal-mode cursor at the row's end (before a '\n' or at the end
             // of the text) has no char to sit on: draw a block on a space.
             if mode == Mode::Normal && line_idx == cursor_row && cursor_disp >= disp_end {
-                spans.push(Span::styled(
-                    " ",
-                    Style::new().add_modifier(Modifier::REVERSED),
-                ));
+                spans.push(Span::styled(" ", cursor_style));
                 rendered += 1;
             }
         }
@@ -305,13 +397,23 @@ fn render_cassette_focused(
         lines.push(Line::from(spans));
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), text_area);
+    let mut para = Paragraph::new(Text::from(lines));
+    if let Some(bg) = theme.background {
+        para = para.style(Style::new().bg(bg));
+    }
+    frame.render_widget(para, text_area);
 }
 
 /// Render an unfocused cassette minimized to a `─` separator plus its last
 /// text row, keeping the colored background and showing the line number.
-fn render_cassette_min(frame: &mut Frame, area: Rect, cassette: &Cassette, cw: usize) {
-    render_separator(frame, area, '─', cassette.side, "╡ B ╞");
+fn render_cassette_min(
+    frame: &mut Frame,
+    area: Rect,
+    cassette: &Cassette,
+    cw: usize,
+    theme: &Theme,
+) {
+    render_separator(frame, area, '─', cassette, true, theme);
 
     if area.height <= 1 {
         return;
@@ -322,7 +424,7 @@ fn render_cassette_min(frame: &mut Frame, area: Rect, cassette: &Cassette, cw: u
         ..area
     };
 
-    let (bg, fg) = (UNFOCUSED_BG, UNFOCUSED_FG);
+    let (bg, fg) = (theme.unfocused_bg, theme.unfocused_fg);
     let chars: Vec<char> = cassette
         .left
         .chars()
@@ -449,7 +551,9 @@ mod tests {
         let mut app = App::new(None, None, Some(5));
         app.resize(80, 24);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| render(f, &app)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &Theme::default()))
+            .unwrap();
         let buf = terminal.backend().buffer();
 
         let row_text =
@@ -472,7 +576,9 @@ mod tests {
         let bars = ['·', '░', '▒', '▓'];
         let stats_row = |app: &App| -> String {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-            terminal.draw(|f| render(f, app)).unwrap();
+            terminal
+                .draw(|f| render(f, app, &Theme::default()))
+                .unwrap();
             let buf = terminal.backend().buffer();
             (0..80)
                 .map(|x| buf[(x, 21u16)].symbol().to_string())
@@ -491,6 +597,145 @@ mod tests {
         assert!(row.contains("0 / 100"), "goal stats render");
     }
 
+    /// Issue #37: the help line separates key combos from descriptions —
+    /// keys bold in `help_key`, descriptions in the dimmer `help_text`.
+    #[test]
+    fn help_line_styles_keys_and_descriptions() {
+        let mut app = App::new(None, None, Some(5));
+        app.resize(100, 24);
+        let theme = crate::theme::resolve(Some("gruvbox"), &std::collections::HashMap::new())
+            .expect("gruvbox is built in");
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| render(f, &app, &theme)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        // Help row is the last row; insert help starts "Esc:normal".
+        let key_cell = buf[(0u16, 23u16)].style(); // 'E' of "Esc"
+        assert!(key_cell.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(key_cell.fg, Some(Color::Rgb(0xeb, 0xdb, 0xb2)));
+        let desc_cell = buf[(4u16, 23u16)].style(); // 'n' of "normal"
+        assert!(!desc_cell.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(desc_cell.fg, Some(Color::Rgb(0x92, 0x83, 0x74)));
+
+        // Default theme: keys keep terminal fg, descriptions go DarkGray.
+        terminal
+            .draw(|f| render(f, &app, &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(
+            buf[(0u16, 23u16)].style().fg,
+            Some(Color::Reset),
+            "keys keep the terminal's own fg"
+        );
+        assert_eq!(buf[(4u16, 23u16)].style().fg, Some(Color::DarkGray));
+    }
+
+    /// Issue #34: the side accents are swapped — side A wears the yellow
+    /// tag and gutter, side B the dark gray.
+    #[test]
+    fn side_accents_are_swapped() {
+        let mut app = App::new(None, None, Some(5));
+        app.resize(80, 24);
+        app.modify_focused(|c| c.insert('x'));
+
+        let styles = |app: &App| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|f| render(f, app, &Theme::default()))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            // Tag char inside "══╡ SIDE X ╞" at x=2; gutter digit at x=1, y=1.
+            (buf[(2u16, 0u16)].style().fg, buf[(3u16, 1u16)].style().fg)
+        };
+
+        let (tag, gutter) = styles(&app);
+        assert_eq!(tag, Some(Color::Yellow), "side A tag is loud now");
+        assert_eq!(gutter, Some(Color::Yellow), "side A gutter matches");
+
+        app.modify_focused(|c| {
+            c.flip();
+            c.insert('y');
+        });
+        let (tag, gutter) = styles(&app);
+        assert_eq!(tag, Some(Color::DarkGray), "side B tag went calm");
+        assert_eq!(gutter, Some(Color::DarkGray));
+    }
+
+    /// A theme with explicit colors paints the focused cassette: background
+    /// fill, text color at the cursor row, and themed side accents.
+    #[test]
+    fn themed_render_paints_focused_cassette() {
+        let theme = crate::theme::resolve(Some("gruvbox"), &std::collections::HashMap::new())
+            .expect("gruvbox is built in");
+        let mut app = App::new(None, None, Some(5));
+        app.resize(40, 20);
+        app.modify_focused(|c| {
+            for ch in "hi".chars() {
+                c.insert(ch);
+            }
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|f| render(f, &app, &theme)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        // Text cell 'h' at x=5, y=1: gruvbox fg on gruvbox bg.
+        let cell = &buf[(5u16, 1u16)];
+        assert_eq!(cell.symbol(), "h");
+        assert_eq!(cell.style().fg, Some(Color::Rgb(0xeb, 0xdb, 0xb2)));
+        assert_eq!(cell.style().bg, Some(Color::Rgb(0x28, 0x28, 0x28)));
+        // Padding cell far right of the text row is filled with the theme bg.
+        assert_eq!(
+            buf[(30u16, 1u16)].style().bg,
+            Some(Color::Rgb(0x28, 0x28, 0x28))
+        );
+        // Side A separator tag uses the gruvbox accent.
+        assert_eq!(
+            buf[(2u16, 0u16)].style().fg,
+            Some(Color::Rgb(0xfa, 0xbd, 0x2f))
+        );
+        // Faded row below the cursor row lerps toward the background:
+        // still reddish-tinted, but darker than full text.
+        let faded = buf[(5u16, 2u16)].style().fg;
+        assert_ne!(faded, Some(Color::Rgb(0xeb, 0xdb, 0xb2)), "row 2 is faded");
+    }
+
+    /// Both sides announce themselves: side A tag on the focused separator,
+    /// side B tag after a flip, and the topic label woven in when set.
+    #[test]
+    fn separator_shows_side_tag_and_topic() {
+        let row_text = |app: &App, y: u16| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|f| render(f, app, &Theme::default()))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect()
+        };
+
+        let mut app = App::new(None, None, Some(5));
+        app.resize(80, 24);
+        assert!(row_text(&app, 0).contains("╡ SIDE A ╞"));
+
+        app.modify_focused(|c| c.flip());
+        assert!(row_text(&app, 0).contains("╡ SIDE B ╞"));
+
+        app.modify_focused(|c| {
+            c.flip();
+            c.topic = Some("dream log".into());
+        });
+        let row = row_text(&app, 0);
+        assert!(row.contains("╡ SIDE A ╞"));
+        assert!(row.contains("╡ dream log ╞"));
+
+        // Minimized cassettes get the compact tag plus the topic. After
+        // adding a cassette, cassette 1 is minimized at the top of the stack.
+        app.add_cassette();
+        let row = row_text(&app, 0);
+        assert!(row.contains("╡ A ╞"), "compact side tag: {row}");
+        assert!(row.contains("╡ dream log ╞"));
+    }
+
     /// With the cursor at the start of a long text the scroll clamp pins the
     /// viewport to the top, leaving the cursor row off-center: the fade must
     /// still be brightest at the cursor, not at the middle of the cassette.
@@ -507,7 +752,9 @@ mod tests {
         app.mode = Mode::Normal;
 
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
-        terminal.draw(|f| render(f, &app)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &Theme::default()))
+            .unwrap();
         let buf = terminal.backend().buffer();
 
         // Text rows start at y=1 (below the separator); text at x=5 (pad + gutter).

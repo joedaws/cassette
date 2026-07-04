@@ -42,7 +42,11 @@ fn build_frontmatter(app: &App) -> String {
 fn build_body(app: &App) -> String {
     let mut out = String::new();
     for (i, cassette) in app.cassettes.iter().enumerate() {
-        out.push_str(&format!("# Cassette {}\n\n", i + 1));
+        match &cassette.topic {
+            Some(topic) => out.push_str(&format!("# Cassette {} — {}\n\n", i + 1, topic)),
+            None => out.push_str(&format!("# Cassette {}\n\n", i + 1)),
+        }
+        out.push_str("## Side A\n\n");
         out.push_str(&cassette.side_a_text());
         out.push_str("\n\n");
         let side_b = cassette.side_b_text();
@@ -53,4 +57,51 @@ fn build_body(app: &App) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with_text(text: &str) -> App {
+        let mut app = App::new(None, None, None);
+        app.modify_focused(|c| {
+            for ch in text.chars() {
+                c.insert(ch);
+            }
+        });
+        app
+    }
+
+    #[test]
+    fn body_labels_side_a_and_topic() {
+        let mut app = app_with_text("thoughts");
+        app.modify_focused(|c| c.topic = Some("morning pages".into()));
+        let body = build_body(&app);
+        assert!(body.contains("# Cassette 1 — morning pages\n"));
+        assert!(body.contains("## Side A\n\nthoughts\n"));
+        assert!(!body.contains("## Side B"), "empty side B stays out");
+    }
+
+    #[test]
+    fn body_without_topic_keeps_plain_heading() {
+        let app = app_with_text("hi");
+        let body = build_body(&app);
+        assert!(body.contains("# Cassette 1\n"));
+        assert!(body.contains("## Side A\n"));
+    }
+
+    #[test]
+    fn body_includes_side_b_when_written() {
+        let mut app = app_with_text("front");
+        app.modify_focused(|c| {
+            c.flip();
+            for ch in "back".chars() {
+                c.insert(ch);
+            }
+        });
+        let body = build_body(&app);
+        assert!(body.contains("## Side A\n\nfront\n"));
+        assert!(body.contains("## Side B\n\nback\n"));
+    }
 }
