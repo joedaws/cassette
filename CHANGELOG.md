@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.9.0 - 2026-07-03
+
+### Added
+- Daily practice: `cassette today` opens (or creates) a note named after
+  the date in the notes dir; a second session the same day appends as a
+  `## Session N — HH:MM` section and re-sums the frontmatter word count,
+  instead of the `_1.md` conflict rename (which explicit names keep).
+  The filename format is configurable with the `daily_format` config key
+  (chrono syntax, default `%Y-%m-%d`). (#42)
+- `cassette stats`: current daily streak (tolerant of an unwritten today),
+  notes and words this week and this month, and totals — read straight
+  from the frontmatter of the notes dir. No new state anywhere. (#43)
+- Resume: `cassette --resume [FILE]` parses a saved note back into
+  cassettes (topics, sides, cursor at the end) and keeps writing to the
+  same file; with no argument it resumes the most recently modified note.
+  Autosaves now mark the note `draft: true` until the session finishes
+  cleanly, so after a crash the next launch offers the draft for resume
+  ([y/N] prompt; declining clears the marker). (#44)
+- Signal safety: SIGTERM and SIGHUP save the session and restore the
+  terminal before exiting; Ctrl+Z (and SIGTSTP) flushes the note, hands
+  the terminal back to the shell, and resumes cleanly with a redraw after
+  `fg`. (#45)
+- Bracketed paste: a paste lands as one edit — one undo snapshot for the
+  whole chunk, `\r\n`/`\r` normalized to `\n` — instead of a stream of
+  keystrokes. Pasting into the topic prompt joins lines. (#46)
+
+### Changed
+- The config file lives at `$XDG_CONFIG_HOME/cassette/config.toml`
+  (falling back to `~/.config/cassette/config.toml`) on every platform;
+  on macOS it previously resolved to `~/Library/Application Support`. (#47)
+- A config.toml that exists but fails to parse now exits with the TOML
+  error (file, line, column) instead of silently running with defaults. (#36)
+
 ## 0.8.0 - 2026-07-04
 
 ### Added
