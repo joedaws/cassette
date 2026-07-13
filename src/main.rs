@@ -137,6 +137,16 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    if let Some(words) = &args.find {
+        let entries = notes_dir
+            .as_deref()
+            .map(find::scan_notes_dir)
+            .unwrap_or_default();
+        let query = (!words.is_empty()).then(|| words.join(" "));
+        println!("{}", find::render(&entries, query.as_deref()));
+        return Ok(());
+    }
+
     // Resolve the theme and topic template before touching the terminal so
     // an unknown name can die() cleanly.
     let theme = match theme::resolve(args.theme.as_deref().or(cfg.theme.as_deref()), &cfg.themes) {
@@ -820,6 +830,8 @@ struct Args {
     record: bool,
     daily: bool,
     stats: bool,
+    /// `find` with the query words that followed it; empty = list all.
+    find: Option<Vec<String>>,
     /// `--resume` with an optional note name: `Some(None)` resumes the most
     /// recently modified note.
     resume: Option<Option<String>>,
@@ -865,6 +877,8 @@ Actions:
                  same day appends as a new '## Session' section
   stats          streak, weekly/monthly notes and words, totals — read
                  from the frontmatter of everything in the notes dir
+  find [TEXT]    list recent notes newest-first (date, words, topics,
+                 first line); TEXT filters by name, topic, or content
   +themes        list available themes (built-in and from config.toml)
 ";
 
@@ -900,16 +914,21 @@ fn parse_args() -> Args {
     let mut record = false;
     let mut daily = false;
     let mut stats = false;
+    let mut find = None;
     let mut resume = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "today" if !daily && !stats && note_name.is_none() => {
+            "today" if !daily && !stats && find.is_none() && note_name.is_none() => {
                 daily = true;
                 i += 1;
             }
-            "stats" if !daily && !stats && note_name.is_none() => {
+            "stats" if !daily && !stats && find.is_none() && note_name.is_none() => {
                 stats = true;
+                i += 1;
+            }
+            "find" if !daily && !stats && find.is_none() && note_name.is_none() => {
+                find = Some(Vec::new());
                 i += 1;
             }
             "-h" | "--help" => {
@@ -967,10 +986,13 @@ fn parse_args() -> Args {
                 die(&format!("unknown option '{arg}'"));
             }
             arg => {
-                if note_name.is_some() || daily || stats {
+                if let Some(words) = &mut find {
+                    words.push(arg.to_string());
+                } else if note_name.is_some() || daily || stats {
                     die(&format!("unexpected extra argument '{arg}'"));
+                } else {
+                    note_name = Some(arg.to_string());
                 }
-                note_name = Some(arg.to_string());
                 i += 1;
             }
         }
@@ -987,6 +1009,7 @@ fn parse_args() -> Args {
         record,
         daily,
         stats,
+        find,
         resume,
     }
 }

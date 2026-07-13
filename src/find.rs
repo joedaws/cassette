@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use chrono::NaiveDateTime;
 
 use crate::output;
@@ -71,6 +73,25 @@ pub fn parse_entry(name: &str, content: &str, fallback: NaiveDateTime) -> NoteEn
     }
 }
 
+/// Read every `.md` note in the notes dir (non-recursive, like the writer),
+/// using each file's mtime as the date fallback.
+pub fn scan_notes_dir(dir: &Path) -> Vec<NoteEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+        .filter_map(|e| {
+            let content = std::fs::read_to_string(e.path()).ok()?;
+            let mtime: chrono::DateTime<chrono::Local> =
+                e.metadata().and_then(|m| m.modified()).ok()?.into();
+            let name = e.file_name().to_string_lossy().into_owned();
+            Some(parse_entry(&name, &content, mtime.naive_local()))
+        })
+        .collect()
+}
+
 const MAX_LISTED: usize = 10;
 
 /// The plain-text `cassette find` listing: newest first, optionally filtered,
@@ -89,7 +110,7 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>) -> String {
     if matched.is_empty() {
         return format!("no notes match '{}'", query.unwrap_or_default());
     }
-    matched.sort_by(|a, b| b.date.cmp(&a.date));
+    matched.sort_by_key(|e| std::cmp::Reverse(e.date));
 
     let mut out = String::new();
     for e in matched.iter().take(MAX_LISTED) {
