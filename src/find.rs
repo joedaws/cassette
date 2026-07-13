@@ -71,6 +71,55 @@ pub fn parse_entry(name: &str, content: &str, fallback: NaiveDateTime) -> NoteEn
     }
 }
 
+const MAX_LISTED: usize = 10;
+
+/// The plain-text `cassette find` listing: newest first, optionally filtered,
+/// capped at `MAX_LISTED` with a "… N more" hint.
+pub fn render(entries: &[NoteEntry], query: Option<&str>) -> String {
+    if entries.is_empty() {
+        return "no notes yet — the first session starts the count".into();
+    }
+    let mut matched: Vec<&NoteEntry> = match query {
+        Some(q) => {
+            let q = q.to_lowercase();
+            entries.iter().filter(|e| e.haystack.contains(&q)).collect()
+        }
+        None => entries.iter().collect(),
+    };
+    if matched.is_empty() {
+        return format!("no notes match '{}'", query.unwrap_or_default());
+    }
+    matched.sort_by(|a, b| b.date.cmp(&a.date));
+
+    let mut out = String::new();
+    for e in matched.iter().take(MAX_LISTED) {
+        out.push_str(&format!(
+            "{}  {:>5} words  {}",
+            e.date.format("%Y-%m-%d %H:%M"),
+            e.words,
+            e.name
+        ));
+        if e.draft {
+            out.push_str(" (draft)");
+        }
+        if !e.topics.is_empty() {
+            out.push_str(&format!(" — {}", e.topics.join(", ")));
+        }
+        out.push('\n');
+        if !e.preview.is_empty() {
+            out.push_str(&format!("    {}\n", e.preview));
+        }
+    }
+    if matched.len() > MAX_LISTED {
+        out.push_str(&format!(
+            "… {} more — 'cassette find <text>' narrows the list\n",
+            matched.len() - MAX_LISTED
+        ));
+    }
+    out.push_str("\nresume one: cassette --resume <name>");
+    out
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -144,6 +193,80 @@ mod tests {
         let e = parse_entry("n.md", &long, dt("2000-01-01T00:00:00"));
         assert_eq!(e.preview.chars().count(), 73, "72 chars + ellipsis");
         assert!(e.preview.ends_with('…'));
+    }
+
+    fn entry(name: &str, date: &str, words: usize) -> NoteEntry {
+        parse_entry(
+            name,
+            &format!(
+                "---\ndate: {date}\nword_count: {words}\n---\n# Cassette 1\n\n## Side A\n\nbody of {name}\n"
+            ),
+            dt("2000-01-01T00:00:00"),
+        )
+    }
+
+    #[test]
+    fn render_sorts_newest_first_with_footer() {
+        let entries = [
+            entry("old.md", "2026-07-01T08:00:00", 10),
+            entry("new.md", "2026-07-13T09:12:00", 412),
+        ];
+        let out = render(&entries, None);
+        let new_pos = out.find("new.md").unwrap();
+        let old_pos = out.find("old.md").unwrap();
+        assert!(new_pos < old_pos, "{out}");
+        assert!(out.contains("2026-07-13 09:12    412 words  new.md"), "{out}");
+        assert!(out.contains("    body of new.md"), "{out}");
+        assert!(out.ends_with("resume one: cassette --resume <name>"), "{out}");
+    }
+
+    #[test]
+    fn render_marks_drafts_and_topics() {
+        let e = parse_entry(
+            "d.md",
+            "---\ndate: 2026-07-13T09:12:00\ndraft: true\nword_count: 5\n---\n# Cassette 1 — gratitude\n\n## Side A\n\nhi\n",
+            dt("2000-01-01T00:00:00"),
+        );
+        let out = render(std::slice::from_ref(&e), None);
+        assert!(out.contains("d.md (draft) — gratitude"), "{out}");
+    }
+
+    #[test]
+    fn render_filters_case_insensitively() {
+        let entries = [
+            entry("morning.md", "2026-07-13T09:12:00", 10),
+            entry("evening.md", "2026-07-12T21:00:00", 10),
+        ];
+        let out = render(&entries, Some("MORNING"));
+        assert!(out.contains("morning.md"), "{out}");
+        assert!(!out.contains("evening.md"), "{out}");
+        assert_eq!(render(&entries, Some("zzz")), "no notes match 'zzz'");
+    }
+
+    #[test]
+    fn render_caps_at_ten_with_more_line() {
+        let entries: Vec<NoteEntry> = (1..=12)
+            .map(|i| entry(&format!("n{i:02}.md"), &format!("2026-07-{i:02}T08:00:00"), 1))
+            .collect();
+        let out = render(&entries, None);
+        assert!(out.contains("n12.md") && out.contains("n03.md"), "{out}");
+        assert!(!out.contains("n02.md"), "{out}");
+        assert!(
+            out.contains("… 2 more — 'cassette find <text>' narrows the list"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn render_empty_dir_message() {
+        assert_eq!(
+            render(&[], None),
+            "no notes yet — the first session starts the count"
+        );
+        assert_eq!(
+            render(&[], Some("x")),
+            "no notes yet — the first session starts the count"
+        );
     }
 
     #[test]
