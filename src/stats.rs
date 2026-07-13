@@ -60,6 +60,31 @@ fn streak(dates: &HashSet<NaiveDate>, today: NaiveDate) -> u32 {
     n
 }
 
+/// The two-line `last 7:` block: weekday initials over hit/miss markers for
+/// the 7 calendar days ending today, oldest first, plus a hit count.
+/// An unwritten today is pending (`·`), not a miss, and leaves the denominator.
+fn last_seven(dates: &HashSet<NaiveDate>, today: NaiveDate) -> String {
+    let (mut initials, mut marks) = (Vec::new(), Vec::new());
+    let (mut hits, mut denom) = (0, 0);
+    for back in (0..7).rev() {
+        let day = today - chrono::Days::new(back);
+        initials.push(day.weekday().to_string()[..1].to_owned());
+        let written = dates.contains(&day);
+        if day == today && !written {
+            marks.push("·");
+            continue;
+        }
+        marks.push(if written { "●" } else { "○" });
+        denom += 1;
+        hits += usize::from(written);
+    }
+    format!(
+        "last 7:      {}\n             {}   {hits}/{denom}",
+        initials.join(" "),
+        marks.join(" ")
+    )
+}
+
 fn notes_and_words<'a>(metas: impl Iterator<Item = &'a NoteMeta>) -> String {
     let (mut n, mut words) = (0usize, 0usize);
     for m in metas {
@@ -83,9 +108,11 @@ pub fn render(metas: &[NoteMeta], today: NaiveDate) -> String {
 
     format!(
         "streak:      {days} day{day_plural}\n\
+         {}\n\
          this week:   {}\n\
          this month:  {}\n\
          total:       {} · since {first}",
+        last_seven(&dates, today),
         notes_and_words(
             metas
                 .iter()
@@ -158,6 +185,37 @@ mod tests {
         assert!(out.contains("this month:  2 notes · 700 words"), "{out}");
         assert!(
             out.contains("total:       5 notes · 1050 words · since 2026-06-10"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn last_seven_marks_hits_and_misses() {
+        // Today 2026-07-03 is a Friday and has a note: window Sat Jun 27 → Fri Jul 3.
+        let dates: HashSet<NaiveDate> =
+            ["2026-06-28", "2026-06-30", "2026-07-02", "2026-07-03"].map(d).into();
+        assert_eq!(
+            last_seven(&dates, d("2026-07-03")),
+            "last 7:      S S M T W T F\n             ○ ● ○ ● ○ ● ●   4/7"
+        );
+    }
+
+    #[test]
+    fn last_seven_pending_today_is_not_a_miss() {
+        let dates: HashSet<NaiveDate> = ["2026-06-28", "2026-06-30", "2026-07-02"].map(d).into();
+        assert_eq!(
+            last_seven(&dates, d("2026-07-03")),
+            "last 7:      S S M T W T F\n             ○ ● ○ ● ○ ● ·   3/6",
+            "unwritten today shows · and leaves the denominator"
+        );
+    }
+
+    #[test]
+    fn render_includes_last_seven_row() {
+        let metas = [meta("2026-07-02", 300), meta("2026-07-03", 400)];
+        let out = render(&metas, d("2026-07-03"));
+        assert!(
+            out.contains("last 7:      S S M T W T F\n             ○ ○ ○ ○ ○ ● ●   2/7"),
             "{out}"
         );
     }
