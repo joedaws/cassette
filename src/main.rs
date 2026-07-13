@@ -16,6 +16,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 mod app;
 mod cassette;
 mod config;
+mod find;
 mod output;
 mod stats;
 mod theme;
