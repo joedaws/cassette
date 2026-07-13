@@ -179,9 +179,15 @@ until a full day is missed — an unwritten *today* is still yours to write.
 ### Picking a thought back up
 
 ```
+cassette find                 # browse recent notes, newest first
+cassette find gratitude       # …filtered by name, topic, or content
 cassette --resume             # continue the most recently modified note
 cassette --resume myjournal   # continue a specific note
 ```
+
+`find` lists what's in the notes dir — date, word count, topics, and the
+first line of each note — so you can spot the one to resume without opening
+anything.
 
 Resume loads a saved note back into the TUI — cassettes, topics, both sides,
 cursor at the end of the text — and keeps writing to the same file. And if a
@@ -336,6 +342,8 @@ Actions:
                  same day appends as a new '## Session' section
   stats          streak, weekly/monthly notes and words, totals — read
                  from the frontmatter of everything in the notes dir
+  find [TEXT]    list recent notes newest-first (date, words, topics,
+                 first line); TEXT filters by name, topic, or content
   +themes        list available themes (built-in and from config.toml)
 ```
 
