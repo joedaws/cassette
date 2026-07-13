@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+- `cassette find [TEXT…]`: list recent notes from the notes dir, newest
+  first — date, word count, draft marker, topics, and a first-line
+  preview, capped at 10 with an "… N more" hint. Any words after `find`
+  become one case-insensitive filter over name, topic, and content;
+  the listing points at `--resume` to pick a note back up. (#55)
+
 ## 0.9.0 - 2026-07-03
 
 ### Added
