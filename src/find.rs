@@ -6,7 +6,10 @@ use crate::output;
 
 /// One saved note as `cassette find` shows it.
 pub struct NoteEntry {
-    pub name: String,
+    /// Openable form shown in the listing: the ~-abbreviated full path when
+    /// scanned from disk, the bare name otherwise. Queries match the bare
+    /// name only, never the directory part.
+    pub path: String,
     pub date: NaiveDateTime,
     pub words: usize,
     pub topics: Vec<String>,
@@ -63,7 +66,7 @@ pub fn parse_entry(name: &str, content: &str, fallback: NaiveDateTime) -> NoteEn
         }
     }
     NoteEntry {
-        name: name.to_string(),
+        path: name.to_string(),
         date: date.unwrap_or(fallback),
         words,
         topics,
@@ -79,6 +82,7 @@ pub fn scan_notes_dir(dir: &Path) -> Vec<NoteEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
+    let home = dirs::home_dir();
     entries
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
@@ -87,9 +91,20 @@ pub fn scan_notes_dir(dir: &Path) -> Vec<NoteEntry> {
             let mtime: chrono::DateTime<chrono::Local> =
                 e.metadata().and_then(|m| m.modified()).ok()?.into();
             let name = e.file_name().to_string_lossy().into_owned();
-            Some(parse_entry(&name, &content, mtime.naive_local()))
+            let mut entry = parse_entry(&name, &content, mtime.naive_local());
+            entry.path = display_path(&e.path(), home.as_deref());
+            Some(entry)
         })
         .collect()
+}
+
+/// The path as the listing shows it: under the home dir it starts with `~`,
+/// anywhere else it stays absolute.
+fn display_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
 }
 
 const MAX_LISTED: usize = 10;
@@ -118,7 +133,7 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>) -> String {
             "{}  {:>5} words  {}",
             e.date.format("%Y-%m-%d %H:%M"),
             e.words,
-            e.name
+            e.path
         ));
         if e.draft {
             out.push_str(" (draft)");
@@ -174,7 +189,7 @@ mod tests {
     #[test]
     fn parse_entry_reads_frontmatter_topics_and_preview() {
         let e = parse_entry("2026-07-13.md", NOTE, dt("2000-01-01T00:00:00"));
-        assert_eq!(e.name, "2026-07-13.md");
+        assert_eq!(e.path, "2026-07-13.md");
         assert_eq!(e.date, dt("2026-07-13T09:12:00"));
         assert_eq!(e.words, 412);
         assert_eq!(e.topics, vec!["gratitude", "priorities"]);
@@ -287,6 +302,49 @@ mod tests {
         assert_eq!(
             render(&[], Some("x")),
             "no notes yet — the first session starts the count"
+        );
+    }
+
+    #[test]
+    fn display_path_abbreviates_home() {
+        assert_eq!(
+            display_path(
+                Path::new("/home/me/.local/share/cassette/notes/a.md"),
+                Some(Path::new("/home/me")),
+            ),
+            "~/.local/share/cassette/notes/a.md"
+        );
+        assert_eq!(
+            display_path(Path::new("/srv/notes/a.md"), Some(Path::new("/home/me"))),
+            "/srv/notes/a.md",
+            "paths outside home stay as-is"
+        );
+        assert_eq!(
+            display_path(Path::new("/srv/notes/a.md"), None),
+            "/srv/notes/a.md",
+            "no home dir → path as-is"
+        );
+    }
+
+    #[test]
+    fn render_shows_the_full_path() {
+        let mut e = entry("new.md", "2026-07-13T09:12:00", 412);
+        e.path = "~/.local/share/cassette/notes/new.md".into();
+        let out = render(std::slice::from_ref(&e), None);
+        assert!(
+            out.contains("2026-07-13 09:12    412 words  ~/.local/share/cassette/notes/new.md"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn filter_ignores_the_directory_part() {
+        let mut e = entry("morning.md", "2026-07-13T09:12:00", 10);
+        e.path = "~/.local/share/cassette/notes/morning.md".into();
+        let out = render(std::slice::from_ref(&e), Some("notes"));
+        assert_eq!(
+            out, "no notes match 'notes'",
+            "directory names must not satisfy queries"
         );
     }
 
