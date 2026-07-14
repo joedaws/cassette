@@ -479,7 +479,7 @@ fn render_reel_stats(frame: &mut Frame, area: Rect, app: &App) {
 
     // A reached word goal is the happiest state and wins over the expired-timer
     // red; the reel staying fully wound keeps the durable cue.
-    let goal_met = app.word_goal.is_some_and(|g| app.total_word_count() >= g);
+    let goal_met = app.word_goal.is_some_and(|g| app.session_word_count() >= g);
     let stats_style = if goal_met {
         Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
     } else {

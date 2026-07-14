@@ -7,13 +7,24 @@ use crate::cassette::Cassette;
 /// `draft` marks an in-flight autosave (`draft: true` in the frontmatter);
 /// the final save on quit clears it, so a surviving draft flag means the
 /// session crashed and the note is offered for `--resume` on next launch.
-pub fn write_markdown(app: &App, path: &Path, draft: bool) -> io::Result<()> {
+/// `note_date` carries a resumed note's original `date:` so saving doesn't
+/// restamp it with this session's start time; `None` for fresh notes.
+pub fn write_markdown(
+    app: &App,
+    path: &Path,
+    draft: bool,
+    note_date: Option<&str>,
+) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let content = format!("{}\n{}", build_frontmatter(app, draft), build_body(app));
+    let content = format!(
+        "{}\n{}",
+        build_frontmatter(app, draft, note_date),
+        build_body(app)
+    );
     std::fs::write(path, content)
 }
 
@@ -126,6 +137,13 @@ pub fn parse_append_base(content: String) -> AppendBase {
     }
 }
 
+/// The raw `date:` value from a note's frontmatter, if any.
+pub fn frontmatter_date(content: &str) -> Option<String> {
+    frontmatter_lines(content)
+        .find_map(|l| l.strip_prefix("date:"))
+        .map(|v| v.trim().to_string())
+}
+
 /// Lines inside the leading `---` frontmatter block (empty if there is none).
 fn frontmatter_lines(content: &str) -> impl Iterator<Item = &str> {
     let mut lines = content.lines();
@@ -182,9 +200,12 @@ pub fn write_markdown_appended(
     std::fs::write(path, out)
 }
 
-fn build_frontmatter(app: &App, draft: bool) -> String {
+fn build_frontmatter(app: &App, draft: bool, note_date: Option<&str>) -> String {
     let dt: chrono::DateTime<chrono::Local> = app.started_at.into();
-    let date_str = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let date_str = match note_date {
+        Some(d) => d.to_string(),
+        None => dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+    };
 
     let mut fm = String::from("---\n");
     fm.push_str(&format!("date: {}\n", date_str));
@@ -246,6 +267,26 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_date_reads_the_raw_value() {
+        assert_eq!(
+            frontmatter_date("---\ndate: 2026-07-09T09:25:57\nword_count: 5\n---\nbody\n"),
+            Some("2026-07-09T09:25:57".to_string())
+        );
+        assert_eq!(frontmatter_date("no frontmatter here"), None);
+        assert_eq!(frontmatter_date("---\nword_count: 5\n---\n"), None);
+    }
+
+    #[test]
+    fn frontmatter_keeps_a_resumed_notes_date() {
+        let app = app_with_text("hello again");
+        let fm = build_frontmatter(&app, false, Some("2026-07-09T09:25:57"));
+        assert!(
+            fm.contains("date: 2026-07-09T09:25:57\n"),
+            "resumed note keeps its original date: {fm}"
+        );
+    }
+
+    #[test]
     fn body_labels_side_a_and_topic() {
         let mut app = app_with_text("thoughts");
         app.modify_focused(|c| c.topic = Some("morning pages".into()));
@@ -281,7 +322,7 @@ mod tests {
             }
         });
 
-        let saved = format!("{}\n{}", build_frontmatter(&app, false), build_body(&app));
+        let saved = format!("{}\n{}", build_frontmatter(&app, false, None), build_body(&app));
         let parsed = parse_markdown(&saved);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].topic.as_deref(), Some("morning pages"));
@@ -312,9 +353,9 @@ mod tests {
     #[test]
     fn draft_flag_written_and_cleared() {
         let app = app_with_text("words");
-        let draft = format!("{}\n{}", build_frontmatter(&app, true), build_body(&app));
+        let draft = format!("{}\n{}", build_frontmatter(&app, true, None), build_body(&app));
         assert!(is_draft(&draft));
-        let final_save = format!("{}\n{}", build_frontmatter(&app, false), build_body(&app));
+        let final_save = format!("{}\n{}", build_frontmatter(&app, false, None), build_body(&app));
         assert!(!is_draft(&final_save));
         assert!(
             !is_draft("no frontmatter\ndraft: true\n"),

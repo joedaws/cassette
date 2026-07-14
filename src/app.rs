@@ -55,6 +55,9 @@ pub struct App {
     /// Record mode (`--record`): the tape only rolls forward — no deletions,
     /// no normal mode. Opt-in; plain sessions keep full editing.
     pub record: bool,
+    /// Words already in the note when a `--resume` loaded it; the session
+    /// recap reports only what was added on top.
+    pub baseline_words: usize,
     /// Seconds since the last keypress; drives the idle nudge.
     pub idle_secs: u32,
     /// Set on any cassette mutation; cleared by the autosaver in `main.rs`.
@@ -98,6 +101,7 @@ impl App {
             topic_input: String::new(),
             topic_return: Mode::Normal,
             record: false,
+            baseline_words: 0,
             idle_secs: 0,
             dirty: false,
             bell: false,
@@ -132,7 +136,7 @@ impl App {
             return;
         }
         if let Some(goal) = self.word_goal {
-            let words = self.total_word_count();
+            let words = self.session_word_count();
             if words >= goal {
                 self.goal_announced = true;
                 self.flash(format!("goal reached — {} words. keep rolling!", words));
@@ -225,6 +229,7 @@ impl App {
         }
         self.cassettes = cassettes;
         self.cassettes.truncate(MAX_CASSETTES);
+        self.baseline_words = self.cassettes.iter().map(|c| c.word_count()).sum();
         self.focus_idx = self.cassettes.len() - 1;
         self.ensure_focus_visible();
     }
@@ -285,13 +290,20 @@ impl App {
         self.cassettes.iter().map(|c| c.word_count()).sum()
     }
 
+    /// Words written this sitting: the total minus what a `--resume` loaded.
+    /// Live stats (goal, reel, info line) run on this; the saved file and its
+    /// frontmatter keep the full total.
+    pub fn session_word_count(&self) -> usize {
+        self.total_word_count().saturating_sub(self.baseline_words)
+    }
+
     /// How much tape has wound onto the take-up reel, 0.0..=1.0: progress
     /// toward the word goal, or elapsed time when only a timer is set.
     /// `None` when neither is set — the session has no bar to show.
     pub fn tape_ratio(&self) -> Option<f64> {
         if let Some(goal) = self.word_goal {
             let goal = goal.max(1);
-            return Some((self.total_word_count() as f64 / goal as f64).min(1.0));
+            return Some((self.session_word_count() as f64 / goal as f64).min(1.0));
         }
         if let (Some(orig), Some(left)) = (self.timer_original_secs, self.timer_secs) {
             if orig > 0 {
@@ -312,7 +324,7 @@ impl App {
     }
 
     pub fn format_stats(&self) -> String {
-        let total_wc = self.total_word_count();
+        let total_wc = self.session_word_count();
         match (self.timer_secs, self.word_goal) {
             (None, None) => "◆".into(),
             _ => {
@@ -387,6 +399,35 @@ mod tests {
         app.focus_prev();
         assert_eq!(app.focus_idx, 2);
         assert_eq!(app.cassette_scroll, 2);
+    }
+
+    #[test]
+    fn session_stats_ignore_resumed_words() {
+        let mut app = App::new(None, Some(10), Some(VISIBLE_LINES));
+        app.load_cassettes(vec![Cassette::from_sides(
+            "twelve resumed words already on the tape from a previous session sit here".into(),
+            String::new(),
+            None,
+        )]);
+        assert_eq!(app.tape_ratio(), Some(0.0), "old words wind no tape");
+        assert!(
+            app.format_stats().contains("0 / 10"),
+            "stats start at zero: {}",
+            app.format_stats()
+        );
+        app.check_goal();
+        assert!(
+            app.status_msg.is_none(),
+            "resumed words never fire the goal celebration"
+        );
+        app.modify_focused(|c| {
+            for ch in " one two three four five six seven eight nine ten".chars() {
+                c.insert(ch);
+            }
+        });
+        assert_eq!(app.tape_ratio(), Some(1.0), "ten new words meet the goal");
+        app.check_goal();
+        assert!(app.status_msg.is_some(), "goal fires on this session's words");
     }
 
     #[test]

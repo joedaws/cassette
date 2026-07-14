@@ -57,6 +57,9 @@ struct Sink {
     wrote: bool,
     /// Daily mode: the existing note this session appends to.
     append: Option<output::AppendBase>,
+    /// A resumed note's original frontmatter `date:`, kept across saves so
+    /// resuming never moves the note to another day in `stats`.
+    note_date: Option<String>,
 }
 
 /// Write the session to the sink: a fresh note, or appended onto the
@@ -65,7 +68,7 @@ struct Sink {
 fn save_note(app: &App, sink: &Sink, draft: bool) -> io::Result<()> {
     match &sink.append {
         Some(base) => output::write_markdown_appended(app, &sink.path, base, draft),
-        None => output::write_markdown(app, &sink.path, draft),
+        None => output::write_markdown(app, &sink.path, draft, sink.note_date.as_deref()),
     }
 }
 
@@ -186,6 +189,26 @@ fn main() -> io::Result<()> {
         ),
         None => None,
     };
+    // A positional name that points at an existing note opens it like
+    // --resume — never a silent conflict-rename to `name_1.md`.
+    if resume_target.is_none() && !args.print_stdout && !args.daily {
+        if let Some(name) = &args.note_name {
+            let path = config::resolve_output_path(
+                Some(name),
+                &std::time::SystemTime::now(),
+                notes_dir.as_deref(),
+            );
+            if path.exists() {
+                if args.template.is_some() {
+                    die(&format!(
+                        "'{}' already exists — resuming it cannot combine with '-T'",
+                        path.display()
+                    ));
+                }
+                resume_target = Some(path);
+            }
+        }
+    }
     if resume_target.is_none() && !args.print_stdout && !args.daily {
         if let Some(draft) = notes_dir.as_deref().and_then(|d| newest_note(d, true)) {
             if std::io::IsTerminal::is_terminal(&io::stdin()) {
@@ -203,22 +226,26 @@ fn main() -> io::Result<()> {
             }
         }
     }
-    let (resume_path, resume_cassettes): (Option<PathBuf>, Option<Vec<cassette::Cassette>>) =
-        match resume_target {
-            Some(p) => {
-                let content = std::fs::read_to_string(&p)
-                    .unwrap_or_else(|e| die(&format!("cannot read '{}': {e}", p.display())));
-                let cassettes = output::parse_markdown(&content);
-                if cassettes.is_empty() {
-                    die(&format!(
-                        "'{}' has no '# Cassette' sections to resume",
-                        p.display()
-                    ));
-                }
-                (Some(p), Some(cassettes))
+    let (resume_path, resume_cassettes, resume_date): (
+        Option<PathBuf>,
+        Option<Vec<cassette::Cassette>>,
+        Option<String>,
+    ) = match resume_target {
+        Some(p) => {
+            let content = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| die(&format!("cannot read '{}': {e}", p.display())));
+            let cassettes = output::parse_markdown(&content);
+            if cassettes.is_empty() {
+                die(&format!(
+                    "'{}' has no '# Cassette' sections to resume",
+                    p.display()
+                ));
             }
-            None => (None, None),
-        };
+            let date = output::frontmatter_date(&content);
+            (Some(p), Some(cassettes), date)
+        }
+        None => (None, None, None),
+    };
 
     // Restore the terminal before the default hook prints, so the panic
     // message is readable and the shell isn't left in raw mode.
@@ -269,6 +296,7 @@ fn main() -> io::Result<()> {
             conflicted: false,
             wrote: false,
             append: None,
+            note_date: resume_date,
         })
     } else {
         let desired = config::resolve_output_path(
@@ -298,6 +326,7 @@ fn main() -> io::Result<()> {
             conflicted,
             wrote: false,
             append,
+            note_date: None,
         })
     };
 
@@ -321,17 +350,27 @@ fn main() -> io::Result<()> {
 }
 
 /// One-line session recap (plus a per-cassette breakdown when there are
-/// several): words, duration, and pace. `None` for empty sessions.
+/// several): words, duration, and pace. `None` for empty sessions. A resumed
+/// session counts only the words added on top of `baseline_words` — and stays
+/// quiet when nothing new was written.
 fn session_summary(app: &App) -> Option<String> {
     if app.is_empty() {
         return None;
     }
-    let words = app.total_word_count();
+    let total = app.total_word_count();
+    let words = total.saturating_sub(app.baseline_words);
+    if app.baseline_words > 0 && words == 0 {
+        return None;
+    }
     let secs = app.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
-    let mut line = format!("{} words in {}:{:02}", words, secs / 60, secs % 60);
+    let label = if app.baseline_words > 0 { " new" } else { "" };
+    let mut line = format!("{}{} words in {}:{:02}", words, label, secs / 60, secs % 60);
     // Pace needs a meaningful denominator; skip it for very short sessions.
     if secs >= 30 {
         line.push_str(&format!(" — {:.0} wpm", words as f64 * 60.0 / secs as f64));
+    }
+    if app.baseline_words > 0 {
+        line.push_str(&format!(" ({} total)", total));
     }
     if app.cassettes.len() > 1 {
         let parts: Vec<String> = app
@@ -855,7 +894,7 @@ cassette — a freewriting TUI
 Usage: cassette [OPTIONS] [NAME]
 
 Arguments:
-  [NAME]         output note name or path
+  [NAME]         output note name or path; an existing note is resumed
                  (default: timestamped file in the notes dir)
 
 Options:
@@ -1169,6 +1208,24 @@ mod tests {
         assert!(app.idle_nudge());
         type_str(&mut app, "a");
         assert!(!app.idle_nudge(), "typing clears the nudge");
+    }
+
+    #[test]
+    fn session_summary_counts_only_words_added_after_resume() {
+        let mut app = App::new(None, None, None);
+        app.load_cassettes(vec![cassette::Cassette::from_sides(
+            "five old words sit here".into(),
+            String::new(),
+            None,
+        )]);
+        assert!(
+            session_summary(&app).is_none(),
+            "resume with nothing new written: no recap"
+        );
+        type_str(&mut app, " two more");
+        let s = session_summary(&app).unwrap();
+        assert!(s.starts_with("2 new words in 0:0"), "summary was: {s}");
+        assert!(s.contains("(7 total)"), "summary was: {s}");
     }
 
     #[test]
