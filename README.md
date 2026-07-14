@@ -183,14 +183,19 @@ cassette find                 # browse recent notes, newest first
 cassette find gratitude       # …filtered by name, topic, or content
 cassette --resume             # continue the most recently modified note
 cassette --resume myjournal   # continue a specific note
+cassette myjournal            # same: an existing name always resumes
 ```
 
 `find` lists what's in the notes dir — date, word count, topics, and the
 first line of each note — so you can spot the one to resume without opening
-anything.
+anything. Each row shows the note's full path (`~`-abbreviated), ready to
+paste into an editor.
 
 Resume loads a saved note back into the TUI — cassettes, topics, both sides,
-cursor at the end of the text — and keeps writing to the same file. And if a
+cursor at the end of the text — and keeps writing to the same file. The note
+keeps its original date (streaks don't care when you edit), and the session's
+stats start from zero: the word-goal reel and the closing recap count only
+what you write this sitting (`12 new words in 4:10 (773 total)`). And if a
 session dies without finishing (power loss, a killed terminal), its autosave
 still carries a `draft: true` marker, so the next launch notices and offers
 to resume it.
@@ -227,8 +232,9 @@ cassette ~/Documents/draft.md # any path (anything containing a /)
 cassette -o                   # print to stdout, write no file
 ```
 
-If the name is taken, cassette saves to `myjournal_1.md` rather than
-overwrite. Sessions with no words write no file at all. While you write,
+If the name already exists, cassette resumes that note — your words load
+back onto the tape and the session keeps writing to the same file, nothing
+is overwritten. Sessions with no words write no file at all. While you write,
 dirty sessions autosave every 30 seconds, and the saved-on-crash guarantee
 covers more than panics: SIGTERM and a closed terminal window (SIGHUP) both
 save the session and restore the terminal on the way out, and Ctrl+Z flushes

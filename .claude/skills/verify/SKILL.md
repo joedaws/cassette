@@ -25,6 +25,12 @@ fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
 - Strip ANSI for assertions: `re.compile(rb'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]|\x1b[>=]|\x1b\][^\x07]*\x07')`.
   The first drain (~1.2s) is a full screen; later drains are ratatui diffs —
   assert on substrings, not layout.
+- Ratatui positions text runs with cursor-move escapes that stand in for the
+  spaces between them, so stripped output has words glued together
+  (`helloworld`, `0/5`). Strip spaces from both sides before comparing:
+  `b"helloworld" in screen.replace(b" ", b"")`.
+- `cargo test` does **not** rebuild `target/debug/cassette` — run `cargo build`
+  before driving the binary or you'll verify stale code.
 - Key bytes: Esc `\x1b`, Enter `\r`, Backspace `\x7f`, Tab `\t`, Ctrl+X = chr(x & 0x1f)
   (Ctrl+B `\x02`, Ctrl+N `\x0e`, Ctrl+C `\x03`).
 - Point the note arg at a scratch path and read the markdown after quit (`Esc` then `q`) —

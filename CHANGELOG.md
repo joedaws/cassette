@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+- Resuming a note no longer restamps its frontmatter `date:` with the new
+  session's start time, so `stats` streaks and daily totals survive a
+  resume on a later day.
+- `cassette <name>` of an existing note now resumes it — previously it
+  silently conflict-renamed to `<name>_1.md` and opened an empty session.
+- A resumed session's stats are session-scoped: the word-goal reel, the
+  goal celebration, the info-line `N / goal` counter, and the end-of-run
+  recap (`N new words … (M total)`) count only words written this
+  sitting; the file's frontmatter keeps the full total.
+
 ### Added
 - `cassette find [TEXT…]`: list recent notes from the notes dir, newest
   first — date, word count, draft marker, topics, and a first-line
   preview, capped at 10 with an "… N more" hint. Any words after `find`
   become one case-insensitive filter over name, topic, and content;
-  the listing points at `--resume` to pick a note back up. (#55)
+  the listing points at `--resume` to pick a note back up. Rows show each
+  note's full path (`~`-abbreviated), ready to open in an editor. (#55)
 
 ## 0.9.0 - 2026-07-03
 
