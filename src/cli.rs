@@ -26,12 +26,17 @@ pub struct Args {
     name = "cassette",
     version,
     about = "cassette — a freewriting TUI",
-    disable_help_subcommand = true
+    disable_help_subcommand = true,
+    disable_version_flag = true
 )]
 struct Cli {
     /// output note name or path; an existing note is resumed
     #[arg(value_name = "NAME")]
     name: Option<String>,
+
+    /// print version
+    #[arg(short = 'V', long = "version", global = true, action = clap::ArgAction::SetTrue)]
+    version: bool,
 
     /// countdown timer in minutes
     #[arg(short = 't', value_name = "MINUTES", global = true,
@@ -123,7 +128,34 @@ impl Cli {
 /// Parse the process arguments, exiting with clap's usage error (code 2) on
 /// bad input.
 pub fn parse() -> Args {
-    Cli::parse().into_args()
+    let cli = Cli::parse();
+    // clap's auto version flag is disabled (see `disable_version_flag`) and
+    // replaced with this hand-checked global bool: clap's propagated version
+    // flag prints "cassette-<subcommand> <version>" once it's nested under a
+    // subcommand, but the old parser (and the version integration test)
+    // expects a bare "cassette <version>" no matter where `-V` appears.
+    if cli.version {
+        println!("cassette {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+    // The hand-rolled parser guarded today/stats/find with `note_name.is_none()`,
+    // so a name before an action word was "unexpected extra argument" (exit 2).
+    // `+themes` had no such guard and stays legal with a name.
+    if cli.name.is_some()
+        && matches!(
+            cli.action,
+            Some(Action::Today | Action::Stats | Action::Find { .. })
+        )
+    {
+        use clap::CommandFactory;
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "a note name cannot be combined with 'today', 'stats', or 'find'",
+            )
+            .exit();
+    }
+    cli.into_args()
 }
 
 #[cfg(test)]

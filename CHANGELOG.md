@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.10.0 - 2026-09-13
+
+### Added
+- `cassette find [TEXT…]`: list recent notes from the notes dir, newest
+  first — date, word count, draft marker, topics, and a first-line
+  preview, capped at 10 with an "… N more" hint. Any words after `find`
+  become one case-insensitive filter over name, topic, and content;
+  the listing points at `--resume` to pick a note back up. Rows show each
+  note's full path (`~`-abbreviated), ready to open in an editor. (#55)
+
+### Changed
+- The CLI now parses with clap v4 (derive API) instead of a hand-rolled
+  parser. `--help` output is clap-generated and reformatted; flags, action
+  words (`today`/`stats`/`find`/`+themes`), and exit codes are unchanged.
 
 ### Fixed
 - Resuming a note no longer restamps its frontmatter `date:` with the new
@@ -17,14 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   goal celebration, the info-line `N / goal` counter, and the end-of-run
   recap (`N new words … (M total)`) count only words written this
   sitting; the file's frontmatter keeps the full total.
-
-### Added
-- `cassette find [TEXT…]`: list recent notes from the notes dir, newest
-  first — date, word count, draft marker, topics, and a first-line
-  preview, capped at 10 with an "… N more" hint. Any words after `find`
-  become one case-insensitive filter over name, topic, and content;
-  the listing points at `--resume` to pick a note back up. Rows show each
-  note's full path (`~`-abbreviated), ready to open in an editor. (#55)
 
 ## 0.9.0 - 2026-07-03
 

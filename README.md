@@ -323,35 +323,40 @@ accent_a = "#ff8800"
 ## CLI reference
 
 ```
-Usage: cassette [OPTIONS] [NAME]
+cassette — a freewriting TUI
+
+Usage: cassette [OPTIONS] [NAME] [COMMAND]
+
+Commands:
+  today    open today's note (named by date)
+  stats    streak, weekly/monthly notes and words, totals
+  find     list recent notes newest-first; TEXT filters by name, topic, or content
+  +themes  list available themes (built-in and from config.toml)
 
 Arguments:
-  [NAME]         output note name or path
-                 (default: timestamped file in the notes dir)
+  [NAME]  output note name or path; an existing note is resumed
 
 Options:
-  -t <MINUTES>   countdown timer in minutes
-  -w <WORDS>     word goal (winds the tape reel)
-  -l <LINES>     visible text rows per cassette (2-40)
-  -T <TEMPLATE>  start with one cassette per topic from the named
-                 [templates] entry in config.toml
-  --theme <NAME> color theme for this session (overrides config)
-  -R, --record   record mode: no deletions, the tape only rolls forward
-  --resume [FILE] load a saved note back into the TUI and keep writing
-                 (default: the most recently modified note)
-  -o, --output   print to stdout on quit instead of writing a file
-  -h, --help     print this help
-  -V, --version  print version
-
-Actions:
-  today          open today's note (named by date); a later session the
-                 same day appends as a new '## Session' section
-  stats          streak, weekly/monthly notes and words, totals — read
-                 from the frontmatter of everything in the notes dir
-  find [TEXT]    list recent notes newest-first (date, words, topics,
-                 first line); TEXT filters by name, topic, or content
-  +themes        list available themes (built-in and from config.toml)
+  -V, --version          print version
+  -t <MINUTES>           countdown timer in minutes
+  -w <WORDS>             word goal (winds the tape reel)
+  -l <LINES>             visible text rows per cassette (2-40)
+  -T <TEMPLATE>          start with one cassette per topic from the named [templates] entry
+      --theme <NAME>     color theme for this session (overrides config)
+  -R, --record           record mode: no deletions, the tape only rolls forward
+  -o, --output           print to stdout on quit instead of writing a file
+      --resume [<FILE>]  load a saved note back into the TUI and keep writing
+  -h, --help             Print help
 ```
+
+Two defaults aren't spelled out in the help text above: `[NAME]`, when
+omitted, defaults to a timestamped file in the notes dir, and `--resume`
+without a `[FILE]` resumes the most recently modified note. `today`,
+`stats`, and `find` don't take a note name — a later session the same
+day appends to `today`'s note as a new `## Session` section, `stats`
+reads streak/weekly/monthly totals from the frontmatter of everything
+in the notes dir, and `find [TEXT]` lists recent notes newest-first
+(date, words, topics, first line), filtered by `TEXT` when given.
 
 ## For maintainers
 

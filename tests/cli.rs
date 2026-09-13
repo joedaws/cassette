@@ -92,3 +92,28 @@ fn unknown_theme_name_exits_two() {
     assert_eq!(out.status.code(), Some(2));
     assert!(!stderr(&out).is_empty());
 }
+
+#[test]
+fn note_name_before_an_action_word_exits_two() {
+    assert_eq!(run(&["mynote", "stats"]).status.code(), Some(2));
+    assert_eq!(run(&["mynote", "find", "foo"]).status.code(), Some(2));
+    assert_eq!(run(&["mynote", "today"]).status.code(), Some(2));
+}
+
+#[test]
+fn note_name_with_themes_action_is_still_allowed() {
+    let out = run(&["mynote", "+themes"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("themes"));
+}
+
+#[test]
+fn version_flag_works_after_an_action_word() {
+    let out = run(&["stats", "--version"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("cassette {}", env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(run(&["today", "-V"]).status.code(), Some(0));
+}
