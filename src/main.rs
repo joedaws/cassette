@@ -857,6 +857,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+#[derive(Debug, Default, PartialEq)]
 struct Args {
     timer_secs: Option<u32>,
     word_goal: Option<usize>,
@@ -942,6 +943,10 @@ fn positive<T: std::str::FromStr + PartialOrd + From<u8>>(flag: &str, val: Optio
 
 fn parse_args() -> Args {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    parse_args_from(&args)
+}
+
+fn parse_args_from(args: &[String]) -> Args {
     let mut timer = None;
     let mut word_goal = None;
     let mut note_name: Option<String> = None;
@@ -1275,5 +1280,102 @@ mod tests {
         assert_eq!(app.focus_idx, 0, "Tab must not switch cassettes mid-prompt");
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.cassettes[0].topic.as_deref(), Some("q"));
+    }
+
+    /// Build the argument slice the parser expects from string literals.
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Every successful invocation shape, pinned. These pass against the
+    /// hand-rolled parser and must keep passing against clap.
+    #[test]
+    fn parses_bare_invocation() {
+        assert_eq!(parse_args_from(&argv(&[])), Args::default());
+    }
+
+    #[test]
+    fn parses_positional_note_name() {
+        let a = parse_args_from(&argv(&["mynote"]));
+        assert_eq!(a.note_name, Some("mynote".to_string()));
+        assert!(a.resume.is_none());
+    }
+
+    #[test]
+    fn timer_is_converted_from_minutes_to_seconds() {
+        assert_eq!(parse_args_from(&argv(&["-t", "10"])).timer_secs, Some(600));
+    }
+
+    #[test]
+    fn parses_word_goal_and_visible_lines() {
+        let a = parse_args_from(&argv(&["-w", "500", "-l", "8"]));
+        assert_eq!(a.word_goal, Some(500));
+        assert_eq!(a.visible_lines, Some(8));
+    }
+
+    #[test]
+    fn parses_template_and_theme() {
+        let a = parse_args_from(&argv(&["-T", "morning", "--theme", "gruvbox"]));
+        assert_eq!(a.template, Some("morning".to_string()));
+        assert_eq!(a.theme, Some("gruvbox".to_string()));
+    }
+
+    #[test]
+    fn parses_record_and_output_in_both_spellings() {
+        assert!(parse_args_from(&argv(&["-R"])).record);
+        assert!(parse_args_from(&argv(&["--record"])).record);
+        assert!(parse_args_from(&argv(&["-o"])).print_stdout);
+        assert!(parse_args_from(&argv(&["--output"])).print_stdout);
+    }
+
+    #[test]
+    fn bare_resume_means_newest_note() {
+        assert_eq!(parse_args_from(&argv(&["--resume"])).resume, Some(None));
+    }
+
+    #[test]
+    fn resume_takes_an_optional_file_name() {
+        assert_eq!(
+            parse_args_from(&argv(&["--resume", "note.md"])).resume,
+            Some(Some("note.md".to_string()))
+        );
+    }
+
+    #[test]
+    fn resume_does_not_swallow_a_following_flag() {
+        let a = parse_args_from(&argv(&["--resume", "-R"]));
+        assert_eq!(a.resume, Some(None));
+        assert!(a.record);
+    }
+
+    #[test]
+    fn parses_action_words() {
+        assert!(parse_args_from(&argv(&["today"])).daily);
+        assert!(parse_args_from(&argv(&["stats"])).stats);
+        assert!(parse_args_from(&argv(&["+themes"])).list_themes);
+    }
+
+    #[test]
+    fn find_collects_trailing_words_as_one_query() {
+        assert_eq!(
+            parse_args_from(&argv(&["find", "some", "words"])).find,
+            Some(vec!["some".to_string(), "words".to_string()])
+        );
+    }
+
+    #[test]
+    fn bare_find_lists_everything() {
+        assert_eq!(parse_args_from(&argv(&["find"])).find, Some(Vec::new()));
+    }
+
+    #[test]
+    fn flags_work_before_and_after_an_action_word() {
+        assert_eq!(
+            parse_args_from(&argv(&["-t", "10", "today"])).timer_secs,
+            Some(600)
+        );
+        let a = parse_args_from(&argv(&["today", "-t", "10"]));
+        assert_eq!(a.timer_secs, Some(600));
+        assert!(a.daily);
     }
 }
