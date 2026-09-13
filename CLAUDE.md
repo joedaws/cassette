@@ -56,65 +56,27 @@ cargo install --path .         # install `cassette` binary to PATH
 - Topic templates live in config.toml as `[templates]` entries (`morning = ["gratitude", "priorities"]`) and are selected with `-T <name>`.
 - All rendering colors flow through the active `Theme` (resolved in `main.rs`, passed to `ui::render`); never hardcode colors in `ui.rs`. Themes come from config (`theme = "name"`, `[themes.<name>]` tables) or `--theme`; with explicit text+background colors the focused fade lerps between them (`themed_fade`), otherwise it falls back to the modifier-based fade.
 
-## Tools
+## Planning and specs
 
-Use `chainlink` cli to track tasks across AI sessions. Data in `.chainlink/issues.db`.
+Designs and implementation plans live in `docs/superpowers/specs/` as
+`YYYY-MM-DD-<topic>-design.md`, created through the `superpowers` skills
+(brainstorming -> writing-plans -> executing-plans). There is no external issue
+tracker; the spec files are the durable record.
 
-## Commands
-
-```bash
-# Issues
-chainlink create "title" [-p high] [-d "desc"]
-chainlink list [-s all|closed] [-l label] [-p priority]
-chainlink show|update|close|reopen|delete <id>
-chainlink subissue <parent> "title"
-
-# Organization
-chainlink comment <id> "text"
-chainlink label|unlabel <id> <label>
-chainlink block|unblock <id> <blocker>
-chainlink blocked|ready
-
-# Sessions
-chainlink session start|end|status|work <id>
-chainlink session end --notes "handoff context"
-```
-
-## Workflow
-
-1. `session start` → see previous handoff
-2. `session work <id>` → mark focus
-3. Work, add comments
-4. `session end --notes "..."` → save context
-
-## Implementation plans (`docs/plans/`)
-
-Some issues have a pre-written plan at `docs/plans/issue-NN-<slug>.md`, referenced in a
-comment on the issue (`chainlink show <id>` surfaces it). When implementing an issue:
-
-- Read the plan first and follow it — steps, file paths, and acceptance criteria were
+- Read the spec first and follow it — steps, file paths, and acceptance criteria were
   written against this repo. Verify claims about the code against the current source
-  before acting; the code may have moved since the plan was written.
-- Plans flag **human steps** (browser logins, tokens, pushes to external services).
+  before acting; the code may have moved since the spec was written.
+- Specs flag **human steps** (browser logins, tokens, pushes to external services).
   Don't attempt these — do the agent-executable parts, then tell the user exactly what
   remains.
-- Check the plan's acceptance criteria before closing the issue, and note in the closing
-  comment anything that deviated from the plan or couldn't be verified.
-- If a plan turns out to be wrong or stale, update the plan file in the same change and
-  say so in an issue comment — the files are the durable record, not this session.
-- **Delete the plan file when closing its issue** (same change). First promote any
-  durable decisions out of it into real docs (`docs/distribution.md`, README) — the plan
-  is scaffolding, not documentation. Git history is the archive; `docs/plans/` should
-  only ever contain live, actionable plans.
+- Check the acceptance criteria before calling work done, and say plainly what deviated
+  or couldn't be verified.
+- If a spec turns out to be wrong or stale, update it in the same change — the files are
+  the durable record, not the session.
+- Decompose work larger than ~500 lines into sequenced phases, each independently
+  testable and each leaving the tool working.
+- Promote durable decisions out of specs into real docs (`docs/distribution.md`, README).
+  A spec is scaffolding, not documentation; git history is the archive.
 
-## Best Practices
-
-- Start sessions when beginning work
-- Use `ready` to find unblocked issues
-- Use subissues for tasks >500 lines
-- End with handoff notes before context compresses
-
----
-
-*Language rules, security requirements, and testing guidelines are in `.chainlink/rules/` and auto-injected based on detected project languages.*
-
+`docs/plans/` holds older plan files from a retired tracker; they are named by issue
+number and those issues no longer exist. Treat them as reference, not as live work.

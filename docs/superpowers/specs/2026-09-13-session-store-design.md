@@ -28,7 +28,7 @@ there is no migration path: existing flat notes in `notes/` are simply no longer
    which does not need MVCC; live sync is polling either way (SQLite has no cross-process
    push); it contradicts the project's "notes dir is the database" premise and would force
    a markdown export pipeline anyway; and `rusqlite` drags a C build into a crate being
-   shipped to crates.io, AUR, and macOS (#12, #48, #51).
+   shipped to crates.io, AUR, and macOS.
 3. **Hybrid — markdown bodies plus a separate index for priority/status/lock** — cheap
    queue-wide reads, but two sources of truth that can drift. Not warranted at this scale.
 
@@ -242,8 +242,8 @@ Per the project convention that `App` performs no I/O, the stat-and-read lives i
 ## CLI surface
 
 Migrating from the hand-rolled 112-line `parse_args` to **clap v4 (derive)**. This also
-advances #50: `clap_mangen` and `clap_complete` generate the man page and shell
-completions from the same structs.
+advances the man-page and shell-completion work: `clap_mangen` and `clap_complete`
+generate both from the same structs.
 
 There is **one set of verbs**, not a separate agent namespace; permission comes from the
 invoking writer's kind. Two namespaces would mean two code paths drifting apart, and a
@@ -485,14 +485,14 @@ by sharing the lock — small evidence the primitive is right.
 | Crate | Why | Notes |
 |---|---|---|
 | `clap` (derive) | CLI surface | pure Rust |
-| `clap_mangen`, `clap_complete` | man page + completions (#50) | build-deps |
+| `clap_mangen`, `clap_complete` | man page + completions | build-deps |
 | `fs4` | cross-platform file locking | pure Rust |
 | `ulid` | sortable ids | pure Rust |
 | `serde_json` | `--json` output | pure Rust |
 | `tempfile` | store tests | dev-dep |
 
-All pure Rust; no C toolchain is introduced, preserving the distribution story for #12,
-#48, and #51.
+All pure Rust; no C toolchain is introduced, preserving the distribution story for
+crates.io, AUR, and macOS packaging.
 
 ## Implementation phases
 
@@ -517,7 +517,7 @@ phases, each independently testable and each leaving the tool working.
    closed row, sticky-lock indicators.
 6. **Repoint and remove.** `stats`, `find`, `today`, `--resume`, `export`; delete the
    append/draft/conflict-rename machinery listed under Deletions; `0700` data dir; the
-   cloud-sync warning; man page and completions (#50).
+   cloud-sync warning; man page and completions.
 
 Phase 1 is mechanical, 3 and 5 carry the real risk. Phases 2–3 are worth reviewing before
 4–6 build on them, since the lock protocol is the part that is expensive to change later.
