@@ -19,8 +19,12 @@ and "Implementation phases" — this plan is Phase 1 only)
 
 ## Global Constraints
 
-- **Behavior is frozen.** Every flag, action word, exit code, and `Args` field keeps its
-  current meaning. This phase changes *how* args are parsed, never *what* they mean.
+- **Behavior is frozen THROUGH TASK 4 ONLY.** Tasks 1-4 preserved the old surface exactly.
+  **Task 5 deliberately breaks it**, on an explicit decision to adopt clap's conventions
+  rather than contort clap into the hand-rolled parser's shape. From Task 5 on, the
+  binding rule is *idiomatic clap*, and the intentional breaks are enumerated in Task 5.
+  The earlier tasks are not wasted: they are what proved each divergence was real and
+  deliberate rather than accidental.
 - **One deliberate deviation:** `--help` output becomes clap-generated and will not match
   the current `USAGE` string byte-for-byte. Content is preserved via `about` and doc
   comments. Tests must assert on exit code and key substrings, never on exact help text.
@@ -685,16 +689,386 @@ that is a minor bump. No behavior change beyond the reported version."
 
 ---
 
+### Task 5: Restructure to idiomatic clap subcommands
+
+Tasks 1-4 preserved the old CLI exactly, which forced two hand-written workarounds into
+`src/cli.rs`: a manual name-plus-action conflict check, and a manual `-V`/`--version` bool
+replacing clap's own version flag. Both exist for one reason — a top-level positional
+coexisting with subcommands is ambiguous, and clap cannot resolve it without help.
+
+This task removes the positional, which removes the ambiguity, which removes both
+workarounds. Verified in a compiled spike before this task was written: with no top-level
+positional, every invocation below parses correctly with **zero** manual validation.
+
+**The intentional breaking changes** (all four verified in the spike):
+
+| Old | New | Why |
+|---|---|---|
+| `cassette mynote` | `cassette new mynote` | removes the positional/subcommand ambiguity |
+| `cassette +themes` | `cassette themes` | the `+` sigil only existed to dodge name collisions |
+| `cassette --resume [F]` | `cassette resume [F]` | optional-value flags are clap's classic ambiguity |
+| `cassette stats --version` → version | → exit 2 | clap convention; matches `git status --version` |
+
+**Files:**
+- Modify: `src/cli.rs` (rewrite `Cli`, replace `Action` with `Command`, rewrite `into_args`, delete both workarounds, rewrite the unit tests)
+- Modify: `tests/cli.rs`
+- Modify: `README.md`, `CHANGELOG.md`
+- Do NOT modify `src/main.rs` — `into_args` still produces the identical `Args` shape, so `main()` needs no change. If you find yourself editing main.rs, stop and report.
+
+**Interfaces:**
+- Consumes: `Args` (unchanged field-for-field), `pub fn parse() -> Args` (unchanged signature).
+- Produces: the same. Only the command tree changes.
+
+- [ ] **Step 1: Replace the `Cli` and `Action` types**
+
+In `src/cli.rs`, replace the `Cli` struct and the `Action` enum with:
+
+```rust
+#[derive(Parser, Debug)]
+#[command(
+    name = "cassette",
+    version,
+    about = "cassette — a freewriting TUI",
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// countdown timer in minutes
+    #[arg(short = 't', value_name = "MINUTES", global = true,
+          value_parser = clap::value_parser!(u32).range(1..))]
+    timer: Option<u32>,
+
+    /// word goal (winds the tape reel)
+    #[arg(short = 'w', value_name = "WORDS", global = true,
+          value_parser = clap::value_parser!(u32).range(1..))]
+    word_goal: Option<u32>,
+
+    /// visible text rows per cassette (2-40)
+    #[arg(short = 'l', value_name = "LINES", global = true,
+          value_parser = clap::value_parser!(u32).range(1..))]
+    visible_lines: Option<u32>,
+
+    /// start with one cassette per topic from the named [templates] entry
+    #[arg(short = 'T', value_name = "TEMPLATE", global = true)]
+    template: Option<String>,
+
+    /// color theme for this session (overrides config)
+    #[arg(long, value_name = "NAME", global = true)]
+    theme: Option<String>,
+
+    /// record mode: no deletions, the tape only rolls forward
+    #[arg(short = 'R', long, global = true)]
+    record: bool,
+
+    /// print to stdout on quit instead of writing a file
+    #[arg(short = 'o', long = "output", global = true)]
+    print_stdout: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// start a session in a named note
+    New {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// open today's note, named by date
+    Today,
+    /// load a saved note back into the TUI (default: most recently modified)
+    Resume {
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+    },
+    /// streak, weekly/monthly notes and words, totals
+    Stats,
+    /// list recent notes newest-first; TEXT filters by name, topic, or content
+    Find {
+        // NOT `trailing_var_arg = true`: that captures flags after the first
+        // query word, so `find foo -t 10` would yield query ["foo","-t","10"].
+        #[arg(value_name = "TEXT")]
+        query: Vec<String>,
+    },
+    /// list available themes (built-in and from config.toml)
+    Themes,
+}
+```
+
+- [ ] **Step 2: Rewrite `into_args` and `parse`**
+
+Replace the existing `impl Cli` block and `pub fn parse()` with:
+
+```rust
+impl Cli {
+    fn into_args(self) -> Args {
+        let mut args = Args {
+            // The CLI takes minutes; the app works in seconds.
+            timer_secs: self.timer.map(|m| m * 60),
+            word_goal: self.word_goal.map(|w| w as usize),
+            visible_lines: self.visible_lines.map(|l| l as usize),
+            template: self.template,
+            theme: self.theme,
+            record: self.record,
+            print_stdout: self.print_stdout,
+            ..Args::default()
+        };
+        match self.command {
+            None => {}
+            Some(Command::New { name }) => args.note_name = Some(name),
+            Some(Command::Today) => args.daily = true,
+            Some(Command::Resume { file }) => args.resume = Some(file),
+            Some(Command::Stats) => args.stats = true,
+            Some(Command::Find { query }) => args.find = Some(query),
+            Some(Command::Themes) => args.list_themes = true,
+        }
+        args
+    }
+}
+
+/// Parse the process arguments, exiting with clap's usage error (code 2) on
+/// bad input. No hand-written validation: with no top-level positional there
+/// is nothing ambiguous left for clap to need help with.
+pub fn parse() -> Args {
+    Cli::parse().into_args()
+}
+```
+
+Note `Resume { file }` maps straight onto `Option<Option<String>>`: `resume` gives
+`Some(None)`, `resume note.md` gives `Some(Some("note.md"))` — the exact shape `main()`
+already consumes.
+
+- [ ] **Step 3: Delete both workarounds**
+
+Remove from `src/cli.rs`:
+- the manual name-plus-action conflict check and its `Cli::command().error(...).exit()` call
+- the manual `version: bool` field, the `disable_version_flag` setting, and the manual
+  version handling in `parse()`
+
+`#[command(version)]` on `Cli` restores clap's native version flag. Verify
+`cassette --version` prints `cassette 0.10.0` and exits 0.
+
+- [ ] **Step 4: Rewrite the unit tests for the new surface**
+
+The existing 17 unit tests pin the OLD surface and will not compile or pass. Replace the
+whole `mod tests` block in `src/cli.rs` with:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_bare_invocation() {
+        assert_eq!(parse_args_from(&argv(&[])), Args::default());
+    }
+
+    #[test]
+    fn new_sets_the_note_name() {
+        let a = parse_args_from(&argv(&["new", "mynote"]));
+        assert_eq!(a.note_name, Some("mynote".to_string()));
+        assert!(a.resume.is_none());
+    }
+
+    #[test]
+    fn timer_is_converted_from_minutes_to_seconds() {
+        assert_eq!(parse_args_from(&argv(&["-t", "10"])).timer_secs, Some(600));
+    }
+
+    #[test]
+    fn parses_word_goal_and_visible_lines() {
+        let a = parse_args_from(&argv(&["-w", "500", "-l", "8"]));
+        assert_eq!(a.word_goal, Some(500));
+        assert_eq!(a.visible_lines, Some(8));
+    }
+
+    #[test]
+    fn parses_template_and_theme() {
+        let a = parse_args_from(&argv(&["-T", "morning", "--theme", "gruvbox"]));
+        assert_eq!(a.template, Some("morning".to_string()));
+        assert_eq!(a.theme, Some("gruvbox".to_string()));
+    }
+
+    #[test]
+    fn parses_record_and_output_in_both_spellings() {
+        assert!(parse_args_from(&argv(&["-R"])).record);
+        assert!(parse_args_from(&argv(&["--record"])).record);
+        assert!(parse_args_from(&argv(&["-o"])).print_stdout);
+        assert!(parse_args_from(&argv(&["--output"])).print_stdout);
+    }
+
+    #[test]
+    fn bare_resume_means_newest_note() {
+        assert_eq!(parse_args_from(&argv(&["resume"])).resume, Some(None));
+    }
+
+    #[test]
+    fn resume_takes_an_optional_file_name() {
+        assert_eq!(
+            parse_args_from(&argv(&["resume", "note.md"])).resume,
+            Some(Some("note.md".to_string()))
+        );
+    }
+
+    #[test]
+    fn resume_accepts_a_global_flag_without_consuming_it_as_a_file() {
+        let a = parse_args_from(&argv(&["resume", "-R"]));
+        assert_eq!(a.resume, Some(None));
+        assert!(a.record);
+    }
+
+    #[test]
+    fn parses_action_subcommands() {
+        assert!(parse_args_from(&argv(&["today"])).daily);
+        assert!(parse_args_from(&argv(&["stats"])).stats);
+        assert!(parse_args_from(&argv(&["themes"])).list_themes);
+    }
+
+    #[test]
+    fn find_collects_trailing_words_as_one_query() {
+        assert_eq!(
+            parse_args_from(&argv(&["find", "some", "words"])).find,
+            Some(vec!["some".to_string(), "words".to_string()])
+        );
+    }
+
+    #[test]
+    fn bare_find_lists_everything() {
+        assert_eq!(parse_args_from(&argv(&["find"])).find, Some(Vec::new()));
+    }
+
+    #[test]
+    fn find_treats_a_later_flag_as_a_flag_not_a_query_word() {
+        let a = parse_args_from(&argv(&["find", "foo", "-t", "10"]));
+        assert_eq!(a.find, Some(vec!["foo".to_string()]));
+        assert_eq!(a.timer_secs, Some(600));
+    }
+
+    #[test]
+    fn find_with_a_leading_flag_keeps_an_empty_query() {
+        let a = parse_args_from(&argv(&["find", "-t", "10"]));
+        assert_eq!(a.find, Some(Vec::new()));
+        assert_eq!(a.timer_secs, Some(600));
+    }
+
+    #[test]
+    fn global_flags_work_before_and_after_a_subcommand() {
+        assert_eq!(parse_args_from(&argv(&["-t", "10", "today"])).timer_secs, Some(600));
+        let a = parse_args_from(&argv(&["today", "-t", "10"]));
+        assert_eq!(a.timer_secs, Some(600));
+        assert!(a.daily);
+        assert_eq!(parse_args_from(&argv(&["stats", "-t", "10"])).timer_secs, Some(600));
+        assert_eq!(parse_args_from(&argv(&["themes", "-t", "10"])).timer_secs, Some(600));
+    }
+
+    #[test]
+    fn global_flags_work_on_either_side_of_new() {
+        let a = parse_args_from(&argv(&["new", "mynote", "-t", "10"]));
+        assert_eq!(a.note_name, Some("mynote".to_string()));
+        assert_eq!(a.timer_secs, Some(600));
+        let b = parse_args_from(&argv(&["-t", "10", "new", "mynote"]));
+        assert_eq!(b.note_name, Some("mynote".to_string()));
+        assert_eq!(b.timer_secs, Some(600));
+    }
+}
+```
+
+- [ ] **Step 5: Update the integration tests**
+
+In `tests/cli.rs`:
+
+DELETE these three, which pin a surface that no longer exists:
+`note_name_before_an_action_word_exits_two`, `note_name_with_themes_action_is_still_allowed`,
+`version_flag_works_after_an_action_word`.
+
+UPDATE `help_flag_exits_zero_and_documents_the_surface` — its expected substrings become:
+`["cassette", "new", "today", "resume", "stats", "find", "themes"]`.
+
+ADD these two, which pin the new conventions:
+
+```rust
+#[test]
+fn new_without_a_name_exits_two() {
+    assert_eq!(run(&["new"]).status.code(), Some(2));
+}
+
+#[test]
+fn version_after_a_subcommand_exits_two() {
+    // clap convention: --version is top-level only, like `git status --version`.
+    assert_eq!(run(&["stats", "--version"]).status.code(), Some(2));
+}
+```
+
+Leave the other tests alone.
+
+- [ ] **Step 6: Build and run the suite**
+
+Run: `cargo test`
+Expected: all tests pass. If a test fails, fix `src/cli.rs` — but note that unlike Tasks
+1-4, the tests here describe a NEW surface rather than pinning an old one, so a test that
+genuinely contradicts the table of intentional breaks above should be reported, not
+forced.
+
+- [ ] **Step 7: Verify the surface by hand**
+
+```bash
+cargo run -- --help          # lists new/today/resume/stats/find/themes
+cargo run -- --version       # cassette 0.10.0, exit 0
+cargo run -- new             # exit 2, clap's missing-argument error
+cargo run -- themes          # lists themes, exit 0
+cargo run -- stats           # prints stats, exit 0
+cargo run -- find foo        # runs find
+cargo run -- stats --version # exit 2
+```
+
+- [ ] **Step 8: Update README.md and CHANGELOG.md**
+
+README: the CLI reference block must match the new `cassette --help` output. Run the
+binary and use its real output. Every example elsewhere in the README using the old forms
+(`cassette mynote`, `cassette +themes`, `cassette --resume`) must be updated. Preserve the
+two defaults clap's help does not print: a bare `cassette` writes a timestamped file in
+the notes dir, and `resume` with no FILE picks the most recently modified note.
+
+CHANGELOG: the 0.10.0 entry currently claims flags, action words and exit codes are
+unchanged. That is now false. Rewrite it to describe the new surface and list the four
+breaking changes from the table above under a `### Changed` heading, calling them out as
+breaking. Match the file's existing heading and bullet style.
+
+- [ ] **Step 9: Lint and commit**
+
+Run: `cargo clippy -- -D warnings`
+Format only the files you changed; do NOT run `cargo fmt` repo-wide (there is unrelated
+pre-existing drift in app.rs/find.rs/output.rs/stats.rs).
+
+```bash
+git add src/cli.rs tests/cli.rs README.md CHANGELOG.md
+git commit -m "feat!: idiomatic clap subcommands, no top-level positional"
+```
+
+Use a one-line subject, a blank line, then the body explaining the four breaking changes.
+
+---
+
 ## Verification
 
 Phase 1 is done when:
 
-- [ ] `cargo test` passes, with the 13 characterization tests and 8 integration tests
-      unmodified since the tasks that wrote them
+- [ ] `cargo test` passes
 - [ ] `cargo clippy -- -D warnings` and `cargo fmt --check` are clean
 - [ ] `src/main.rs` no longer contains `USAGE`, `positive`, `parse_args`, or `struct Args`
-- [ ] `cassette -V` prints exactly `cassette <version from Cargo.toml>` (0.10.0 after Task 4)
-- [ ] `git log --oneline` on `feat/clap-migration` shows four commits, tests before the swap
+- [ ] `cassette --version` prints exactly `cassette 0.10.0` and exits 0
+- [ ] `cassette new` exits 2; `cassette stats --version` exits 2 (clap conventions)
+- [ ] `git log --oneline` on `feat/clap-migration` shows the task commits, tests before the swap
 
 ## Out of Scope
 
