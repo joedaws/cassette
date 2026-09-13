@@ -28,7 +28,9 @@ fn help_flag_exits_zero_and_documents_the_surface() {
     let help = String::from_utf8_lossy(&out.stdout);
     // Assert on content that survives the move to clap-generated help,
     // never on exact formatting.
-    for expected in ["cassette", "--resume", "--theme", "today", "stats", "find"] {
+    for expected in [
+        "cassette", "new", "today", "resume", "stats", "find", "themes",
+    ] {
         assert!(
             help.contains(expected),
             "help is missing {expected:?}:\n{help}"
@@ -94,26 +96,12 @@ fn unknown_theme_name_exits_two() {
 }
 
 #[test]
-fn note_name_before_an_action_word_exits_two() {
-    assert_eq!(run(&["mynote", "stats"]).status.code(), Some(2));
-    assert_eq!(run(&["mynote", "find", "foo"]).status.code(), Some(2));
-    assert_eq!(run(&["mynote", "today"]).status.code(), Some(2));
+fn new_without_a_name_exits_two() {
+    assert_eq!(run(&["new"]).status.code(), Some(2));
 }
 
 #[test]
-fn note_name_with_themes_action_is_still_allowed() {
-    let out = run(&["mynote", "+themes"]);
-    assert_eq!(out.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("themes"));
-}
-
-#[test]
-fn version_flag_works_after_an_action_word() {
-    let out = run(&["stats", "--version"]);
-    assert_eq!(out.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        format!("cassette {}", env!("CARGO_PKG_VERSION"))
-    );
-    assert_eq!(run(&["today", "-V"]).status.code(), Some(0));
+fn version_after_a_subcommand_exits_two() {
+    // clap convention: --version is top-level only, like `git status --version`.
+    assert_eq!(run(&["stats", "--version"]).status.code(), Some(2));
 }

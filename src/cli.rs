@@ -26,17 +26,11 @@ pub struct Args {
     name = "cassette",
     version,
     about = "cassette — a freewriting TUI",
-    disable_help_subcommand = true,
-    disable_version_flag = true
+    disable_help_subcommand = true
 )]
 struct Cli {
-    /// output note name or path; an existing note is resumed
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-
-    /// print version
-    #[arg(short = 'V', long = "version", global = true, action = clap::ArgAction::SetTrue)]
-    version: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
 
     /// countdown timer in minutes
     #[arg(short = 't', value_name = "MINUTES", global = true,
@@ -68,94 +62,66 @@ struct Cli {
     /// print to stdout on quit instead of writing a file
     #[arg(short = 'o', long = "output", global = true)]
     print_stdout: bool,
-
-    /// load a saved note back into the TUI and keep writing
-    #[arg(long, value_name = "FILE", num_args = 0..=1, global = true)]
-    resume: Option<Option<String>>,
-
-    #[command(subcommand)]
-    action: Option<Action>,
 }
 
 #[derive(Subcommand, Debug)]
-enum Action {
-    /// open today's note (named by date)
+enum Command {
+    /// start a session in a named note
+    New {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// open today's note, named by date
     Today,
+    /// load a saved note back into the TUI (default: most recently modified)
+    Resume {
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+    },
     /// streak, weekly/monthly notes and words, totals
     Stats,
     /// list recent notes newest-first; TEXT filters by name, topic, or content
     Find {
-        // NOTE: deliberately NOT `trailing_var_arg = true`. That attribute would
-        // capture flags after the first query word, so `find foo -t 10` would
-        // parse as query ["foo", "-t", "10"] with no timer. The hand-rolled
-        // parser matches `-t` as a flag there, and behavior is frozen.
+        // NOT `trailing_var_arg = true`: that captures flags after the first
+        // query word, so `find foo -t 10` would yield query ["foo","-t","10"].
         #[arg(value_name = "TEXT")]
         query: Vec<String>,
     },
     /// list available themes (built-in and from config.toml)
-    #[command(name = "+themes")]
     Themes,
 }
 
 impl Cli {
     fn into_args(self) -> Args {
-        let (daily, stats, list_themes, find) = match self.action {
-            Some(Action::Today) => (true, false, false, None),
-            Some(Action::Stats) => (false, true, false, None),
-            Some(Action::Themes) => (false, false, true, None),
-            Some(Action::Find { query }) => (false, false, false, Some(query)),
-            None => (false, false, false, None),
-        };
-        Args {
+        let mut args = Args {
             // The CLI takes minutes; the app works in seconds.
             timer_secs: self.timer.map(|m| m * 60),
             word_goal: self.word_goal.map(|w| w as usize),
-            note_name: self.name,
-            print_stdout: self.print_stdout,
             visible_lines: self.visible_lines.map(|l| l as usize),
             template: self.template,
             theme: self.theme,
-            list_themes,
             record: self.record,
-            daily,
-            stats,
-            find,
-            resume: self.resume,
+            print_stdout: self.print_stdout,
+            ..Args::default()
+        };
+        match self.command {
+            None => {}
+            Some(Command::New { name }) => args.note_name = Some(name),
+            Some(Command::Today) => args.daily = true,
+            Some(Command::Resume { file }) => args.resume = Some(file),
+            Some(Command::Stats) => args.stats = true,
+            Some(Command::Find { query }) => args.find = Some(query),
+            Some(Command::Themes) => args.list_themes = true,
         }
+        args
     }
 }
 
 /// Parse the process arguments, exiting with clap's usage error (code 2) on
-/// bad input.
+/// bad input. No hand-written validation: with no top-level positional there
+/// is nothing ambiguous left for clap to need help with.
 pub fn parse() -> Args {
-    let cli = Cli::parse();
-    // clap's auto version flag is disabled (see `disable_version_flag`) and
-    // replaced with this hand-checked global bool: clap's propagated version
-    // flag prints "cassette-<subcommand> <version>" once it's nested under a
-    // subcommand, but the old parser (and the version integration test)
-    // expects a bare "cassette <version>" no matter where `-V` appears.
-    if cli.version {
-        println!("cassette {}", env!("CARGO_PKG_VERSION"));
-        std::process::exit(0);
-    }
-    // The hand-rolled parser guarded today/stats/find with `note_name.is_none()`,
-    // so a name before an action word was "unexpected extra argument" (exit 2).
-    // `+themes` had no such guard and stays legal with a name.
-    if cli.name.is_some()
-        && matches!(
-            cli.action,
-            Some(Action::Today | Action::Stats | Action::Find { .. })
-        )
-    {
-        use clap::CommandFactory;
-        Cli::command()
-            .error(
-                clap::error::ErrorKind::ArgumentConflict,
-                "a note name cannot be combined with 'today', 'stats', or 'find'",
-            )
-            .exit();
-    }
-    cli.into_args()
+    Cli::parse().into_args()
 }
 
 #[cfg(test)]
@@ -172,28 +138,23 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
-    /// clap's own structural validation: catches conflicting arg
-    /// definitions that would otherwise only surface at runtime.
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
     }
 
-    /// Build the argument slice the parser expects from string literals.
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
     }
 
-    /// Every successful invocation shape, pinned. These pass against the
-    /// hand-rolled parser and must keep passing against clap.
     #[test]
     fn parses_bare_invocation() {
         assert_eq!(parse_args_from(&argv(&[])), Args::default());
     }
 
     #[test]
-    fn parses_positional_note_name() {
-        let a = parse_args_from(&argv(&["mynote"]));
+    fn new_sets_the_note_name() {
+        let a = parse_args_from(&argv(&["new", "mynote"]));
         assert_eq!(a.note_name, Some("mynote".to_string()));
         assert!(a.resume.is_none());
     }
@@ -227,29 +188,29 @@ mod tests {
 
     #[test]
     fn bare_resume_means_newest_note() {
-        assert_eq!(parse_args_from(&argv(&["--resume"])).resume, Some(None));
+        assert_eq!(parse_args_from(&argv(&["resume"])).resume, Some(None));
     }
 
     #[test]
     fn resume_takes_an_optional_file_name() {
         assert_eq!(
-            parse_args_from(&argv(&["--resume", "note.md"])).resume,
+            parse_args_from(&argv(&["resume", "note.md"])).resume,
             Some(Some("note.md".to_string()))
         );
     }
 
     #[test]
-    fn resume_does_not_swallow_a_following_flag() {
-        let a = parse_args_from(&argv(&["--resume", "-R"]));
+    fn resume_accepts_a_global_flag_without_consuming_it_as_a_file() {
+        let a = parse_args_from(&argv(&["resume", "-R"]));
         assert_eq!(a.resume, Some(None));
         assert!(a.record);
     }
 
     #[test]
-    fn parses_action_words() {
+    fn parses_action_subcommands() {
         assert!(parse_args_from(&argv(&["today"])).daily);
         assert!(parse_args_from(&argv(&["stats"])).stats);
-        assert!(parse_args_from(&argv(&["+themes"])).list_themes);
+        assert!(parse_args_from(&argv(&["themes"])).list_themes);
     }
 
     #[test]
@@ -263,17 +224,6 @@ mod tests {
     #[test]
     fn bare_find_lists_everything() {
         assert_eq!(parse_args_from(&argv(&["find"])).find, Some(Vec::new()));
-    }
-
-    #[test]
-    fn flags_work_before_and_after_an_action_word() {
-        assert_eq!(
-            parse_args_from(&argv(&["-t", "10", "today"])).timer_secs,
-            Some(600)
-        );
-        let a = parse_args_from(&argv(&["today", "-t", "10"]));
-        assert_eq!(a.timer_secs, Some(600));
-        assert!(a.daily);
     }
 
     #[test]
@@ -291,31 +241,30 @@ mod tests {
     }
 
     #[test]
-    fn flags_work_on_either_side_of_stats_and_themes() {
+    fn global_flags_work_before_and_after_a_subcommand() {
+        assert_eq!(
+            parse_args_from(&argv(&["-t", "10", "today"])).timer_secs,
+            Some(600)
+        );
+        let a = parse_args_from(&argv(&["today", "-t", "10"]));
+        assert_eq!(a.timer_secs, Some(600));
+        assert!(a.daily);
         assert_eq!(
             parse_args_from(&argv(&["stats", "-t", "10"])).timer_secs,
             Some(600)
         );
         assert_eq!(
-            parse_args_from(&argv(&["-t", "10", "stats"])).timer_secs,
-            Some(600)
-        );
-        assert_eq!(
-            parse_args_from(&argv(&["+themes", "-t", "10"])).timer_secs,
-            Some(600)
-        );
-        assert_eq!(
-            parse_args_from(&argv(&["-t", "10", "+themes"])).timer_secs,
+            parse_args_from(&argv(&["themes", "-t", "10"])).timer_secs,
             Some(600)
         );
     }
 
     #[test]
-    fn flags_work_on_either_side_of_a_positional_note_name() {
-        let a = parse_args_from(&argv(&["mynote", "-t", "10"]));
+    fn global_flags_work_on_either_side_of_new() {
+        let a = parse_args_from(&argv(&["new", "mynote", "-t", "10"]));
         assert_eq!(a.note_name, Some("mynote".to_string()));
         assert_eq!(a.timer_secs, Some(600));
-        let b = parse_args_from(&argv(&["-t", "10", "mynote"]));
+        let b = parse_args_from(&argv(&["-t", "10", "new", "mynote"]));
         assert_eq!(b.note_name, Some("mynote".to_string()));
         assert_eq!(b.timer_secs, Some(600));
     }

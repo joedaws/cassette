@@ -17,8 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - The CLI now parses with clap v4 (derive API) instead of a hand-rolled
-  parser. `--help` output is clap-generated and reformatted; flags, action
-  words (`today`/`stats`/`find`/`+themes`), and exit codes are unchanged.
+  parser, restructured into idiomatic subcommands with no top-level
+  positional argument. **Breaking:**
+  - `cassette mynote` → `cassette new mynote` — a note name is now the
+    `new` subcommand's argument, removing the ambiguity between a bare
+    positional and a subcommand.
+  - `cassette +themes` → `cassette themes` — the `+` sigil only existed
+    to dodge a collision with the positional note name, which is gone.
+  - `cassette --resume [FILE]` → `cassette resume [FILE]` — an
+    optional-value flag is exactly the kind of ambiguity clap can't
+    resolve on its own; `resume` is now a subcommand like the others.
+  - `cassette stats --version` (and the same after any other subcommand)
+    now exits 2 instead of printing the version — `--version` is
+    top-level only, matching clap's convention (e.g. `git status
+    --version`).
 
 ### Fixed
 - Resuming a note no longer restamps its frontmatter `date:` with the new

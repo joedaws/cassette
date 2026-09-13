@@ -35,7 +35,7 @@ them.
 - **A daily practice** — `cassette today` keeps one note per day and appends
   each sitting as its own session; `cassette stats` reads your streak and
   weekly/monthly word counts straight out of the notes' frontmatter. Left a
-  thought unfinished? `cassette --resume` loads the note back onto the tape.
+  thought unfinished? `cassette resume` loads the note back onto the tape.
 - **Mini vim** — insert and normal modes, `hjkl`/`w`/`b`/`0`/`$`/`gg`/`G`
   motions, `x`/`dd`, and undo. Enough vim to feel at home, not enough to
   tempt you into editing when you should be writing.
@@ -46,7 +46,7 @@ them.
   offers to resume the draft. Quitting writes clean markdown with YAML
   frontmatter — ready for your notes vault. Empty sessions write nothing.
 - **Themes** — six built-ins (gruvbox, nord, dracula, solarized…), full
-  custom themes from the config file, and a ghostty-style `cassette +themes`
+  custom themes from the config file, and a ghostty-style `cassette themes`
   listing with color swatches. The default stays true to your terminal's own
   colors.
 
@@ -181,9 +181,9 @@ until a full day is missed — an unwritten *today* is still yours to write.
 ```
 cassette find                 # browse recent notes, newest first
 cassette find gratitude       # …filtered by name, topic, or content
-cassette --resume             # continue the most recently modified note
-cassette --resume myjournal   # continue a specific note
-cassette myjournal            # same: an existing name always resumes
+cassette resume               # continue the most recently modified note
+cassette resume myjournal     # continue a specific note
+cassette new myjournal        # same: an existing name always resumes
 ```
 
 `find` lists what's in the notes dir — date, word count, topics, and the
@@ -227,9 +227,9 @@ cassettes: 2
 Name the file, write to a path, or print to stdout instead:
 
 ```
-cassette myjournal            # ~/.local/share/cassette/notes/myjournal.md
-cassette ~/Documents/draft.md # any path (anything containing a /)
-cassette -o                   # print to stdout, write no file
+cassette new myjournal            # ~/.local/share/cassette/notes/myjournal.md
+cassette new ~/Documents/draft.md # any path (anything containing a /)
+cassette -o                       # print to stdout, write no file
 ```
 
 If the name already exists, cassette resumes that note — your words load
@@ -302,7 +302,7 @@ help_text = "#5c6773"     # descriptions in the help line
 List every available theme (built-in and user-defined) with color swatches:
 
 ```
-cassette +themes
+cassette themes
 ```
 
 Built-ins: `default`, `dracula`, `gruvbox`, `nord`, `solarized-dark`,
@@ -325,38 +325,37 @@ accent_a = "#ff8800"
 ```
 cassette — a freewriting TUI
 
-Usage: cassette [OPTIONS] [NAME] [COMMAND]
+Usage: cassette [OPTIONS] [COMMAND]
 
 Commands:
-  today    open today's note (named by date)
-  stats    streak, weekly/monthly notes and words, totals
-  find     list recent notes newest-first; TEXT filters by name, topic, or content
-  +themes  list available themes (built-in and from config.toml)
-
-Arguments:
-  [NAME]  output note name or path; an existing note is resumed
+  new     start a session in a named note
+  today   open today's note, named by date
+  resume  load a saved note back into the TUI (default: most recently modified)
+  stats   streak, weekly/monthly notes and words, totals
+  find    list recent notes newest-first; TEXT filters by name, topic, or content
+  themes  list available themes (built-in and from config.toml)
 
 Options:
-  -V, --version          print version
-  -t <MINUTES>           countdown timer in minutes
-  -w <WORDS>             word goal (winds the tape reel)
-  -l <LINES>             visible text rows per cassette (2-40)
-  -T <TEMPLATE>          start with one cassette per topic from the named [templates] entry
-      --theme <NAME>     color theme for this session (overrides config)
-  -R, --record           record mode: no deletions, the tape only rolls forward
-  -o, --output           print to stdout on quit instead of writing a file
-      --resume [<FILE>]  load a saved note back into the TUI and keep writing
-  -h, --help             Print help
+  -t <MINUTES>        countdown timer in minutes
+  -w <WORDS>          word goal (winds the tape reel)
+  -l <LINES>          visible text rows per cassette (2-40)
+  -T <TEMPLATE>       start with one cassette per topic from the named [templates] entry
+      --theme <NAME>  color theme for this session (overrides config)
+  -R, --record        record mode: no deletions, the tape only rolls forward
+  -o, --output        print to stdout on quit instead of writing a file
+  -h, --help          Print help
+  -V, --version       Print version
 ```
 
-Two defaults aren't spelled out in the help text above: `[NAME]`, when
-omitted, defaults to a timestamped file in the notes dir, and `--resume`
-without a `[FILE]` resumes the most recently modified note. `today`,
-`stats`, and `find` don't take a note name — a later session the same
-day appends to `today`'s note as a new `## Session` section, `stats`
-reads streak/weekly/monthly totals from the frontmatter of everything
-in the notes dir, and `find [TEXT]` lists recent notes newest-first
-(date, words, topics, first line), filtered by `TEXT` when given.
+Two defaults aren't spelled out in the help text above: a bare `cassette`
+(no subcommand) defaults to a timestamped file in the notes dir, and
+`resume` without a `[FILE]` resumes the most recently modified note.
+`today`, `stats`, `find`, and `themes` don't take a note name — a later
+session the same day appends to `today`'s note as a new `## Session`
+section, `stats` reads streak/weekly/monthly totals from the frontmatter
+of everything in the notes dir, and `find [TEXT]` lists recent notes
+newest-first (date, words, topics, first line), filtered by `TEXT` when
+given.
 
 ## For maintainers
 
