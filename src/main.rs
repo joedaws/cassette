@@ -15,6 +15,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 mod app;
 mod cassette;
+mod cli;
 mod config;
 mod find;
 mod output;
@@ -118,7 +119,7 @@ fn restore_terminal() {
 }
 
 fn main() -> io::Result<()> {
-    let args = parse_args();
+    let args = cli::parse();
     let cfg = config::load_config().unwrap_or_else(|e| die(&e));
 
     if args.list_themes {
@@ -857,26 +858,6 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
-struct Args {
-    timer_secs: Option<u32>,
-    word_goal: Option<usize>,
-    note_name: Option<String>,
-    print_stdout: bool,
-    visible_lines: Option<usize>,
-    template: Option<String>,
-    theme: Option<String>,
-    list_themes: bool,
-    record: bool,
-    daily: bool,
-    stats: bool,
-    /// `find` with the query words that followed it; empty = list all.
-    find: Option<Vec<String>>,
-    /// `--resume` with an optional note name: `Some(None)` resumes the most
-    /// recently modified note.
-    resume: Option<Option<String>>,
-}
-
 /// Today's note filename from the (config-overridable) chrono format string.
 /// A malformed format is a config error, not a panic mid-render.
 fn daily_note_name(fmt: &str) -> Result<String, String> {
@@ -889,173 +870,10 @@ fn daily_note_name(fmt: &str) -> Result<String, String> {
     Ok(chrono::Local::now().format(fmt).to_string())
 }
 
-const USAGE: &str = "\
-cassette — a freewriting TUI
-
-Usage: cassette [OPTIONS] [NAME]
-
-Arguments:
-  [NAME]         output note name or path; an existing note is resumed
-                 (default: timestamped file in the notes dir)
-
-Options:
-  -t <MINUTES>   countdown timer in minutes
-  -w <WORDS>     word goal (winds the tape reel)
-  -l <LINES>     visible text rows per cassette (2-40)
-  -T <TEMPLATE>  start with one cassette per topic from the named
-                 [templates] entry in config.toml
-  --theme <NAME> color theme for this session (overrides config)
-  -R, --record   record mode: no deletions, the tape only rolls forward
-  --resume [FILE] load a saved note back into the TUI and keep writing
-                 (default: the most recently modified note)
-  -o, --output   print to stdout on quit instead of writing a file
-  -h, --help     print this help
-  -V, --version  print version
-
-Actions:
-  today          open today's note (named by date); a later session the
-                 same day appends as a new '## Session' section
-  stats          streak, weekly/monthly notes and words, totals — read
-                 from the frontmatter of everything in the notes dir
-  find [TEXT]    list recent notes newest-first (date, words, topics,
-                 first line); TEXT filters by name, topic, or content
-  +themes        list available themes (built-in and from config.toml)
-";
-
 fn die(msg: &str) -> ! {
     eprintln!("cassette: {msg}");
     eprintln!("try 'cassette --help'");
     std::process::exit(2);
-}
-
-/// Parse the value after a flag as a positive number, or exit with an error.
-fn positive<T: std::str::FromStr + PartialOrd + From<u8>>(flag: &str, val: Option<&String>) -> T {
-    let Some(v) = val else {
-        die(&format!("option '{flag}' needs a value"));
-    };
-    match v.parse::<T>() {
-        Ok(n) if n >= T::from(1u8) => n,
-        _ => die(&format!(
-            "invalid value '{v}' for '{flag}': expected a number >= 1"
-        )),
-    }
-}
-
-fn parse_args() -> Args {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    parse_args_from(&args)
-}
-
-fn parse_args_from(args: &[String]) -> Args {
-    let mut timer = None;
-    let mut word_goal = None;
-    let mut note_name: Option<String> = None;
-    let mut print_stdout = false;
-    let mut visible_lines = None;
-    let mut template = None;
-    let mut theme = None;
-    let mut list_themes = false;
-    let mut record = false;
-    let mut daily = false;
-    let mut stats = false;
-    let mut find = None;
-    let mut resume = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "today" if !daily && !stats && find.is_none() && note_name.is_none() => {
-                daily = true;
-                i += 1;
-            }
-            "stats" if !daily && !stats && find.is_none() && note_name.is_none() => {
-                stats = true;
-                i += 1;
-            }
-            "find" if !daily && !stats && find.is_none() && note_name.is_none() => {
-                find = Some(Vec::new());
-                i += 1;
-            }
-            "-h" | "--help" => {
-                print!("{USAGE}");
-                std::process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("cassette {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
-            "-t" => {
-                timer = Some(positive::<u32>("-t", args.get(i + 1)) * 60);
-                i += 2;
-            }
-            "-w" => {
-                word_goal = Some(positive::<u32>("-w", args.get(i + 1)) as usize);
-                i += 2;
-            }
-            "-l" => {
-                visible_lines = Some(positive::<u32>("-l", args.get(i + 1)) as usize);
-                i += 2;
-            }
-            "-T" => {
-                let Some(name) = args.get(i + 1) else {
-                    die("option '-T' needs a value");
-                };
-                template = Some(name.clone());
-                i += 2;
-            }
-            "--theme" => {
-                let Some(name) = args.get(i + 1) else {
-                    die("option '--theme' needs a value");
-                };
-                theme = Some(name.clone());
-                i += 2;
-            }
-            "+themes" => {
-                list_themes = true;
-                i += 1;
-            }
-            "-R" | "--record" => {
-                record = true;
-                i += 1;
-            }
-            "--resume" => {
-                let val = args.get(i + 1).filter(|v| !v.starts_with('-'));
-                i += if val.is_some() { 2 } else { 1 };
-                resume = Some(val.cloned());
-            }
-            "-o" | "--output" => {
-                print_stdout = true;
-                i += 1;
-            }
-            arg if arg.starts_with('-') => {
-                die(&format!("unknown option '{arg}'"));
-            }
-            arg => {
-                if let Some(words) = &mut find {
-                    words.push(arg.to_string());
-                } else if note_name.is_some() || daily || stats {
-                    die(&format!("unexpected extra argument '{arg}'"));
-                } else {
-                    note_name = Some(arg.to_string());
-                }
-                i += 1;
-            }
-        }
-    }
-    Args {
-        timer_secs: timer,
-        word_goal,
-        note_name,
-        print_stdout,
-        visible_lines,
-        template,
-        theme,
-        list_themes,
-        record,
-        daily,
-        stats,
-        find,
-        resume,
-    }
 }
 
 #[cfg(test)]
@@ -1280,146 +1098,5 @@ mod tests {
         assert_eq!(app.focus_idx, 0, "Tab must not switch cassettes mid-prompt");
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.cassettes[0].topic.as_deref(), Some("q"));
-    }
-
-    /// Build the argument slice the parser expects from string literals.
-    fn argv(args: &[&str]) -> Vec<String> {
-        args.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// Every successful invocation shape, pinned. These pass against the
-    /// hand-rolled parser and must keep passing against clap.
-    #[test]
-    fn parses_bare_invocation() {
-        assert_eq!(parse_args_from(&argv(&[])), Args::default());
-    }
-
-    #[test]
-    fn parses_positional_note_name() {
-        let a = parse_args_from(&argv(&["mynote"]));
-        assert_eq!(a.note_name, Some("mynote".to_string()));
-        assert!(a.resume.is_none());
-    }
-
-    #[test]
-    fn timer_is_converted_from_minutes_to_seconds() {
-        assert_eq!(parse_args_from(&argv(&["-t", "10"])).timer_secs, Some(600));
-    }
-
-    #[test]
-    fn parses_word_goal_and_visible_lines() {
-        let a = parse_args_from(&argv(&["-w", "500", "-l", "8"]));
-        assert_eq!(a.word_goal, Some(500));
-        assert_eq!(a.visible_lines, Some(8));
-    }
-
-    #[test]
-    fn parses_template_and_theme() {
-        let a = parse_args_from(&argv(&["-T", "morning", "--theme", "gruvbox"]));
-        assert_eq!(a.template, Some("morning".to_string()));
-        assert_eq!(a.theme, Some("gruvbox".to_string()));
-    }
-
-    #[test]
-    fn parses_record_and_output_in_both_spellings() {
-        assert!(parse_args_from(&argv(&["-R"])).record);
-        assert!(parse_args_from(&argv(&["--record"])).record);
-        assert!(parse_args_from(&argv(&["-o"])).print_stdout);
-        assert!(parse_args_from(&argv(&["--output"])).print_stdout);
-    }
-
-    #[test]
-    fn bare_resume_means_newest_note() {
-        assert_eq!(parse_args_from(&argv(&["--resume"])).resume, Some(None));
-    }
-
-    #[test]
-    fn resume_takes_an_optional_file_name() {
-        assert_eq!(
-            parse_args_from(&argv(&["--resume", "note.md"])).resume,
-            Some(Some("note.md".to_string()))
-        );
-    }
-
-    #[test]
-    fn resume_does_not_swallow_a_following_flag() {
-        let a = parse_args_from(&argv(&["--resume", "-R"]));
-        assert_eq!(a.resume, Some(None));
-        assert!(a.record);
-    }
-
-    #[test]
-    fn parses_action_words() {
-        assert!(parse_args_from(&argv(&["today"])).daily);
-        assert!(parse_args_from(&argv(&["stats"])).stats);
-        assert!(parse_args_from(&argv(&["+themes"])).list_themes);
-    }
-
-    #[test]
-    fn find_collects_trailing_words_as_one_query() {
-        assert_eq!(
-            parse_args_from(&argv(&["find", "some", "words"])).find,
-            Some(vec!["some".to_string(), "words".to_string()])
-        );
-    }
-
-    #[test]
-    fn bare_find_lists_everything() {
-        assert_eq!(parse_args_from(&argv(&["find"])).find, Some(Vec::new()));
-    }
-
-    #[test]
-    fn flags_work_before_and_after_an_action_word() {
-        assert_eq!(
-            parse_args_from(&argv(&["-t", "10", "today"])).timer_secs,
-            Some(600)
-        );
-        let a = parse_args_from(&argv(&["today", "-t", "10"]));
-        assert_eq!(a.timer_secs, Some(600));
-        assert!(a.daily);
-    }
-
-    #[test]
-    fn find_treats_a_later_flag_as_a_flag_not_a_query_word() {
-        let a = parse_args_from(&argv(&["find", "foo", "-t", "10"]));
-        assert_eq!(a.find, Some(vec!["foo".to_string()]));
-        assert_eq!(a.timer_secs, Some(600));
-    }
-
-    #[test]
-    fn find_with_a_leading_flag_keeps_an_empty_query() {
-        let a = parse_args_from(&argv(&["find", "-t", "10"]));
-        assert_eq!(a.find, Some(Vec::new()));
-        assert_eq!(a.timer_secs, Some(600));
-    }
-
-    #[test]
-    fn flags_work_on_either_side_of_stats_and_themes() {
-        assert_eq!(
-            parse_args_from(&argv(&["stats", "-t", "10"])).timer_secs,
-            Some(600)
-        );
-        assert_eq!(
-            parse_args_from(&argv(&["-t", "10", "stats"])).timer_secs,
-            Some(600)
-        );
-        assert_eq!(
-            parse_args_from(&argv(&["+themes", "-t", "10"])).timer_secs,
-            Some(600)
-        );
-        assert_eq!(
-            parse_args_from(&argv(&["-t", "10", "+themes"])).timer_secs,
-            Some(600)
-        );
-    }
-
-    #[test]
-    fn flags_work_on_either_side_of_a_positional_note_name() {
-        let a = parse_args_from(&argv(&["mynote", "-t", "10"]));
-        assert_eq!(a.note_name, Some("mynote".to_string()));
-        assert_eq!(a.timer_secs, Some(600));
-        let b = parse_args_from(&argv(&["-t", "10", "mynote"]));
-        assert_eq!(b.note_name, Some("mynote".to_string()));
-        assert_eq!(b.timer_secs, Some(600));
     }
 }
