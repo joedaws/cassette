@@ -62,10 +62,21 @@ creation and **never renamed afterward**; `topic` in frontmatter remains the sou
 truth for display. Stability beats accuracy — see "Why priority never touches the
 filename" below.
 
-ULIDs are used rather than random UUIDs because they sort by creation time, which makes
-the priority tiebreak meaningful: equal priorities resolve to creation order, i.e. FIFO,
-which is what a queue should do. The CLI accepts unambiguous id prefixes (git shortsha
-style) so nobody types 26 characters.
+ULIDs are used rather than random UUIDs because they sort roughly by creation time, which
+makes the priority tiebreak useful rather than arbitrary. **The id is a tiebreak only. It
+is never load-bearing for ordering and must not be relied on to resolve creation order
+correctly 100% of the time.** A ULID's timestamp has millisecond resolution; within the
+same millisecond, ordering falls to the random component, which is not creation order.
+Monotonic-ULID generators fix that only within a single process, and this system has at
+least two writers by design — a human TUI and one or more agent CLIs — so two cassettes
+created in the same millisecond by different processes sort arbitrarily with respect to
+each other.
+
+That is acceptable because the property actually needed is **stability, not truth**: the
+same set of cassettes must always render in the same order so the queue does not jitter
+between reads, and two cassettes created a millisecond apart have no meaningful priority
+relationship anyway. Where real ordering matters, that is what the `priority` field is
+for — it is the ordering mechanism, and the id only settles what priority leaves equal.
 
 ### `session.toml`
 
@@ -228,7 +239,9 @@ just those locks. There is no normalize-on-open pass — it would rewrite every 
 and the TUI does not hold all those locks.
 
 Two writers can compute the same insertion point and collide on a value. This is benign:
-ties break by ULID, i.e. creation order.
+ties break by ULID — approximately creation order, and arbitrary but stable for ids
+minted in the same millisecond. See "Identity and file naming" above; the id is a
+tiebreak, never an ordering guarantee.
 
 ## Live sync
 
@@ -410,7 +423,7 @@ words live in a directory tree with sidecar lock files.
   its lock with dirty content, the flush recreates it. The human's unsaved words win.
 - Leftover `.tmp-<ulid>` files from a crashed write are swept on session open.
 - Timestamps are used only for display and `--since`, never for correctness. Ordering
-  comes from priority and sortable ids, so clock skew cannot corrupt it.
+  comes from priority, with ids only breaking ties, so clock skew cannot corrupt it.
 
 ## Platform support
 
@@ -487,7 +500,7 @@ by sharing the lock — small evidence the primitive is right.
 | `clap` (derive) | CLI surface | pure Rust |
 | `clap_mangen`, `clap_complete` | man page + completions | build-deps |
 | `fs4` | cross-platform file locking | pure Rust |
-| `ulid` | sortable ids | pure Rust |
+| `ulid` | roughly-sortable ids (tiebreak only) | pure Rust |
 | `serde_json` | `--json` output | pure Rust |
 | `tempfile` | store tests | dev-dep |
 
