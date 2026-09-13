@@ -1,7 +1,7 @@
 # Session store — per-cassette files, writers, and turn-taking locks
 
 **Date:** 2026-09-13
-**Status:** draft — pending review
+**Status:** approved 2026-09-13
 
 ## Purpose
 
