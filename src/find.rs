@@ -152,7 +152,7 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>) -> String {
             matched.len() - MAX_LISTED
         ));
     }
-    out.push_str("\nresume one: cassette --resume <name>");
+    out.push_str("\nresume one: cassette resume <name>");
     out
 }
 
@@ -253,7 +253,7 @@ mod tests {
         assert!(new_pos < old_pos, "{out}");
         assert!(out.contains("2026-07-13 09:12    412 words  new.md"), "{out}");
         assert!(out.contains("    body of new.md"), "{out}");
-        assert!(out.ends_with("resume one: cassette --resume <name>"), "{out}");
+        assert!(out.ends_with("resume one: cassette resume <name>"), "{out}");
     }
 
     #[test]

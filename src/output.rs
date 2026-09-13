@@ -6,7 +6,7 @@ use crate::cassette::Cassette;
 
 /// `draft` marks an in-flight autosave (`draft: true` in the frontmatter);
 /// the final save on quit clears it, so a surviving draft flag means the
-/// session crashed and the note is offered for `--resume` on next launch.
+/// session crashed and the note is offered for `resume` on next launch.
 /// `note_date` carries a resumed note's original `date:` so saving doesn't
 /// restamp it with this session's start time; `None` for fresh notes.
 pub fn write_markdown(

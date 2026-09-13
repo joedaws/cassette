@@ -86,7 +86,7 @@ fn newest_note(dir: &std::path::Path, drafts_only: bool) -> Option<PathBuf> {
 }
 
 /// Drop the `draft: true` marker from a declined draft so it isn't offered
-/// again on every launch (`--resume <file>` still works on it).
+/// again on every launch (`resume <file>` still works on it).
 fn clear_draft_flag(path: &std::path::Path) {
     if let Ok(content) = std::fs::read_to_string(path) {
         let mut in_fm = false;
@@ -172,11 +172,10 @@ fn main() -> io::Result<()> {
         })
     });
 
-    // Resolve --resume (or the crashed-draft offer) before touching the
+    // Resolve resume (or the crashed-draft offer) before touching the
     // terminal: errors can still die() cleanly and the prompt can read stdin.
     let mut resume_target: Option<PathBuf> = match &args.resume {
-        Some(_) if args.daily => die("--resume cannot be combined with 'today'"),
-        Some(_) if args.template.is_some() => die("--resume cannot be combined with '-T'"),
+        Some(_) if args.template.is_some() => die("'resume' cannot be combined with '-T'"),
         Some(Some(name)) => Some(config::resolve_output_path(
             Some(name),
             &std::time::SystemTime::now(),
@@ -191,7 +190,7 @@ fn main() -> io::Result<()> {
         None => None,
     };
     // A positional name that points at an existing note opens it like
-    // --resume — never a silent conflict-rename to `name_1.md`.
+    // resume — never a silent conflict-rename to `name_1.md`.
     if resume_target.is_none() && !args.print_stdout && !args.daily {
         if let Some(name) = &args.note_name {
             let path = config::resolve_output_path(

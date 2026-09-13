@@ -55,7 +55,7 @@ pub struct App {
     /// Record mode (`--record`): the tape only rolls forward — no deletions,
     /// no normal mode. Opt-in; plain sessions keep full editing.
     pub record: bool,
-    /// Words already in the note when a `--resume` loaded it; the session
+    /// Words already in the note when a `resume` loaded it; the session
     /// recap reports only what was added on top.
     pub baseline_words: usize,
     /// Seconds since the last keypress; drives the idle nudge.
@@ -221,7 +221,7 @@ impl App {
     }
 
     /// Replace the session's cassettes with ones loaded from a saved note
-    /// (`--resume`). Focus lands on the last cassette, whose cursor is
+    /// (`resume`). Focus lands on the last cassette, whose cursor is
     /// already at the end of side A — ready to keep writing.
     pub fn load_cassettes(&mut self, cassettes: Vec<Cassette>) {
         if cassettes.is_empty() {
@@ -290,7 +290,7 @@ impl App {
         self.cassettes.iter().map(|c| c.word_count()).sum()
     }
 
-    /// Words written this sitting: the total minus what a `--resume` loaded.
+    /// Words written this sitting: the total minus what a `resume` loaded.
     /// Live stats (goal, reel, info line) run on this; the saved file and its
     /// frontmatter keep the full total.
     pub fn session_word_count(&self) -> usize {
