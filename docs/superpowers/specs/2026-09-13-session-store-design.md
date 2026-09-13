@@ -286,14 +286,40 @@ cassette writer register --name <n> --kind human|agent
 cassette writer list
 cassette writer whoami
 
-# Retained
-cassette [OPTIONS]        # TUI; -t -w -l -T -R --theme -o
+# Core (all subcommands — see "One surface, no top-level positional" below)
+cassette [OPTIONS]        # TUI, new session; -t -w -l -T -R --theme -o
+cassette new <NAME>       # session in a named note
 cassette today            # session whose alias is today's date
-cassette stats | find | export <session> | +themes
-cassette --resume         # open the most recent session (by session.toml created)
+cassette resume [FILE]    # most recent session, or the named one
+cassette stats | find [TEXT...] | themes | export <session>
 ```
 
 Global flags: `--writer <name>`, `--session <id>`, `--json`.
+
+### One surface, no top-level positional
+
+Every mode is a subcommand and there is **no bare positional argument**. This is not
+cosmetic — a top-level positional coexisting with subcommands is ambiguous, and clap
+resolves the ambiguity in a way that silently corrupts intent: with
+`args_conflicts_with_subcommands` set, `cassette -t 10 today` parses `today` as a note
+*name*, so the user gets a file called "today" instead of the daily note. Without it,
+`cassette mynote today` is accepted and the name is silently discarded. Neither failure
+is detectable by the user at the point of the mistake.
+
+Removing the positional removes the ambiguity at the source, and every hand-written
+validation it forced disappears with it. Consequences, all intentional:
+
+- `cassette mynote` becomes `cassette new mynote`; `new` requires a NAME, enforced by clap.
+- `+themes` becomes `themes`. The `+` sigil existed only to avoid colliding with note
+  names, and that collision no longer exists.
+- `--resume [FILE]` becomes `cassette resume [FILE]`. An optional-value flag next to an
+  optional positional is clap's classic ambiguity; a subcommand with an optional
+  positional has none.
+- `--version` is top-level only, so `cassette stats --version` exits 2. This is clap's
+  convention and matches `git status --version`.
+
+This also puts Phase 4 on the same footing: `session`, `queue`, and `writer` slot into an
+already-subcommand-shaped tree rather than fighting a legacy positional.
 
 `queue write` takes its body from stdin (or `-m` for one line); multi-paragraph prose
 through shell argument quoting is a bug farm. It acquires the lock **before** reading
