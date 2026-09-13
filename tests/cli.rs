@@ -37,8 +37,10 @@ fn help_flag_exits_zero_and_documents_the_surface() {
 }
 
 #[test]
-fn short_help_flag_also_exits_zero() {
-    assert_eq!(run(&["-h"]).status.code(), Some(0));
+fn short_help_flag_also_exits_zero_and_prints_help() {
+    let out = run(&["-h"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("cassette"));
 }
 
 #[test]
@@ -75,4 +77,18 @@ fn extra_positional_after_an_action_exits_two() {
 fn missing_value_for_an_option_exits_two() {
     assert_eq!(run(&["-T"]).status.code(), Some(2));
     assert_eq!(run(&["--theme"]).status.code(), Some(2));
+}
+
+#[test]
+fn unknown_template_name_exits_two() {
+    let out = run(&["-T", "nosuchtemplate"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!stderr(&out).is_empty());
+}
+
+#[test]
+fn unknown_theme_name_exits_two() {
+    let out = run(&["--theme", "nosuchtheme"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!stderr(&out).is_empty());
 }
