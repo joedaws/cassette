@@ -1378,4 +1378,48 @@ mod tests {
         assert_eq!(a.timer_secs, Some(600));
         assert!(a.daily);
     }
+
+    #[test]
+    fn find_treats_a_later_flag_as_a_flag_not_a_query_word() {
+        let a = parse_args_from(&argv(&["find", "foo", "-t", "10"]));
+        assert_eq!(a.find, Some(vec!["foo".to_string()]));
+        assert_eq!(a.timer_secs, Some(600));
+    }
+
+    #[test]
+    fn find_with_a_leading_flag_keeps_an_empty_query() {
+        let a = parse_args_from(&argv(&["find", "-t", "10"]));
+        assert_eq!(a.find, Some(Vec::new()));
+        assert_eq!(a.timer_secs, Some(600));
+    }
+
+    #[test]
+    fn flags_work_on_either_side_of_stats_and_themes() {
+        assert_eq!(
+            parse_args_from(&argv(&["stats", "-t", "10"])).timer_secs,
+            Some(600)
+        );
+        assert_eq!(
+            parse_args_from(&argv(&["-t", "10", "stats"])).timer_secs,
+            Some(600)
+        );
+        assert_eq!(
+            parse_args_from(&argv(&["+themes", "-t", "10"])).timer_secs,
+            Some(600)
+        );
+        assert_eq!(
+            parse_args_from(&argv(&["-t", "10", "+themes"])).timer_secs,
+            Some(600)
+        );
+    }
+
+    #[test]
+    fn flags_work_on_either_side_of_a_positional_note_name() {
+        let a = parse_args_from(&argv(&["mynote", "-t", "10"]));
+        assert_eq!(a.note_name, Some("mynote".to_string()));
+        assert_eq!(a.timer_secs, Some(600));
+        let b = parse_args_from(&argv(&["-t", "10", "mynote"]));
+        assert_eq!(b.note_name, Some("mynote".to_string()));
+        assert_eq!(b.timer_secs, Some(600));
+    }
 }
