@@ -82,13 +82,29 @@ pub fn build_frontmatter(m: &CassetteMeta) -> String {
     s
 }
 
-/// Parse the leading `---` block. `None` when there is no frontmatter or when
+/// Locate the frontmatter block and the body. `None` when the file has no
+/// well-formed frontmatter: the opening fence must be the first line, and the
+/// closing fence must be a line of exactly `---`.
+///
+/// One finder for both callers. When these were two searches with different
+/// patterns, a malformed closing fence (a trailing space, say) parsed as valid
+/// frontmatter but yielded an empty body — so a cassette's words were silently
+/// discarded instead of the file being skipped.
+fn split_parts(content: &str) -> Option<(&str, &str)> {
+    let rest = content.strip_prefix("---\n")?;
+    let (block, after) = match rest.split_once("\n---\n") {
+        Some((block, after)) => (block, after),
+        // A file that ends immediately after the closing fence.
+        None => (rest.strip_suffix("\n---")?, ""),
+    };
+    // Writers put one blank line between the block and the body.
+    Some((block, after.strip_prefix('\n').unwrap_or(after)))
+}
+
+/// Parse the fields out of an already-located frontmatter block. `None` when
 /// `id` is missing — an unidentifiable file must not become a cassette with an
 /// empty id that collides with the next one.
-pub fn parse_frontmatter(content: &str) -> Option<CassetteMeta> {
-    let rest = content.strip_prefix("---\n")?;
-    let (block, _) = rest.split_once("\n---")?;
-
+fn parse_block(block: &str) -> Option<CassetteMeta> {
     let mut id = None;
     let mut topic = None;
     let mut priority = 0i64;
@@ -130,18 +146,24 @@ pub fn parse_frontmatter(content: &str) -> Option<CassetteMeta> {
     })
 }
 
+/// Parse the leading `---` block. `None` when there is no well-formed
+/// frontmatter or when `id` is missing.
+pub fn parse_frontmatter(content: &str) -> Option<CassetteMeta> {
+    parse_block(split_parts(content)?.0)
+}
+
 /// Frontmatter plus the body after it, with the body byte-for-byte intact.
 /// `build_frontmatter` ends in `---\n` and writers add one blank line, so that
-/// blank line is consumed here and re-added on write.
+/// blank line is consumed here and re-added on write. When the frontmatter is
+/// malformed or missing, the whole content is returned as body rather than
+/// risking an empty one.
 pub fn split(content: &str) -> (Option<CassetteMeta>, &str) {
-    let Some(meta) = parse_frontmatter(content) else {
+    let Some((block, body)) = split_parts(content) else {
         return (None, content);
     };
-    let body = content
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---\n"))
-        .map(|(_, body)| body.strip_prefix('\n').unwrap_or(body))
-        .unwrap_or("");
+    let Some(meta) = parse_block(block) else {
+        return (None, content);
+    };
     (Some(meta), body)
 }
 
@@ -265,6 +287,33 @@ mod tests {
             !parsed.topic.as_deref().unwrap_or_default().contains('\n'),
             "the stored topic must be single-line"
         );
+    }
+
+    #[test]
+    fn a_malformed_closing_fence_is_not_a_cassette_rather_than_an_empty_body() {
+        // A trailing space after the fence used to parse as valid frontmatter
+        // while yielding an empty body — which an autosave would then persist
+        // over the real words. Skipping the file is the safe failure.
+        let content = "---\nid: abc\npriority: 20\n--- \n\n## Side A\n\nmy words\n";
+        let (meta, body) = split(content);
+        assert!(
+            meta.is_none(),
+            "a malformed fence must not scan as a cassette"
+        );
+        assert_eq!(body, content, "and the content must be returned untouched");
+        assert!(
+            parse_frontmatter(content).is_none(),
+            "both entry points must agree"
+        );
+    }
+
+    #[test]
+    fn frontmatter_ending_the_file_still_parses() {
+        // No body at all: the closing fence is the last line.
+        let content = "---\nid: abc\npriority: 20\n---";
+        let (meta, body) = split(content);
+        assert_eq!(meta.expect("parses").id, "abc");
+        assert_eq!(body, "");
     }
 
     #[test]
