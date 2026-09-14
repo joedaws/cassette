@@ -620,7 +620,7 @@ Add `pub mod meta;` to `src/store/mod.rs`.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test store::meta`
-Expected: PASS, 11 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -842,7 +842,7 @@ Add `pub mod priority;` to `src/store/mod.rs`.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test store::priority`
-Expected: PASS, 11 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1465,6 +1465,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn an_existing_loose_data_dir_is_tightened() {
+        // A store root that already exists with loose permissions must be
+        // brought back to 0700 rather than left as found.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        std::fs::create_dir(&root).expect("mkdir");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        Store::new(root.clone())
+            .create_session(&session_meta())
+            .expect("create");
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "a loose existing root must be tightened");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_data_dirs_parent_keeps_its_own_permissions() {
+        // Only the store root is private; creating it must not tighten
+        // ~/.local/share (or whatever the parent happens to be).
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let parent = dir.path().join("share");
+        let root = parent.join("cassette");
+        Store::new(root).create_session(&session_meta()).expect("create");
+        let mode = std::fs::metadata(&parent).unwrap().permissions().mode();
+        assert_ne!(mode & 0o777, 0o700, "the parent must not be forced to 0700");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn the_data_dir_is_private() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1574,16 +1605,33 @@ impl Store {
     /// journal is private by default; tightening it later would leave a
     /// window where other local users can read it.
     fn ensure_root(&self) -> io::Result<()> {
-        std::fs::create_dir_all(&self.root)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            // Parents (e.g. ~/.local/share) keep their normal permissions —
+            // only the store root is private.
+            if let Some(parent) = self.root.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // 0700 is baked into the mkdir(2) call rather than chmod'd on
+            // afterwards: create-then-tighten leaves a window where the
+            // directory exists world-readable, and the spec says the data
+            // directory *is created* 0700. umask can only narrow this further,
+            // never widen it.
+            match std::fs::DirBuilder::new().mode(0o700).create(&self.root) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            // A directory that already existed may still be loose — tighten it.
             let mut perms = std::fs::metadata(&self.root)?.permissions();
             if perms.mode() & 0o777 != 0o700 {
                 perms.set_mode(0o700);
                 std::fs::set_permissions(&self.root, perms)?;
             }
         }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(&self.root)?;
         Ok(())
     }
 
@@ -1670,7 +1718,7 @@ impl Store {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test store::tests`
-Expected: PASS, 11 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Route the remaining writes through `atomic_write`**
 
@@ -1727,7 +1775,7 @@ which is how you know it is looking in the right place.
 - [ ] **Step 7: Run the whole suite**
 
 Run: `cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: all green. The store adds 54 tests; the existing 153 still pass.
+Expected: all green. The store adds 56 tests; the existing 153 still pass.
 
 - [ ] **Step 8: Commit**
 
@@ -1742,7 +1790,7 @@ git commit -m "feat: store layout, atomic writes, session creation and scanning"
 
 After Task 6, confirm the phase's own acceptance criteria:
 
-- [ ] `cargo test` — 207 tests pass (153 existing + 54 new).
+- [ ] `cargo test` — 209 tests pass (153 existing + 56 new).
 - [ ] `cargo clippy --all-targets -- -D warnings` — clean.
 - [ ] `cargo fmt --check` — clean.
 - [ ] The production-write check from Task 6 Step 6 prints exactly one line —
