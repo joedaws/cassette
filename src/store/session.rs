@@ -45,6 +45,7 @@ pub fn read_active(root: &Path) -> Option<String> {
 }
 
 pub fn write_active(root: &Path, id: &str) -> io::Result<()> {
+    crate::store::ensure_private_dir(root)?;
     crate::store::atomic_write(&active_path(root), &format!("{id}\n"))
 }
 

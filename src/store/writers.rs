@@ -64,6 +64,7 @@ pub fn read(root: &Path) -> io::Result<Writers> {
 }
 
 pub fn write(root: &Path, w: &Writers) -> io::Result<()> {
+    crate::store::ensure_private_dir(root)?;
     let text = toml::to_string(w).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     crate::store::atomic_write(&root.join(WRITERS_FILE), &text)
 }

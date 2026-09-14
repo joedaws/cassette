@@ -70,6 +70,37 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
     }
 }
 
+/// Create `dir` as a private (`0700`) directory, tightening it if it already
+/// exists with looser permissions. The mode is baked into `mkdir(2)` rather
+/// than chmod'd afterwards, so the directory is never briefly world-readable;
+/// parents keep their own permissions.
+///
+/// Free-standing rather than a `Store` method because `writers` and the active
+/// pointer take a bare root path and would otherwise create the store root
+/// through `atomic_write` at the process umask.
+pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        let mut perms = std::fs::metadata(dir)?.permissions();
+        if perms.mode() & 0o777 != 0o700 {
+            perms.set_mode(0o700);
+            std::fs::set_permissions(dir, perms)?;
+        }
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)?;
+    Ok(())
+}
+
 /// One cassette as it exists on disk.
 #[derive(Debug, Clone)]
 pub struct StoredCassette {
@@ -117,34 +148,7 @@ impl Store {
     /// journal is private by default; tightening it later would leave a
     /// window where other local users can read it.
     fn ensure_root(&self) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-            // Parents (e.g. ~/.local/share) keep their normal permissions —
-            // only the store root is private.
-            if let Some(parent) = self.root.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            // 0700 is baked into the mkdir(2) call rather than chmod'd on
-            // afterwards: create-then-tighten leaves a window where the
-            // directory exists world-readable, and the spec says the data
-            // directory *is created* 0700. umask can only narrow this further,
-            // never widen it.
-            match std::fs::DirBuilder::new().mode(0o700).create(&self.root) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-            // A directory that already existed may still be loose — tighten it.
-            let mut perms = std::fs::metadata(&self.root)?.permissions();
-            if perms.mode() & 0o777 != 0o700 {
-                perms.set_mode(0o700);
-                std::fs::set_permissions(&self.root, perms)?;
-            }
-        }
-        #[cfg(not(unix))]
-        std::fs::create_dir_all(&self.root)?;
-        Ok(())
+        ensure_private_dir(&self.root)
     }
 
     /// Mint a session id, build its directory layout, write `session.toml`,
@@ -434,6 +438,38 @@ mod tests {
             .expect("create");
         let mode = std::fs::metadata(&parent).unwrap().permissions().mode();
         assert_ne!(mode & 0o777, 0o700, "the parent must not be forced to 0700");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registering_a_writer_creates_a_private_root() {
+        // The spec auto-registers a writer on first run, which can happen
+        // before any session exists — that path must not leave the root loose.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        writers::ensure(&root, "joseph", writers::Kind::Human).expect("ensure");
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "writer registration must create a private root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setting_the_active_session_creates_a_private_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        session::write_active(&root, "01K5GQ2R8V3XQZ0000000000AB").expect("write");
+        let mode = std::fs::metadata(&root).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "the active pointer must not create a loose root"
+        );
     }
 
     #[cfg(unix)]
