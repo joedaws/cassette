@@ -34,6 +34,7 @@
 //! tighten it. One owner, one place that creates the root.
 
 pub mod ids;
+pub mod lock;
 pub mod meta;
 pub mod priority;
 pub mod session;
