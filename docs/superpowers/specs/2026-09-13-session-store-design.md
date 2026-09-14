@@ -561,6 +561,58 @@ phases, each independently testable and each leaving the tool working.
 Phase 1 is mechanical, 3 and 5 carry the real risk. Phases 2–3 are worth reviewing before
 4–6 build on them, since the lock protocol is the part that is expensive to change later.
 
+### Known items carried out of Phase 2
+
+Phase 2 shipped with these deliberately deferred. They are real, found by review, and
+assigned — not open questions.
+
+**Phase 3 must address:**
+
+- **The store root is not owned by `Store`.** `writers::{read, write, ensure}` and
+  `session::{read_active, write_active}` take a bare `&Path` root and bypass `Store`
+  entirely. Phase 2 patched the resulting confidentiality hole by making
+  `store::ensure_private_dir` crate-visible and calling it from each entry point, but the
+  seam remains: a lock helper naturally wants `Store::locks_dir(session)`, and free
+  functions taking a root cannot reach it. Move them onto `Store` methods now, while
+  Phase 4 has not yet written a CLI against the free-function form.
+- **`atomic_write` calls `create_dir_all` on every write.** Convenient, but it means any
+  write silently materializes whatever directory tree the path implies — which is exactly
+  how the store root came to be created at umask default from the writer-registration
+  path. Under locking this is worse: a lock anchor and its cassette could be created by
+  different code paths with different modes. Consider requiring the directory to exist and
+  creating it only at the `Store` level.
+
+**Phase 4 must address:**
+
+- **`priority::last()` and `priority::between()` both overflow.** `last(&[i64::MAX])`
+  panics on `+ STEP`; `between(i64::MIN, i64::MAX)` panics on `hi - lo` before the `mid`
+  guard runs. Both are debug-build panics reachable only through hand-edited frontmatter,
+  since `parse_frontmatter` accepts any `i64`-parseable string. Not fixable in Phase 2:
+  `last` returns a bare `i64` with no way to signal "no room". Phase 4 introduces the CLI
+  that sets priorities, so it either clamps on the way in or changes the signatures.
+- **`session::read_active` swallows every I/O error into `None`.** The same pattern was a
+  data-loss bug in `writers::read` and was fixed there; `scan_session`'s instance was fixed
+  too. This one survives because `Option<String>` cannot carry an error and no caller
+  existed yet to decide the policy. An unreadable pointer currently starts a new session
+  rather than resuming an existing one — wrong, but not destructive.
+- **`between()` has no documented `lo < hi` precondition.** Reversed arguments silently
+  return `None`, which reads as "renumber this run" rather than surfacing the caller's bug.
+
+**Recorded, not assigned** (low value, no owner):
+
+- Two cassette files carrying the same frontmatter `id` collapse onto one sort key in
+  `scan_session`, and their relative order falls back to `read_dir` order — defeating the
+  no-jitter property for that case. Only reachable by copying a cassette file. Under
+  Phase 3 they would also share one `.locks/<id>` anchor.
+- `atomic_write` does not `fsync` the temp before `rename` or the directory after, so
+  durability across power loss rests on the filesystem's rename heuristic. The spec asks
+  only for write-temp-then-rename, so this is correct as specified.
+- An unreadable-but-present `.md` is silently skipped by `scan_session`. This spec wants
+  unparseable cassettes to "render as an error row" (Phase 5), but Phase 2 discards the
+  information such a row would need.
+- A `topic` consisting only of line-break characters normalizes to a space and then parses
+  back as `None`, because of the `.trim()` in the field parser.
+
 ## Deferred
 
 - **Multi-agent contention on one cassette.** Two agents can both target the same unlocked
