@@ -18,12 +18,13 @@
 //!       cassettes/
 //!         <slug>-<cassette ulid>.md
 //!       .locks/
-//!         <cassette ulid>        # empty flock anchor (Phase 3)
+//!         <cassette ulid>        # flock anchor, holder stamped after acquiring
 //! ```
 //!
 //! Pure data and math live in `ids`, `meta` and `priority`; the thin I/O layer
-//! is `session`, `writers`, and `Store` here. No locking yet — Phase 3 wraps
-//! the write calls.
+//! is `session`, `writers`, and `Store` here. Writing an existing cassette
+//! goes through `LockGuard::write` (see `lock`) — `Store` has no write method
+//! of its own, so there is exactly one way onto disk.
 //!
 //! **`Store` owns the data-dir root.** The `session` and `writers` modules hold
 //! the file formats, but their entry points are `pub(crate)` and everything
@@ -50,8 +51,7 @@ use crate::store::session::SessionMeta;
 pub const SESSIONS_DIR: &str = "sessions";
 /// Per-session directory of cassette files.
 pub const CASSETTES_DIR: &str = "cassettes";
-/// Per-session directory of flock anchors (Phase 3 opens these; this phase
-/// only creates the directory so the layout is complete).
+/// Per-session directory of flock anchors — see `lock`.
 pub const LOCKS_DIR: &str = ".locks";
 
 /// Write via a temp file in the same directory, then `rename()` over the
@@ -165,28 +165,56 @@ impl Store {
     pub fn create_session(&self, m: &SessionMeta) -> io::Result<String> {
         self.ensure_root()?;
         let id = ids::new_id();
-        std::fs::create_dir_all(self.cassettes_dir(&id))?;
-        std::fs::create_dir_all(self.locks_dir(&id))?;
+        ensure_private_dir(&self.cassettes_dir(&id))?;
+        ensure_private_dir(&self.locks_dir(&id))?;
         session::write(&self.session_dir(&id).join("session.toml"), m)?;
         Ok(id)
     }
 
-    /// Create a new cassette file, named `<slug>-<id>.md` from the topic at
-    /// creation. Returns the path, which callers keep: the name is never
-    /// recomputed, even when the topic changes.
+    /// Create a new cassette, named `<slug>-<id>.md` from the topic at
+    /// creation, and its lock anchor. Returns the path, which callers keep:
+    /// the name is never recomputed, even when the topic changes.
+    ///
+    /// Takes and releases the cassette's own lock like every other write. A
+    /// freshly minted ULID cannot be contended, so this cannot fail on `Busy`
+    /// — routing it through the guard means there is exactly one way a
+    /// cassette file is ever written.
+    ///
+    /// There is no empty-placeholder write before acquiring: `lock::acquire`
+    /// takes this path directly rather than resolving it from disk, and
+    /// `LockGuard::write` creates the file itself via `atomic_write`'s
+    /// temp-then-rename. A placeholder would only open a window where a
+    /// failed acquire or write leaves a stray zero-byte cassette behind.
     pub fn add_cassette(&self, session: &str, m: &CassetteMeta, body: &str) -> io::Result<PathBuf> {
         let path = self
             .cassettes_dir(session)
             .join(ids::file_name(m.topic.as_deref(), &m.id));
-        self.write_cassette(&path, m, body)?;
+        if let Some(parent) = path.parent() {
+            ensure_private_dir(parent)?;
+        }
+        let anchor = self.locks_dir(session).join(&m.id);
+        // `created_by` is a writer id, not a display name (see
+        // `CassetteMeta::created_by`/`writers::Writer::name`) — resolve it
+        // through the registry so `LockError::Busy`'s message names the
+        // writer rather than echoing their id back. A `created_by` with no
+        // matching entry (hand-crafted metadata) falls back to the id itself,
+        // the same tolerance the registry already extends elsewhere.
+        let name = self
+            .writers()?
+            .writers
+            .get(&m.created_by)
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| m.created_by.clone());
+        let guard = lock::acquire(
+            &m.id,
+            path.clone(),
+            &anchor,
+            &lock::Attribution::for_now(&m.created_by, &name),
+            lock::Blocking::No,
+        )
+        .map_err(io::Error::from)?;
+        guard.write(m, body)?;
         Ok(path)
-    }
-
-    /// Overwrite a cassette in place. Deliberately takes the path rather than
-    /// deriving it: the file keeps the slug it was minted with, so a retopic
-    /// updates frontmatter without a rename.
-    pub fn write_cassette(&self, path: &Path, m: &CassetteMeta, body: &str) -> io::Result<()> {
-        atomic_write(path, &format!("{}\n{}", meta::build_frontmatter(m), body))
     }
 
     /// The session's own metadata (`session.toml`).
@@ -482,6 +510,21 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_cassette_creates_its_lock_anchor() {
+        // Phase 3 onward, every cassette has an anchor from birth — the
+        // on-demand path in `lock` is a fallback for hand-written files, not
+        // the normal route.
+        let (_dir, s) = store();
+        let sid = s.create_session(&session_meta()).expect("create");
+        let m = cassette_meta("01K5GR7T2M9WPD0000000000AB", 10);
+        s.add_cassette(&sid, &m, "body\n").expect("add");
+        assert!(
+            s.locks_dir(&sid).join(&m.id).is_file(),
+            "add_cassette must create .locks/<id>"
+        );
+    }
+
+    #[test]
     fn write_cassette_updates_in_place_without_renaming() {
         // The slug is frozen at creation: retopicking must not move the file,
         // because an flock is held on the inode another writer resolved.
@@ -491,7 +534,10 @@ mod tests {
         let path = s.add_cassette(&sid, &m, "old\n").expect("add");
 
         m.topic = Some("completely different".to_string());
-        s.write_cassette(&path, &m, "new\n").expect("write");
+        let who = lock::Attribution::for_now("writer-1", "joseph");
+        let guard = s.lock(&sid, &m.id, &who).expect("acquire");
+        guard.write(&m, "new\n").expect("write");
+        drop(guard);
 
         assert!(path.is_file(), "the file must not have been renamed");
         let found = s.scan_session(&sid).expect("scan");
@@ -637,5 +683,20 @@ mod tests {
             0o700,
             "a private journal is not world-readable"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_subdirectories_are_private_too() {
+        // The 0700 root already stops another user traversing in, so this is
+        // defence in depth: a root loosened by a restore or a sync tool must
+        // not expose every session beneath it.
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, s) = store();
+        let sid = s.create_session(&session_meta()).expect("create");
+        for d in [s.cassettes_dir(&sid), s.locks_dir(&sid)] {
+            let mode = std::fs::metadata(&d).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{} must be private", d.display());
+        }
     }
 }

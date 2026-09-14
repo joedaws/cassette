@@ -97,6 +97,15 @@ impl From<io::Error> for LockError {
     }
 }
 
+impl From<LockError> for io::Error {
+    fn from(e: LockError) -> io::Error {
+        match e {
+            LockError::Io(e) => e,
+            busy => io::Error::new(io::ErrorKind::WouldBlock, busy.to_string()),
+        }
+    }
+}
+
 /// A held cassette lock. The only way to write an existing cassette.
 ///
 /// The lock is released when this value is dropped, and by the kernel if the
