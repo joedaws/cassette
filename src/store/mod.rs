@@ -186,8 +186,10 @@ impl Store {
     /// editors and their swap files.
     pub fn scan_session(&self, session: &str) -> io::Result<Vec<StoredCassette>> {
         let dir = self.cassettes_dir(session);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Ok(Vec::new());
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
         };
         let mut found = Vec::new();
         for entry in entries.filter_map(|e| e.ok()) {
@@ -377,6 +379,22 @@ mod tests {
     fn scanning_a_missing_session_is_empty_not_an_error() {
         let (_dir, s) = store();
         assert!(s.scan_session("nope").expect("scan").is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_cassettes_dir_errors_rather_than_scanning_empty() {
+        // Only NotFound may mean "no cassettes". Reporting an empty queue for a
+        // directory we merely could not read would let a caller insert at the
+        // head of a queue it never saw. A file where the directory should be is
+        // the portable way to force a non-NotFound failure.
+        let (_dir, s) = store();
+        let sid = s.create_session(&session_meta()).expect("create");
+        std::fs::remove_dir_all(s.cassettes_dir(&sid)).expect("rmdir");
+        std::fs::write(s.cassettes_dir(&sid), "not a directory").expect("write");
+        assert!(
+            s.scan_session(&sid).is_err(),
+            "an unreadable cassettes dir must not scan as empty"
+        );
     }
 
     #[test]
