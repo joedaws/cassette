@@ -48,14 +48,21 @@ pub struct CassetteMeta {
     pub updated_at: String,
 }
 
+/// Frontmatter is line-oriented: a value containing a line break would end the
+/// block early, truncating later fields and letting a topic inject ones it has
+/// no business setting. Collapse every line break into a space.
+fn one_line(value: &str) -> String {
+    value.replace("\r\n", " ").replace(['\n', '\r'], " ")
+}
+
 /// `---` block in the spec's field order, always ending with a newline so a
 /// body can be concatenated straight onto it.
 pub fn build_frontmatter(m: &CassetteMeta) -> String {
     let mut s = String::with_capacity(256);
     s.push_str("---\n");
-    s.push_str(&format!("id: {}\n", m.id));
+    s.push_str(&format!("id: {}\n", one_line(&m.id)));
     if let Some(topic) = &m.topic {
-        s.push_str(&format!("topic: {topic}\n"));
+        s.push_str(&format!("topic: {}\n", one_line(topic)));
     } else {
         s.push_str("topic:\n");
     }
@@ -65,12 +72,12 @@ pub fn build_frontmatter(m: &CassetteMeta) -> String {
         "locked_by:{}\n",
         m.locked_by
             .as_deref()
-            .map(|w| format!(" {w}"))
+            .map(|w| format!(" {}", one_line(w)))
             .unwrap_or_default()
     ));
-    s.push_str(&format!("created_by: {}\n", m.created_by));
-    s.push_str(&format!("last_writer: {}\n", m.last_writer));
-    s.push_str(&format!("updated_at: {}\n", m.updated_at));
+    s.push_str(&format!("created_by: {}\n", one_line(&m.created_by)));
+    s.push_str(&format!("last_writer: {}\n", one_line(&m.last_writer)));
+    s.push_str(&format!("updated_at: {}\n", one_line(&m.updated_at)));
     s.push_str("---\n");
     s
 }
@@ -244,6 +251,20 @@ mod tests {
         let (parsed, rest) = split("## Side A\n\nhello\n");
         assert!(parsed.is_none());
         assert_eq!(rest, "## Side A\n\nhello\n");
+    }
+
+    #[test]
+    fn a_topic_containing_a_newline_cannot_break_out_of_the_block() {
+        let mut m = meta();
+        m.topic = Some("x\n---\nid: EVIL".to_string());
+        let parsed = parse_frontmatter(&build_frontmatter(&m)).expect("parses");
+        assert_eq!(parsed.id, m.id, "a topic must not be able to set the id");
+        assert_eq!(parsed.priority, m.priority, "later fields must survive");
+        assert_eq!(parsed.updated_at, m.updated_at, "later fields must survive");
+        assert!(
+            !parsed.topic.as_deref().unwrap_or_default().contains('\n'),
+            "the stored topic must be single-line"
+        );
     }
 
     #[test]
