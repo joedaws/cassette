@@ -204,8 +204,12 @@ never locked and reads always succeed on both platforms.
 which the lock itself serializes. A blocked writer reads it for the message:
 
 ```
-cassette: 'refactor notes' is open by joseph (since 14:02) — try again later
+cassette: 'refactor notes' is open by joseph (since 2026-09-14T14:02:11Z) — try again later
 ```
+
+The full RFC3339 stamp, not a bare `14:02`, is deliberate: a lock can have been held since
+yesterday, and a bare time of day is ambiguous across days when that happens — exactly the
+case a user most needs to understand.
 
 Stale contents after a crash are harmless: lockedness is decided by kernel flock state and
 never by the file's bytes. The contents are display-only.
@@ -486,10 +490,28 @@ the default `0755`/`0644` would make every session world-readable on a shared ma
 folder is unsupported.** Locks are local kernel state and do not sync, so two machines
 editing the same session get **zero** mutual exclusion — the exact guarantee this design
 exists to provide. Sync clients also interfere with rename-based atomic writes and
-produce conflicted copies. NFS is excluded for the same underlying reason: flock there is
-emulated or unreliable.
+produce conflicted copies.
 
 Where cheap, warn at startup when `data_dir` resolves under a known sync root.
+
+### Unsupported: network filesystems (NFS/SMB)
+
+`flock` semantics on NFS and SMB are not guaranteed. Depending on the server, the client's
+lock-manager configuration, and the protocol version in play, `flock` can silently degrade
+to advisory locking that only holds within one machine — the kernel accepts the call and
+returns success, but never talks to the other side. Where that happens, **invariant 1
+fails silently**: two machines both believe they hold the lock for a cassette, both write,
+and there is no error, no warning, and nothing in either machine's output to say so. This
+is the same failure mode as the cloud-sync case above, reached a different way — through
+configuration rather than through a sync client — and it is why the store is documented as
+single-machine: putting `data_dir` on a network mount is unsupported for the same reason
+a syncing folder is.
+
+This is undetected today. There is no reliable, cheap way to tell from userspace whether a
+given mount's `flock` is actually cross-client-safe — the mount type alone does not say
+so, since it depends on server and client configuration — so detection is deferred rather
+than attempted half-way. Nobody reading this section should assume the degraded case is
+caught; it is not.
 
 ## Testing
 
