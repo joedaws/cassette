@@ -47,10 +47,17 @@ Copied from the spec. Every task's requirements implicitly include this section.
 
 ### Facts verified against the current tree (2026-09-14)
 
-- `fs4` resolves to **1.1.0**. Its trait is `fs4::fs_std::FileExt` with methods
-  **`try_lock()`** (non-blocking exclusive), **`lock()`** (blocking exclusive) and
-  `unlock()`. These are NOT the `try_lock_exclusive` / `lock_exclusive` names used by
-  older fs2-derived releases — do not use those.
+- `fs4` resolves to **1.1.0**. Its trait is **`fs4::FileExt`, at the crate root** — there
+  is no `fs_std` module (the paths were flattened in fs4 1.0.0; `fs_std` appears only in
+  older releases). Methods are **`try_lock()`** (non-blocking exclusive), **`lock()`**
+  (blocking exclusive) and `unlock()` — NOT the `try_lock_exclusive` / `lock_exclusive`
+  of fs2-derived versions.
+- **Call the trait methods through UFCS: `FileExt::try_lock(&file)`, not
+  `file.try_lock()`.** This toolchain is rustc 1.97, whose `std::fs::File` has *inherent*
+  `lock`/`try_lock` methods, and inherent methods win over trait methods in method-call
+  syntax. Written as `file.try_lock()` the call silently resolves to std's method and
+  yields `std::fs::TryLockError`, not `fs4::TryLockError` — so a `match` on fs4's variants
+  fails to compile. Verified against rustc 1.97.0 with a standalone probe.
 - `fs4::TryLockError` is `{ Error(io::Error), WouldBlock }`.
 - The lock is released when the `File` is dropped, so a guard holding a `File` needs no
   explicit `Drop` impl for correctness.
