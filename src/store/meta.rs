@@ -51,7 +51,11 @@ pub struct CassetteMeta {
 /// Frontmatter is line-oriented: a value containing a line break would end the
 /// block early, truncating later fields and letting a topic inject ones it has
 /// no business setting. Collapse every line break into a space.
-fn one_line(value: &str) -> String {
+///
+/// `pub(crate)` because `lock::Attribution::render` reuses it: the anchor
+/// file is line-oriented in exactly the same way, and `name` is free text
+/// from `$USER`.
+pub(crate) fn one_line(value: &str) -> String {
     value.replace("\r\n", " ").replace(['\n', '\r'], " ")
 }
 

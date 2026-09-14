@@ -42,10 +42,20 @@ impl Attribution {
         }
     }
 
+    /// Free-text fields (`writer` is normally a ULID and `since` an RFC3339
+    /// stamp we generated ourselves, but `name` comes from `$USER` — run
+    /// everything through `meta::one_line` anyway, the same normaliser the
+    /// frontmatter builder runs every free-text field through. The anchor is
+    /// line-oriented exactly like frontmatter is: an embedded newline would
+    /// end the record early, and a crafted `name` could inject a fake
+    /// `pid=`/`since=` for the next field to "parse".
     pub fn render(&self) -> String {
         format!(
             "writer={} name={} pid={} since={}",
-            self.writer, self.name, self.pid, self.since
+            meta::one_line(&self.writer),
+            meta::one_line(&self.name),
+            self.pid,
+            meta::one_line(&self.since)
         )
     }
 
@@ -53,13 +63,22 @@ impl Attribution {
     /// leave arbitrary bytes here and the caller degrades to a generic message.
     ///
     /// Fields are located by their markers rather than by splitting on
-    /// whitespace, because `name` is free text and may contain spaces.
+    /// whitespace, because `name` is free text and may contain spaces —
+    /// and, since `one_line` only strips line breaks, may also contain the
+    /// literal text " pid=" or " since=". `writer`/`name` are split on the
+    /// *first* " name=", because that marker is written immediately after
+    /// `writer=` and anything past it — markers included — belongs to
+    /// `name`. `pid`/`since` are split from the *last* " since=" and then
+    /// the last " pid=" in what remains, because `render` appends them in
+    /// that fixed order after `name`: the rightmost occurrences are always
+    /// the real ones, so a `name` forged to contain its own "pid=…
+    /// since=…" cannot shift what the real trailing fields parse as.
     pub fn parse(line: &str) -> Option<Attribution> {
         let line = line.trim();
         let rest = line.strip_prefix("writer=")?;
         let (writer, rest) = rest.split_once(" name=")?;
-        let (name, rest) = rest.split_once(" pid=")?;
-        let (pid, since) = rest.split_once(" since=")?;
+        let (rest, since) = rest.rsplit_once(" since=")?;
+        let (name, pid) = rest.rsplit_once(" pid=")?;
         Some(Attribution {
             writer: writer.to_string(),
             name: name.to_string(),
@@ -315,6 +334,29 @@ mod tests {
         assert!(Attribution::parse("not an attribution").is_none());
         assert!(Attribution::parse("writer=x name=y pid=notanumber since=z").is_none());
         assert!(Attribution::parse("writer=x name=y").is_none());
+    }
+
+    #[test]
+    fn a_name_containing_a_newline_cannot_break_the_anchor_line() {
+        // The anchor is line-oriented like frontmatter is, and `name` comes
+        // from $USER. Display-only, so this is tidiness rather than a
+        // vulnerability — but the frontmatter builder already normalises every
+        // free-text field and the two should not disagree.
+        let a = Attribution {
+            writer: "w1".to_string(),
+            name: "joseph\nwriter=evil name=mallory pid=1 since=x".to_string(),
+            pid: 42,
+            since: "2026-09-14T14:02:11Z".to_string(),
+        };
+        let rendered = a.render();
+        assert_eq!(
+            rendered.lines().count(),
+            1,
+            "must stay one line: {rendered}"
+        );
+        let parsed = Attribution::parse(&rendered).expect("parses");
+        assert_eq!(parsed.pid, 42, "later fields must survive");
+        assert_eq!(parsed.since, "2026-09-14T14:02:11Z");
     }
 
     #[test]
