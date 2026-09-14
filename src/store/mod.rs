@@ -12,6 +12,8 @@
 //! ~/.local/share/cassette/
 //!   writers.toml
 //!   active                       # single line: active session id
+//!   .locks/
+//!     writers                    # flock anchor for the writer registry
 //!   sessions/
 //!     <session ulid>/
 //!       session.toml
@@ -230,9 +232,44 @@ impl Store {
         writers::write(&self.root, w)
     }
 
+    /// Anchors for store-wide locks, as opposed to a session's per-cassette
+    /// ones. Currently just the writer registry.
+    pub fn root_locks_dir(&self) -> PathBuf {
+        self.root.join(LOCKS_DIR)
+    }
+
+    /// Acquire the writer registry's lock. **Blocks**, unlike every cassette
+    /// lock — see the spec's "never block on a lock a human can hold". No
+    /// human can hold this one: its critical section is a single
+    /// read-modify-write over a small file, so nobody can wedge it, and a
+    /// caller that cannot register a writer has no fallback to fall back to.
+    ///
+    /// Deliberately private. `ensure_writer` is the only caller, so blocking
+    /// acquisition cannot leak into a code path where a human could hold it.
+    fn lock_registry(&self) -> io::Result<lock::LockGuard> {
+        ensure_private_dir(&self.root)?;
+        let anchor = self.root_locks_dir().join("writers");
+        let path = self.root.join(writers::WRITERS_FILE);
+        lock::acquire(
+            "writers",
+            path,
+            &anchor,
+            &lock::Attribution::for_now("registry", "registry"),
+            lock::Blocking::Yes,
+        )
+        .map_err(io::Error::from)
+    }
+
     /// The id for `name`, registering it on first sight. Idempotent: the same
     /// name never mints a second id.
+    ///
+    /// Holds the registry lock across the read-modify-write. Without it two
+    /// writers registering at once both read a registry lacking the other,
+    /// both insert, and the second write clobbers the first — which is exactly
+    /// the first-run case, where the TUI registers from `$USER` while an agent
+    /// registers itself.
     pub fn ensure_writer(&self, name: &str, kind: writers::Kind) -> io::Result<String> {
+        let _registry = self.lock_registry()?;
         writers::ensure(&self.root, name, kind)
     }
 
@@ -724,6 +761,38 @@ mod tests {
             0o700,
             "a private journal is not world-readable"
         );
+    }
+
+    #[test]
+    fn the_registry_anchor_lives_at_the_root() {
+        let (dir, s) = store();
+        s.ensure_writer("joseph", writers::Kind::Human)
+            .expect("ensure");
+        assert!(
+            dir.path().join(".locks").join("writers").is_file(),
+            "the registry anchor belongs at the store root, not under a session"
+        );
+    }
+
+    #[test]
+    fn concurrent_registration_keeps_both_writers() {
+        // Guards the lost update: ensure_writer reads the whole registry,
+        // inserts, and writes it back. Without a lock the second write clobbers
+        // the first and a writer id vanishes, orphaning every cassette
+        // attributed to it.
+        let (_dir, s) = store();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                s.ensure_writer("joseph", writers::Kind::Human).expect("a");
+            });
+            scope.spawn(|| {
+                s.ensure_writer("agent", writers::Kind::Agent).expect("b");
+            });
+        });
+        let all = s.writers().expect("read");
+        assert_eq!(all.writers.len(), 2, "both registrations must survive");
+        assert!(all.find_by_name("joseph").is_some());
+        assert!(all.find_by_name("agent").is_some());
     }
 
     #[cfg(unix)]

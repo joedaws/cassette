@@ -135,6 +135,14 @@ impl LockGuard {
     }
 
     /// The cassette's current state, read under the lock.
+    ///
+    /// Assumes `path` holds a cassette file (frontmatter + body). The guard
+    /// returned by the registry lock (`Store::lock_registry`) points at
+    /// `writers.toml` instead — calling `read`/`write` on that guard would
+    /// try to parse or overwrite the registry as a cassette. That guard is
+    /// never exposed past `ensure_writer`, which only holds it and never
+    /// calls either method, so this cannot happen today; it stays a trap for
+    /// a future caller to avoid, not a bug to fix.
     pub fn read(&self) -> io::Result<StoredCassette> {
         let content = std::fs::read_to_string(&self.path)?;
         let (meta, body) = crate::store::meta::split(&content);
@@ -154,6 +162,10 @@ impl LockGuard {
     /// Replace the cassette. The file keeps the name it was minted with: a
     /// rename would move the inode out from under another writer's resolved
     /// path, which is the same hazard that put the lock on a sidecar.
+    ///
+    /// See the note on `read`: calling this on the registry lock's guard
+    /// would clobber `writers.toml` with cassette-shaped frontmatter. Not
+    /// reachable today — `ensure_writer` never calls it.
     pub fn write(&self, m: &CassetteMeta, body: &str) -> io::Result<()> {
         crate::store::atomic_write(
             &self.path,
