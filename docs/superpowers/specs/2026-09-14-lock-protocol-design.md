@@ -36,14 +36,21 @@ pub struct LockGuard<'s> {
 }
 
 impl Store {
-    /// Acquire the cassette's lock. Never blocks: `Err(LockError::Busy)` when
-    /// another writer holds it.
+    /// Acquire a cassette's lock. Never blocks — a human may hold this one
+    /// indefinitely, so `Err(LockError::Busy)` and pick another cassette.
     pub fn lock(&self, session: &str, id: &str) -> Result<LockGuard<'_>, LockError>;
 
     /// Acquire several at once, in acquisition order (see below). All or
     /// nothing: on contention, every guard already taken is dropped.
     pub fn lock_many(&self, session: &str, ids: &[&str])
         -> Result<Vec<LockGuard<'_>>, LockError>;
+
+    /// Acquire the writer registry's lock. BLOCKS — no human can hold this
+    /// one, its critical section is a single read-modify-write, and a caller
+    /// that cannot register has no fallback. Private: `ensure_writer` is the
+    /// only caller, so the blocking behaviour cannot leak into a code path
+    /// where a human could wedge it.
+    fn lock_registry(&self) -> io::Result<LockGuard<'_>>;
 }
 
 impl LockGuard<'_> {
@@ -56,10 +63,33 @@ impl LockGuard<'_> {
 }
 ```
 
-Acquisition is `LOCK_EX | LOCK_NB` — always non-blocking. There is no `--wait` and no
-retry anywhere in Phase 3. The queue's premise is that an agent finding a cassette busy
-writes a *different* one; waiting would also let one wedged process stall every agent. If
-agents later prove to need waiting, that is an additive flag, not a redesign.
+### Never block on a lock a human can hold
+
+Cassette locks are acquired `LOCK_EX | LOCK_NB` — non-blocking. A cassette lock is held
+for as long as a person keeps that cassette focused, which may be minutes or hours, and
+the holder may have walked away entirely. Blocking on one would let a single idle editor
+stall every agent. The queue's premise is that an agent finding a cassette busy writes a
+*different* one, so there is always somewhere else to go.
+
+The registry lock (Gap 1) is the opposite kind of critical section and is acquired
+**blocking** (`LOCK_EX`, no `LOCK_NB`):
+
+| | Cassette lock | Registry lock |
+|---|---|---|
+| Held for | As long as a cassette stays focused — minutes to hours | One read, insert and write — microseconds |
+| Held by | A person who may have walked away | A process actively finishing |
+| On contention | Write a different cassette | Nothing else to do; must wait |
+| Acquisition | `LOCK_EX \| LOCK_NB` | `LOCK_EX`, blocking |
+
+The rule is therefore not "never block" but **never block on a lock a human can hold**.
+No interactive editing happens inside the registry's critical section, so nobody can wedge
+it; a non-blocking registry lock would instead mean the TUI fails to start because an
+agent happened to be registering itself at that instant — worse than the lost update it
+was meant to prevent.
+
+There is no `--wait` flag and no retry loop in Phase 3: the one place waiting is correct
+is unconditional, and the one place it is wrong is never offered. If agents later prove to
+need waiting on a cassette, that is an additive flag, not a redesign.
 
 Release is `Drop`, plus the kernel on process death for any reason including `SIGKILL`.
 Nothing to reap — that is the whole reason the anchor's existence carries no meaning.
@@ -128,6 +158,13 @@ agent already running is exactly the collision.
 read-modify-write inside `ensure_writer`. Same guard type, different anchor. The registry
 is a single shared file rather than a per-cassette one, so its anchor lives at the root
 rather than under a session.
+
+**This lock blocks**, unlike every cassette lock — see "Never block on a lock a human can
+hold" above. A caller that cannot register a writer has no fallback, and the colliding
+case is first launch, where the TUI auto-registers from `$USER` while an agent registers
+itself. Failing there would mean the TUI refuses to start over a few microseconds of
+contention. Blocking is safe because no interactive editing happens inside the critical
+section, so nobody can wedge it.
 
 This **adds a directory to the storage layout** the parent spec does not have — that spec
 places `.locks/` only inside a session directory. The root gains one:
@@ -220,6 +257,7 @@ the same as having none.
 | Crash releases the lock | Spawn a holder, `SIGKILL` it, assert the next acquisition succeeds immediately. This is the property the no-reaper decision rests on, and it should fail loudly if a future refactor swaps in a lockfile-existence scheme. |
 | Two threads genuinely contend | In-process. Meaningful because `flock` is per open file description; under `fcntl` locks these would silently share the lock and pass. Small evidence the primitive is right. |
 | The registry survives concurrent registration | Two processes `ensure_writer` different names at once; both survive. Guards Gap 1. |
+| The registry lock waits rather than failing | Hold `.locks/writers` in the test process, spawn a registration, assert it has not completed; release, assert it then completes with exit 0 — never exit 3. Pins "blocking, not `Busy`" for the one lock that must not fail on contention. |
 | Acquisition order prevents livelock | Two `lock_many` calls over overlapping id sets, requested in opposite orders; one succeeds and one reports `Busy` rather than both failing. Guards Gap 2. |
 
 `flock` itself is not tested — that is the kernel's job.
