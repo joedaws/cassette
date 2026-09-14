@@ -23,12 +23,12 @@ pub struct SessionMeta {
     pub word_goal: Option<usize>,
 }
 
-pub fn read(path: &Path) -> io::Result<SessionMeta> {
+pub(crate) fn read(path: &Path) -> io::Result<SessionMeta> {
     let text = std::fs::read_to_string(path)?;
     toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-pub fn write(path: &Path, m: &SessionMeta) -> io::Result<()> {
+pub(crate) fn write(path: &Path, m: &SessionMeta) -> io::Result<()> {
     let text = toml::to_string(m).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     crate::store::atomic_write(path, &text)
 }
@@ -37,14 +37,24 @@ fn active_path(root: &Path) -> PathBuf {
     root.join(ACTIVE_FILE)
 }
 
-/// The active session id, or `None` when the pointer is missing or blank.
-pub fn read_active(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(active_path(root)).ok()?;
+/// The active session id. `Ok(None)` when the pointer is absent or blank;
+/// every other read failure propagates.
+///
+/// This returns `io::Result` rather than a bare `Option` because collapsing
+/// "no active session" and "could not read the pointer" into one value is the
+/// same mistake that made `writers::read` a data-loss path — here it would
+/// silently start a new session while an existing one sat unreadable.
+pub(crate) fn read_active(root: &Path) -> io::Result<Option<String>> {
+    let text = match std::fs::read_to_string(active_path(root)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
     let id = text.trim();
-    (!id.is_empty()).then(|| id.to_string())
+    Ok((!id.is_empty()).then(|| id.to_string()))
 }
 
-pub fn write_active(root: &Path, id: &str) -> io::Result<()> {
+pub(crate) fn write_active(root: &Path, id: &str) -> io::Result<()> {
     crate::store::ensure_private_dir(root)?;
     crate::store::atomic_write(&active_path(root), &format!("{id}\n"))
 }
@@ -97,21 +107,28 @@ mod tests {
     #[test]
     fn active_pointer_round_trips_and_ignores_whitespace() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(read_active(dir.path()), None, "no pointer yet");
+        assert_eq!(
+            read_active(dir.path()).expect("read"),
+            None,
+            "no pointer yet"
+        );
         write_active(dir.path(), "01K5GQ2R8V3XQZ0000000000AB").expect("write");
         assert_eq!(
-            read_active(dir.path()).as_deref(),
+            read_active(dir.path()).expect("read").as_deref(),
             Some("01K5GQ2R8V3XQZ0000000000AB")
         );
         // A hand-edited file with a trailing newline or spaces still resolves.
         std::fs::write(dir.path().join("active"), "  01K5ZZ  \n\n").expect("write");
-        assert_eq!(read_active(dir.path()).as_deref(), Some("01K5ZZ"));
+        assert_eq!(
+            read_active(dir.path()).expect("read").as_deref(),
+            Some("01K5ZZ")
+        );
     }
 
     #[test]
     fn an_empty_active_file_is_no_active_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("active"), "\n").expect("write");
-        assert_eq!(read_active(dir.path()), None);
+        assert_eq!(read_active(dir.path()).expect("read"), None);
     }
 }

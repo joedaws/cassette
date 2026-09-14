@@ -561,6 +561,26 @@ phases, each independently testable and each leaving the tool working.
 Phase 1 is mechanical, 3 and 5 carry the real risk. Phases 2–3 are worth reviewing before
 4–6 build on them, since the lock protocol is the part that is expensive to change later.
 
+### Phase 3 scope decisions (2026-09-14)
+
+- **Windows is out of CI for now.** The spec originally added it in Phase 3, on the
+  principle that the phase introducing the platform-divergent primitive should prove it.
+  That is deferred: `fs4` is still the cross-platform choice and nothing here is
+  Unix-only by design, but correctness on Windows will be verified by hand on a real
+  machine rather than gated in CI. Revisit before any Windows release.
+- **Concurrency tests target two writers, not N.** The deterministic, non-sleep-based
+  approach stands — the test process holds the lock and spawns the real binary, and
+  stdin is the synchronization primitive for the reverse direction — as does the
+  `SIGKILL` crash-release test. What is not needed is N-way contention: two nearby
+  writers is the real workload (one human, one agent) and is enough to prove the
+  protocol.
+- **Concurrency is exercised through the CLI, not the TUI.** Locking is tested by
+  spawning `cassette` subcommands against a shared store, which is cheap and
+  deterministic. The TUI still participates in the protocol at runtime — it holds its
+  focused cassette's lock and flushes on blur — but driving a pty to prove that is
+  expensive and buys little over the CLI tests that cover the same code paths. No
+  TUI-level concurrency test suite.
+
 ### Known items carried out of Phase 2
 
 Phase 2 shipped with these deliberately deferred. They are real, found by review, and
@@ -568,13 +588,13 @@ assigned — not open questions.
 
 **Phase 3 must address:**
 
-- **The store root is not owned by `Store`.** `writers::{read, write, ensure}` and
-  `session::{read_active, write_active}` take a bare `&Path` root and bypass `Store`
-  entirely. Phase 2 patched the resulting confidentiality hole by making
-  `store::ensure_private_dir` crate-visible and calling it from each entry point, but the
-  seam remains: a lock helper naturally wants `Store::locks_dir(session)`, and free
-  functions taking a root cannot reach it. Move them onto `Store` methods now, while
-  Phase 4 has not yet written a CLI against the free-function form.
+- ~~**The store root is not owned by `Store`.**~~ **Done, 2026-09-14, before Phase 3.**
+  `writers::{read, write, ensure}` and `session::{read, write, read_active, write_active}`
+  are now `pub(crate)`, reached through `Store::{writers, write_writers, ensure_writer,
+  active_session, set_active_session, session_meta}`. Nothing outside `src/store/` names a
+  submodule, so `Store` is the only way in and the only thing that creates the root.
+  `read_active` also changed from `Option<String>` to `io::Result<Option<String>>` while
+  it had zero callers, which closes the Phase 4 item below.
 - **`atomic_write` calls `create_dir_all` on every write.** Convenient, but it means any
   write silently materializes whatever directory tree the path implies — which is exactly
   how the store root came to be created at umask default from the writer-registration
@@ -590,11 +610,9 @@ assigned — not open questions.
   since `parse_frontmatter` accepts any `i64`-parseable string. Not fixable in Phase 2:
   `last` returns a bare `i64` with no way to signal "no room". Phase 4 introduces the CLI
   that sets priorities, so it either clamps on the way in or changes the signatures.
-- **`session::read_active` swallows every I/O error into `None`.** The same pattern was a
-  data-loss bug in `writers::read` and was fixed there; `scan_session`'s instance was fixed
-  too. This one survives because `Option<String>` cannot carry an error and no caller
-  existed yet to decide the policy. An unreadable pointer currently starts a new session
-  rather than resuming an existing one — wrong, but not destructive.
+- ~~**`session::read_active` swallows every I/O error into `None`.**~~ **Done, 2026-09-14.**
+  Fixed while moving it onto `Store`, which was the cheapest possible moment: the signature
+  is now `io::Result<Option<String>>` and only `NotFound` means "no active session".
 - **`between()` has no documented `lo < hi` precondition.** Reversed arguments silently
   return `None`, which reads as "renumber this run" rather than surfacing the caller's bug.
 

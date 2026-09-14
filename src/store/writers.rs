@@ -1,5 +1,10 @@
 //! `writers.toml` — who is allowed to appear in `created_by` / `last_writer`.
 //!
+//! The read/write entry points are `pub(crate)` and reached through `Store`
+//! rather than called directly: `Store` owns the data-dir root, so routing
+//! every write through it is what keeps the root's `0700` creation in one
+//! place. See `Store::writers`, `Store::write_writers`, `Store::ensure_writer`.
+//!
 //! Attribution is cooperative: this registry names writers, it does not
 //! authenticate them. OS-level enforcement is explicitly deferred in the spec.
 
@@ -53,7 +58,7 @@ impl Writers {
 /// those as "empty" is a data-loss path — the next `ensure` would write a
 /// fresh single-entry registry over a file that was merely unreadable,
 /// destroying every existing writer id.
-pub fn read(root: &Path) -> io::Result<Writers> {
+pub(crate) fn read(root: &Path) -> io::Result<Writers> {
     let path = root.join(WRITERS_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -63,7 +68,7 @@ pub fn read(root: &Path) -> io::Result<Writers> {
     toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-pub fn write(root: &Path, w: &Writers) -> io::Result<()> {
+pub(crate) fn write(root: &Path, w: &Writers) -> io::Result<()> {
     crate::store::ensure_private_dir(root)?;
     let text = toml::to_string(w).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     crate::store::atomic_write(&root.join(WRITERS_FILE), &text)
@@ -71,7 +76,7 @@ pub fn write(root: &Path, w: &Writers) -> io::Result<()> {
 
 /// The id for `name`, registering it on first sight. Idempotent: calling it
 /// twice with the same name returns the same id rather than minting a second.
-pub fn ensure(root: &Path, name: &str, kind: Kind) -> io::Result<String> {
+pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> io::Result<String> {
     let mut all = read(root)?;
     if let Some(id) = all.find_by_name(name) {
         return Ok(id.to_string());

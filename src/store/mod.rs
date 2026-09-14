@@ -24,6 +24,14 @@
 //! Pure data and math live in `ids`, `meta` and `priority`; the thin I/O layer
 //! is `session`, `writers`, and `Store` here. No locking yet — Phase 3 wraps
 //! the write calls.
+//!
+//! **`Store` owns the data-dir root.** The `session` and `writers` modules hold
+//! the file formats, but their entry points are `pub(crate)` and everything
+//! outside this module goes through a `Store` method. That is deliberate: when
+//! `writers` and the active pointer took a bare root path of their own, they
+//! created the store root through `atomic_write` at the process umask, leaving
+//! a freewriting journal world-readable until some later call happened to
+//! tighten it. One owner, one place that creates the root.
 
 pub mod ids;
 pub mod meta;
@@ -180,6 +188,38 @@ impl Store {
         atomic_write(path, &format!("{}\n{}", meta::build_frontmatter(m), body))
     }
 
+    /// The session's own metadata (`session.toml`).
+    pub fn session_meta(&self, session: &str) -> io::Result<SessionMeta> {
+        session::read(&self.session_dir(session).join("session.toml"))
+    }
+
+    /// The writer registry. A store with no `writers.toml` yet has an empty
+    /// one; any other read failure propagates.
+    pub fn writers(&self) -> io::Result<writers::Writers> {
+        writers::read(&self.root)
+    }
+
+    /// Replace the writer registry wholesale.
+    pub fn write_writers(&self, w: &writers::Writers) -> io::Result<()> {
+        writers::write(&self.root, w)
+    }
+
+    /// The id for `name`, registering it on first sight. Idempotent: the same
+    /// name never mints a second id.
+    pub fn ensure_writer(&self, name: &str, kind: writers::Kind) -> io::Result<String> {
+        writers::ensure(&self.root, name, kind)
+    }
+
+    /// The active session id, or `None` when no session is active.
+    pub fn active_session(&self) -> io::Result<Option<String>> {
+        session::read_active(&self.root)
+    }
+
+    /// Point `active` at `session`.
+    pub fn set_active_session(&self, session: &str) -> io::Result<()> {
+        session::write_active(&self.root, session)
+    }
+
     /// Every cassette in a session, in queue order. A missing session, files
     /// that are not `.md`, and `.md` files without parseable frontmatter are
     /// all skipped rather than erroring — the store shares a directory with
@@ -302,7 +342,7 @@ mod tests {
             ..session_meta()
         };
         let id = s.create_session(&m).expect("create");
-        let read_back = session::read(&s.session_dir(&id).join("session.toml")).expect("read");
+        let read_back = s.session_meta(&id).expect("read");
         assert_eq!(read_back.alias.as_deref(), Some("morning"));
     }
 
@@ -458,6 +498,51 @@ mod tests {
         assert_ne!(mode & 0o777, 0o700, "the parent must not be forced to 0700");
     }
 
+    #[test]
+    fn the_writer_registry_round_trips_through_the_store() {
+        let (_dir, s) = store();
+        assert!(
+            s.writers().expect("read").writers.is_empty(),
+            "empty to start"
+        );
+        let id = s
+            .ensure_writer("joseph", writers::Kind::Human)
+            .expect("ensure");
+        let again = s
+            .ensure_writer("joseph", writers::Kind::Human)
+            .expect("ensure");
+        assert_eq!(id, again, "the same name must not mint a second id");
+        let all = s.writers().expect("read");
+        assert_eq!(all.writers.len(), 1);
+        assert_eq!(all.writers[&id].name, "joseph");
+    }
+
+    #[test]
+    fn the_active_session_round_trips_through_the_store() {
+        let (_dir, s) = store();
+        assert_eq!(s.active_session().expect("read"), None, "none to start");
+        let id = s.create_session(&session_meta()).expect("create");
+        s.set_active_session(&id).expect("set");
+        assert_eq!(
+            s.active_session().expect("read").as_deref(),
+            Some(id.as_str())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_active_pointer_errors_rather_than_reading_as_absent() {
+        // Moving the pointer onto Store was the moment to stop collapsing
+        // "no active session" into "could not read it" — the same conflation
+        // that made writers::read a data-loss path.
+        let (dir, s) = store();
+        s.create_session(&session_meta()).expect("create");
+        std::fs::create_dir(dir.path().join(session::ACTIVE_FILE)).expect("mkdir");
+        assert!(
+            s.active_session().is_err(),
+            "an unreadable pointer must not read as 'no active session'"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn registering_a_writer_creates_a_private_root() {
@@ -466,7 +551,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("store");
-        writers::ensure(&root, "joseph", writers::Kind::Human).expect("ensure");
+        Store::new(root.clone())
+            .ensure_writer("joseph", writers::Kind::Human)
+            .expect("ensure");
         let mode = std::fs::metadata(&root).unwrap().permissions().mode();
         assert_eq!(
             mode & 0o777,
@@ -481,7 +568,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("store");
-        session::write_active(&root, "01K5GQ2R8V3XQZ0000000000AB").expect("write");
+        Store::new(root.clone())
+            .set_active_session("01K5GQ2R8V3XQZ0000000000AB")
+            .expect("write");
         let mode = std::fs::metadata(&root).unwrap().permissions().mode();
         assert_eq!(
             mode & 0o777,
