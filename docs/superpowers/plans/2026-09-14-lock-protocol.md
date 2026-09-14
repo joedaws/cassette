@@ -1459,6 +1459,66 @@ fn killing_the_holder_releases_the_lock() {
 }
 
 #[test]
+fn the_registry_lock_waits_rather_than_failing() {
+    // The registry is the ONE lock in this system that blocks, and this is the
+    // only cross-process check of that. A caller who cannot register a writer
+    // has no fallback, so contention must make it wait — never return Busy.
+    //
+    // Honest about what this proves: the load-bearing assertion is the exit
+    // code. We hold the registry anchor before the child is spawned, so the
+    // child necessarily contends; a non-blocking implementation would surface
+    // that contention as a non-zero exit, and a blocking one completes with 0.
+    // The `try_wait` check below is corroboration, not proof — a child that has
+    // merely not been scheduled yet also reports "still running". Proving
+    // "it blocked" rather than "it did not fail" would need the child to signal
+    // the instant before it acquires, which it has no way to do. The blocking
+    // property is therefore established by construction (`Blocking::Yes` maps
+    // to `FileExt::lock`, verified in Task 5's review) and corroborated here.
+    let (_d, root) = fixture();
+    std::fs::create_dir_all(root.join(".locks")).expect("mkdir");
+    let anchor = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(root.join(".locks").join("writers"))
+        .expect("open the registry anchor");
+    // std's inherent `File::lock` is `flock(2)` on Unix and interoperates with
+    // the binary's fs4 lock — verified directly against this binary.
+    anchor.lock().expect("hold the registry");
+
+    let mut child = Command::new(bin())
+        .args(["queue", "write", ID])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "someone-new")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"body\n")
+        .expect("write");
+
+    // Corroboration only — see the note above.
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "registration should still be waiting on the registry lock"
+    );
+
+    drop(anchor);
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "registration must complete once the registry frees, never fail on \
+         contention (exit 3 would mean the registry lock became non-blocking): {out:?}"
+    );
+}
+
+#[test]
 fn registering_writers_concurrently_keeps_both() {
     // The registry lock blocks rather than failing: two processes registering
     // at once must both succeed, because a caller that cannot register has no
@@ -1501,7 +1561,7 @@ fn registering_writers_concurrently_keeps_both() {
 - [ ] **Step 2: Run them**
 
 Run: `cargo test --test lock`
-Expected: PASS, 4 tests.
+Expected: PASS, 5 tests.
 
 Then the whole suite plus clippy and fmt.
 
