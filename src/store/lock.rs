@@ -409,9 +409,9 @@ mod tests {
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
         s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
-        // Tolerant of both sides of Task 3: today `add_cassette` does not
-        // create an anchor, and after Task 3 it does. Either way this test
-        // must exercise the on-demand path in `lock`.
+        // `add_cassette` creates the anchor at birth (see mod.rs), so remove
+        // it to force this test down the on-demand path in `lock` — the
+        // fallback that keeps a hand-written or pre-Phase-3 cassette lockable.
         let _ = std::fs::remove_file(s.locks_dir(&sid).join(ID));
         let who = Attribution::for_now("writer-1", "joseph");
         s.lock(&sid, ID, &who)
