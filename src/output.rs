@@ -322,7 +322,11 @@ mod tests {
             }
         });
 
-        let saved = format!("{}\n{}", build_frontmatter(&app, false, None), build_body(&app));
+        let saved = format!(
+            "{}\n{}",
+            build_frontmatter(&app, false, None),
+            build_body(&app)
+        );
         let parsed = parse_markdown(&saved);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].topic.as_deref(), Some("morning pages"));
@@ -353,9 +357,17 @@ mod tests {
     #[test]
     fn draft_flag_written_and_cleared() {
         let app = app_with_text("words");
-        let draft = format!("{}\n{}", build_frontmatter(&app, true, None), build_body(&app));
+        let draft = format!(
+            "{}\n{}",
+            build_frontmatter(&app, true, None),
+            build_body(&app)
+        );
         assert!(is_draft(&draft));
-        let final_save = format!("{}\n{}", build_frontmatter(&app, false, None), build_body(&app));
+        let final_save = format!(
+            "{}\n{}",
+            build_frontmatter(&app, false, None),
+            build_body(&app)
+        );
         assert!(!is_draft(&final_save));
         assert!(
             !is_draft("no frontmatter\ndraft: true\n"),

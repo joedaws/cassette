@@ -427,7 +427,10 @@ mod tests {
         });
         assert_eq!(app.tape_ratio(), Some(1.0), "ten new words meet the goal");
         app.check_goal();
-        assert!(app.status_msg.is_some(), "goal fires on this session's words");
+        assert!(
+            app.status_msg.is_some(),
+            "goal fires on this session's words"
+        );
     }
 
     #[test]

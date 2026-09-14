@@ -218,9 +218,16 @@ mod tests {
             "# just a heading\n\nreal first line\n",
             dt("2026-07-01T08:00:00"),
         );
-        assert_eq!(e.date, dt("2026-07-01T08:00:00"), "no frontmatter date → fallback");
+        assert_eq!(
+            e.date,
+            dt("2026-07-01T08:00:00"),
+            "no frontmatter date → fallback"
+        );
         assert_eq!(e.words, 0);
-        assert_eq!(e.preview, "real first line", "headings never become previews");
+        assert_eq!(
+            e.preview, "real first line",
+            "headings never become previews"
+        );
     }
 
     #[test]
@@ -251,7 +258,10 @@ mod tests {
         let new_pos = out.find("new.md").unwrap();
         let old_pos = out.find("old.md").unwrap();
         assert!(new_pos < old_pos, "{out}");
-        assert!(out.contains("2026-07-13 09:12    412 words  new.md"), "{out}");
+        assert!(
+            out.contains("2026-07-13 09:12    412 words  new.md"),
+            "{out}"
+        );
         assert!(out.contains("    body of new.md"), "{out}");
         assert!(out.ends_with("resume one: cassette resume <name>"), "{out}");
     }
@@ -282,7 +292,13 @@ mod tests {
     #[test]
     fn render_caps_at_ten_with_more_line() {
         let entries: Vec<NoteEntry> = (1..=12)
-            .map(|i| entry(&format!("n{i:02}.md"), &format!("2026-07-{i:02}T08:00:00"), 1))
+            .map(|i| {
+                entry(
+                    &format!("n{i:02}.md"),
+                    &format!("2026-07-{i:02}T08:00:00"),
+                    1,
+                )
+            })
             .collect();
         let out = render(&entries, None);
         assert!(out.contains("n12.md") && out.contains("n03.md"), "{out}");

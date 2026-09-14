@@ -192,8 +192,9 @@ mod tests {
     #[test]
     fn last_seven_marks_hits_and_misses() {
         // Today 2026-07-03 is a Friday and has a note: window Sat Jun 27 → Fri Jul 3.
-        let dates: HashSet<NaiveDate> =
-            ["2026-06-28", "2026-06-30", "2026-07-02", "2026-07-03"].map(d).into();
+        let dates: HashSet<NaiveDate> = ["2026-06-28", "2026-06-30", "2026-07-02", "2026-07-03"]
+            .map(d)
+            .into();
         assert_eq!(
             last_seven(&dates, d("2026-07-03")),
             "last 7:      S S M T W T F\n             ○ ● ○ ● ○ ● ●   4/7"
