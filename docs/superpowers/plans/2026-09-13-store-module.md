@@ -1679,10 +1679,22 @@ pub fn write(root: &Path, w: &Writers) -> io::Result<()> {
 
 - [ ] **Step 6: Verify no direct writes remain in the store**
 
-Run: `grep -rn 'fs::write' src/store/`
-Expected: exactly one hit — the `std::fs::write(&tmp, contents)` inside
-`atomic_write` itself. Any other hit is a bug; route it through
-`atomic_write`.
+Test modules legitimately write fixture files directly, so a plain
+`grep -rn 'fs::write' src/store/` is the wrong check — it returns the fixture
+writes too and will never reach one hit. Check the production side only, by
+reading each file up to its `#[cfg(test)]` marker:
+
+```bash
+for f in src/store/*.rs; do
+  awk '/#\[cfg\(test\)\]/{exit} /fs::write/{print FILENAME":"FNR": "$0}' "$f"
+done
+```
+
+Expected: exactly one line — the `std::fs::write(&tmp, contents)` inside
+`atomic_write` in `src/store/mod.rs`. Any other line is a production write
+bypassing the atomic path; route it through `atomic_write`. Before Step 5 this
+same command prints the two `session.rs` writes and the one in `writers.rs`,
+which is how you know it is looking in the right place.
 
 - [ ] **Step 7: Run the whole suite**
 
@@ -1705,8 +1717,10 @@ After Task 6, confirm the phase's own acceptance criteria:
 - [ ] `cargo test` — 206 tests pass (153 existing + 53 new).
 - [ ] `cargo clippy --all-targets -- -D warnings` — clean.
 - [ ] `cargo fmt --check` — clean.
-- [ ] `grep -rn 'fs::write' src/store/` returns only the line inside
-      `atomic_write`.
+- [ ] The production-write check from Task 6 Step 6 prints exactly one line —
+      the `std::fs::write(&tmp, contents)` inside `atomic_write`. (A plain
+      `grep -rn 'fs::write' src/store/` still shows the test-fixture writes;
+      those are expected and correct.)
 - [ ] `grep -rn 'store::' src/main.rs src/app.rs src/ui.rs` returns only the
       `mod store;` declaration — the phase must not have wired itself into the
       running app.
