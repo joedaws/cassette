@@ -193,23 +193,20 @@ impl Store {
             ensure_private_dir(parent)?;
         }
         let anchor = self.locks_dir(session).join(&m.id);
-        // `created_by` is a writer id, not a display name (see
-        // `CassetteMeta::created_by`/`writers::Writer::name`) — resolve it
-        // through the registry so `LockError::Busy`'s message names the
-        // writer rather than echoing their id back. A `created_by` with no
-        // matching entry (hand-crafted metadata) falls back to the id itself,
-        // the same tolerance the registry already extends elsewhere.
-        let name = self
-            .writers()?
-            .writers
-            .get(&m.created_by)
-            .map(|w| w.name.clone())
-            .unwrap_or_else(|| m.created_by.clone());
+        // `created_by` is a writer id, and it is deliberately used for the
+        // display name too rather than resolved through `writers.toml`.
+        // Nothing reads this stamp except a contender in the microsecond
+        // window between `guard.write`'s rename and the guard dropping, and
+        // resolving it would make creating any cassette depend on the
+        // registry being readable — coupling the creation path to a resource
+        // Task 5 puts a blocking lock on. Where a human actually waits on a
+        // "held by" message is `Store::lock`, whose callers pass a properly
+        // resolved name.
         let guard = lock::acquire(
             &m.id,
             path.clone(),
             &anchor,
-            &lock::Attribution::for_now(&m.created_by, &name),
+            &lock::Attribution::for_now(&m.created_by, &m.created_by),
             lock::Blocking::No,
         )
         .map_err(io::Error::from)?;
@@ -401,7 +398,7 @@ mod tests {
         assert!(s.cassettes_dir(&id).is_dir());
         assert!(
             s.locks_dir(&id).is_dir(),
-            ".locks must exist before Phase 3"
+            ".locks must exist for the lock protocol"
         );
         assert!(s.session_dir(&id).join("session.toml").is_file());
     }
