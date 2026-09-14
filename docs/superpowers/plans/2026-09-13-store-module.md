@@ -1074,6 +1074,21 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_registry_errors_rather_than_reading_as_empty() {
+        // Only NotFound may mean "empty". Any other read failure must
+        // propagate: reporting an empty registry would let the next `ensure`
+        // overwrite a real one, losing every writer id in the store. A
+        // directory where the file should be is the portable way to make
+        // `read_to_string` fail for a reason other than NotFound.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(WRITERS_FILE)).expect("mkdir");
+        assert!(
+            read(dir.path()).is_err(),
+            "an unreadable registry must not read as empty"
+        );
+    }
+
+    #[test]
     fn kind_serializes_lowercase() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut w = Writers::default();
@@ -1186,11 +1201,18 @@ impl Writers {
     }
 }
 
-/// A missing registry is an empty one — the first writer creates it.
+/// A missing registry is an empty one — the first writer creates it. Every
+/// OTHER read failure propagates: `read_to_string` also errors on
+/// permission-denied, on a directory, and on non-UTF-8 content, and treating
+/// those as "empty" is a data-loss path — the next `ensure` would write a
+/// fresh single-entry registry over a file that was merely unreadable,
+/// destroying every existing writer id.
 pub fn read(root: &Path) -> io::Result<Writers> {
     let path = root.join(WRITERS_FILE);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(Writers::default());
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Writers::default()),
+        Err(e) => return Err(e),
     };
     toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
@@ -1227,7 +1249,7 @@ Add `pub mod writers;` to `src/store/mod.rs`.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test store::writers`
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1699,7 +1721,7 @@ which is how you know it is looking in the right place.
 - [ ] **Step 7: Run the whole suite**
 
 Run: `cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: all green. The store adds 53 tests; the existing 153 still pass.
+Expected: all green. The store adds 54 tests; the existing 153 still pass.
 
 - [ ] **Step 8: Commit**
 
@@ -1714,7 +1736,7 @@ git commit -m "feat: store layout, atomic writes, session creation and scanning"
 
 After Task 6, confirm the phase's own acceptance criteria:
 
-- [ ] `cargo test` — 206 tests pass (153 existing + 53 new).
+- [ ] `cargo test` — 207 tests pass (153 existing + 54 new).
 - [ ] `cargo clippy --all-targets -- -D warnings` — clean.
 - [ ] `cargo fmt --check` — clean.
 - [ ] The production-write check from Task 6 Step 6 prints exactly one line —
