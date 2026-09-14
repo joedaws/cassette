@@ -293,16 +293,15 @@ impl Store {
     ///
     /// Locks are always taken in **ascending id order**, regardless of the
     /// order requested. This is a liveness device and nothing more: a total
-    /// order makes deadlock between two overlapping multi-lock operations
-    /// impossible. It is emphatically **not** queue order — that is `priority`
-    /// first, closed last, with the id only as a tiebreak; nothing here is
-    /// ever displayed or used to decide which cassette a writer sees next.
+    /// order makes livelock between two overlapping multi-lock operations
+    /// impossible — with a non-blocking primitive nobody waits, so without
+    /// this both sides would get `Busy`, both retry, and both fail forever.
+    /// It is emphatically **not** queue order — that is `priority` first,
+    /// closed last, with the id only as a tiebreak; nothing here is ever
+    /// displayed or used to decide which cassette a writer sees next.
     ///
     /// On contention every guard already taken is dropped, so a loser never
-    /// wedges locks the winner needs. Duplicate ids in `ids` are collapsed to
-    /// one acquisition each — the caller is asking to hold a set of locks,
-    /// not to hold the same lock twice, and a second acquisition of the same
-    /// id from a fresh `File` would only self-contend and fail.
+    /// wedges locks the winner needs.
     pub fn lock_many(
         &self,
         session: &str,
@@ -311,7 +310,21 @@ impl Store {
     ) -> Result<Vec<lock::LockGuard>, lock::LockError> {
         let mut ordered: Vec<&str> = ids.to_vec();
         ordered.sort_unstable();
+        let before = ordered.len();
         ordered.dedup();
+        if ordered.len() != before {
+            // A repeated id is almost never a real request to hold one lock
+            // twice — it is an indexing bug in whatever computed the run.
+            // Deduping silently would return fewer guards than ids, and a
+            // caller zipping guards against new priorities would then write
+            // to fewer cassettes than it meant to. Fail loudly instead; a
+            // caller that legitimately produces duplicates should collapse
+            // them itself, where the intent is visible.
+            return Err(lock::LockError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lock_many: duplicate cassette id",
+            )));
+        }
         let mut guards = Vec::with_capacity(ordered.len());
         for id in ordered {
             // `?` drops `guards` on the way out, releasing everything taken.

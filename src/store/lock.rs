@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn lock_many_acquires_in_ascending_id_order() {
+    fn lock_many_returns_guards_in_ascending_id_order() {
         // Acquisition order is a liveness device and nothing else: it stops two
         // overlapping multi-lock operations from livelocking. It is NOT queue
         // order, which is priority-first with the id only as a tiebreak.
@@ -512,5 +512,65 @@ mod tests {
         s.lock(&sid, "aaa00000000000000000000000", &other)
             .expect("a must have been released");
         drop(held);
+    }
+
+    #[test]
+    fn lock_many_rejects_a_duplicate_id() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        s.add_cassette(&sid, &cassette_meta("aaa00000000000000000000000"), "")
+            .expect("add");
+        let who = Attribution::for_now("writer-1", "joseph");
+        let r = s.lock_many(
+            &sid,
+            &["aaa00000000000000000000000", "aaa00000000000000000000000"],
+            &who,
+        );
+        match r {
+            Err(LockError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}")
+            }
+            other => panic!("a duplicate id must be rejected, got {other:?}"),
+        }
+        // And it must reject before taking anything, so the id is still free.
+        s.lock(&sid, "aaa00000000000000000000000", &who)
+            .expect("nothing should have been acquired");
+    }
+
+    #[test]
+    fn lock_many_attempts_the_lowest_id_first() {
+        // Stronger than checking the returned order, which a
+        // "acquire in request order, then sort the results" refactor would
+        // also satisfy — while reintroducing the livelock this exists to
+        // prevent. The anchor keeps the last holder's stamp even after
+        // release, so an anchor carrying nobody's stamp but its creator's is
+        // proof that writer never acquired it.
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        for id in ["aaa00000000000000000000000", "bbb00000000000000000000000"] {
+            s.add_cassette(&sid, &cassette_meta(id), "").expect("add");
+        }
+        let holder = Attribution::for_now("writer-1", "joseph");
+        let _held = s
+            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .expect("hold the LOWEST id");
+
+        // Request b first. Ascending order must try a, fail, and never reach b.
+        let other = Attribution::for_now("writer-2", "agent");
+        let r = s.lock_many(
+            &sid,
+            &["bbb00000000000000000000000", "aaa00000000000000000000000"],
+            &other,
+        );
+        assert!(matches!(r, Err(LockError::Busy(_))), "must fail on a");
+
+        let b_anchor =
+            std::fs::read_to_string(s.locks_dir(&sid).join("bbb00000000000000000000000"))
+                .expect("read b's anchor");
+        assert!(
+            !b_anchor.contains("writer-2"),
+            "b must never have been acquired — acquisition did not start at the \
+             lowest id: {b_anchor}"
+        );
     }
 }
