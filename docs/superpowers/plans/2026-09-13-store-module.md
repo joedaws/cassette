@@ -195,6 +195,19 @@ mod tests {
     }
 
     #[test]
+    fn slug_cap_holds_when_a_word_boundary_straddles_it() {
+        // Regression: a separator plus the char after it can step the length
+        // from 31 to 33 in one iteration. An `== SLUG_MAX` check placed after
+        // the push misses that and never fires again, uncapping the rest of
+        // the topic. Any topic whose alnum run reaches 31 just before a
+        // boundary reproduces it.
+        let topic = format!("{} {}", "a".repeat(31), "c".repeat(100));
+        let s = slug(Some(&topic));
+        assert!(s.len() <= SLUG_MAX, "cap bypassed: {} chars — {s}", s.len());
+        assert!(!s.ends_with('-'), "{s}");
+    }
+
+    #[test]
     fn file_name_joins_slug_and_id() {
         assert_eq!(
             file_name(Some("gratitude"), "01K5GR7T2M9WPD0000000000"),
@@ -243,7 +256,7 @@ const SLUG_FALLBACK: &str = "cassette";
 /// creation time. Roughly is enough — the id is only ever a tiebreak, never
 /// an ordering guarantee (see the spec's "Identity and file naming").
 pub fn new_id() -> String {
-    ulid::Ulid::new().to_string()
+    ulid::Ulid::generate().to_string()
 }
 
 /// The filename-safe half of a cassette file name, derived from its topic at
@@ -256,18 +269,23 @@ pub fn slug(topic: Option<&str>) -> String {
     let mut out = String::with_capacity(SLUG_MAX);
     let mut pending_dash = false;
     for ch in topic.unwrap_or_default().chars() {
-        if ch.is_ascii_alphanumeric() {
-            if pending_dash && !out.is_empty() {
-                out.push('-');
-            }
-            pending_dash = false;
-            out.push(ch.to_ascii_lowercase());
-            if out.len() == SLUG_MAX {
-                break;
-            }
-        } else {
+        if !ch.is_ascii_alphanumeric() {
             pending_dash = true;
+            continue;
         }
+        // Check the budget BEFORE pushing, counting the separator this char
+        // would drag in with it. Checking afterwards for an exact `== SLUG_MAX`
+        // lets a dash+char pair step from 31 straight to 33, and since the
+        // length only grows the cap can then never be hit again.
+        let needed = if pending_dash && !out.is_empty() { 2 } else { 1 };
+        if out.len() + needed > SLUG_MAX {
+            break;
+        }
+        if pending_dash && !out.is_empty() {
+            out.push('-');
+        }
+        pending_dash = false;
+        out.push(ch.to_ascii_lowercase());
     }
     if out.is_empty() {
         return SLUG_FALLBACK.to_string();
@@ -297,7 +315,7 @@ Add `pub mod ids;` — already done in Step 2.
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cargo test store::ids`
-Expected: PASS, 8 tests.
+Expected: PASS, 9 tests.
 
 Then confirm nothing else broke:
 
@@ -1669,7 +1687,7 @@ Expected: exactly one hit — the `std::fs::write(&tmp, contents)` inside
 - [ ] **Step 7: Run the whole suite**
 
 Run: `cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
-Expected: all green. The store adds 52 tests; the existing 153 still pass.
+Expected: all green. The store adds 53 tests; the existing 153 still pass.
 
 - [ ] **Step 8: Commit**
 
@@ -1684,7 +1702,7 @@ git commit -m "feat: store layout, atomic writes, session creation and scanning"
 
 After Task 6, confirm the phase's own acceptance criteria:
 
-- [ ] `cargo test` — 205 tests pass (153 existing + 52 new).
+- [ ] `cargo test` — 206 tests pass (153 existing + 53 new).
 - [ ] `cargo clippy --all-targets -- -D warnings` — clean.
 - [ ] `cargo fmt --check` — clean.
 - [ ] `grep -rn 'fs::write' src/store/` returns only the line inside
