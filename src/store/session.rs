@@ -30,7 +30,7 @@ pub fn read(path: &Path) -> io::Result<SessionMeta> {
 
 pub fn write(path: &Path, m: &SessionMeta) -> io::Result<()> {
     let text = toml::to_string(m).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, text)
+    crate::store::atomic_write(path, &text)
 }
 
 fn active_path(root: &Path) -> PathBuf {
@@ -45,7 +45,7 @@ pub fn read_active(root: &Path) -> Option<String> {
 }
 
 pub fn write_active(root: &Path, id: &str) -> io::Result<()> {
-    std::fs::write(active_path(root), format!("{id}\n"))
+    crate::store::atomic_write(&active_path(root), &format!("{id}\n"))
 }
 
 #[cfg(test)]

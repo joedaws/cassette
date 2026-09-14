@@ -65,7 +65,7 @@ pub fn read(root: &Path) -> io::Result<Writers> {
 
 pub fn write(root: &Path, w: &Writers) -> io::Result<()> {
     let text = toml::to_string(w).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(root.join(WRITERS_FILE), text)
+    crate::store::atomic_write(&root.join(WRITERS_FILE), &text)
 }
 
 /// The id for `name`, registering it on first sight. Idempotent: calling it
