@@ -913,13 +913,10 @@ fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
                 .unwrap_or_else(|| "another writer".to_string());
             die_with(3, &format!("'{id}' is open by {who} — try again later"))
         }
-        // `Store::lock` cannot distinguish "no such cassette" from a real I/O
-        // failure in its own error type — both arrive as `LockError::Io`. The
-        // former always carries `NotFound` (the cassette lookup's own
-        // `ok_or_else`, or a session directory that doesn't exist yet), so
-        // that is the signal used here to render it as the usage error (2)
-        // it is, rather than the operational failure (1) a real I/O error is.
-        Err(store::lock::LockError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+        // A distinct variant from `LockError::Io`, so this is a usage error
+        // (2) by construction rather than by matching on `io::ErrorKind` and
+        // hoping `acquire` never surfaces `NotFound` for another reason.
+        Err(store::lock::LockError::NoSuchCassette { .. }) => {
             die_with(2, &format!("no cassette '{id}' in session '{session}'"))
         }
         Err(store::lock::LockError::Io(e)) => die_with(1, &format!("cannot lock '{id}': {e}")),

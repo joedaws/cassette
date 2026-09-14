@@ -316,12 +316,15 @@ impl Store {
         id: &str,
         as_writer: &lock::Attribution,
     ) -> Result<lock::LockGuard, lock::LockError> {
-        let path = self.cassette_path(session, id)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("no cassette '{id}' in session '{session}'"),
-            )
-        })?;
+        let path = match self.cassette_path(session, id)? {
+            Some(path) => path,
+            None => {
+                return Err(lock::LockError::NoSuchCassette {
+                    session: session.to_string(),
+                    id: id.to_string(),
+                })
+            }
+        };
         let anchor_path = self.locks_dir(session).join(id);
         lock::acquire(id, path, &anchor_path, as_writer, lock::Blocking::No)
     }

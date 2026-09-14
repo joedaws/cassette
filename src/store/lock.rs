@@ -76,6 +76,14 @@ pub enum LockError {
     /// attribution — a crash before writing its line, or garbled bytes. It
     /// still blocks us; we just cannot name it.
     Busy(Option<Attribution>),
+    /// No cassette with this id in this session. A distinct variant rather
+    /// than an `Io(NotFound)` so callers can render a usage error without
+    /// matching on `io::ErrorKind` — that heuristic silently depends on
+    /// `acquire` never surfacing `NotFound` itself, which nothing enforces.
+    NoSuchCassette {
+        session: String,
+        id: String,
+    },
     Io(io::Error),
 }
 
@@ -86,6 +94,9 @@ impl std::fmt::Display for LockError {
                 write!(f, "held by {} (since {})", a.name, a.since)
             }
             LockError::Busy(None) => write!(f, "held by another writer"),
+            LockError::NoSuchCassette { session, id } => {
+                write!(f, "no cassette '{id}' in session '{session}'")
+            }
             LockError::Io(e) => write!(f, "{e}"),
         }
     }
@@ -99,9 +110,13 @@ impl From<io::Error> for LockError {
 
 impl From<LockError> for io::Error {
     fn from(e: LockError) -> io::Error {
+        // `e.to_string()` borrows `e` via `Display`, so this is computed
+        // before `e` is moved into the match below.
+        let msg = e.to_string();
         match e {
             LockError::Io(e) => e,
-            busy => io::Error::new(io::ErrorKind::WouldBlock, busy.to_string()),
+            LockError::NoSuchCassette { .. } => io::Error::new(io::ErrorKind::NotFound, msg),
+            LockError::Busy(_) => io::Error::new(io::ErrorKind::WouldBlock, msg),
         }
     }
 }
@@ -454,6 +469,22 @@ mod tests {
             s.lock(&sid, "nosuchcassette0000000000AB", &who).is_err(),
             "locking a cassette that does not exist must fail"
         );
+    }
+
+    #[test]
+    fn locking_an_unknown_cassette_reports_no_such_cassette() {
+        // A distinct variant, not Io(NotFound): callers render this as a usage
+        // error and must not have to match on io::ErrorKind to find out.
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        let who = Attribution::for_now("writer-1", "joseph");
+        match s.lock(&sid, "nosuchcassette0000000000AB", &who) {
+            Err(LockError::NoSuchCassette { session, id }) => {
+                assert_eq!(session, sid);
+                assert_eq!(id, "nosuchcassette0000000000AB");
+            }
+            other => panic!("expected NoSuchCassette, got {other:?}"),
+        }
     }
 
     #[test]
