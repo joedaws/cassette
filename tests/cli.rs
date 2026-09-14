@@ -125,3 +125,17 @@ fn version_after_a_subcommand_exits_two() {
     // clap convention: --version is top-level only, like `git status --version`.
     assert_eq!(run(&["stats", "--version"]).status.code(), Some(2));
 }
+
+#[test]
+fn queue_write_without_an_id_exits_two() {
+    let out = run(&["queue", "write"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_write_appears_in_help() {
+    let out = run(&["--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("queue"), "{text}");
+}

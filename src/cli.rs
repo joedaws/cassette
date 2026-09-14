@@ -19,6 +19,8 @@ pub struct Args {
     /// `resume` with an optional note name: `Some(None)` resumes the most
     /// recently modified note.
     pub resume: Option<Option<String>>,
+    /// `queue write`: the cassette id and the session it lives in.
+    pub queue_write: Option<(String, Option<String>)>,
 }
 
 #[derive(Parser, Debug)]
@@ -91,6 +93,23 @@ enum Command {
     },
     /// list available themes (built-in and from config.toml)
     Themes,
+    /// write a cassette, holding its lock for the duration
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QueueAction {
+    /// replace a cassette's body, read from stdin
+    Write {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session to write in (default: the active session)
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
 }
 
 impl Cli {
@@ -114,6 +133,9 @@ impl Cli {
             Some(Command::Stats) => args.stats = true,
             Some(Command::Find { query }) => args.find = Some(query),
             Some(Command::Themes) => args.list_themes = true,
+            Some(Command::Queue { action }) => match action {
+                QueueAction::Write { id, session } => args.queue_write = Some((id, session)),
+            },
         }
         args
     }

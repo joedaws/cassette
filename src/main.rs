@@ -152,6 +152,10 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    if let Some((id, session)) = &args.queue_write {
+        queue_write(&store::Store::new(store_root()), id, session.as_deref());
+    }
+
     // Resolve the theme and topic template before touching the terminal so
     // an unknown name can die() cleanly.
     let theme = match theme::resolve(args.theme.as_deref().or(cfg.theme.as_deref()), &cfg.themes) {
@@ -874,6 +878,99 @@ fn die(msg: &str) -> ! {
     eprintln!("cassette: {msg}");
     eprintln!("try 'cassette --help'");
     std::process::exit(2);
+}
+
+/// `cassette queue write <ID>`: acquire the cassette's lock, THEN read the body
+/// from stdin, write, and release.
+///
+/// The ordering is deliberate and is what makes the concurrency tests
+/// deterministic: a child spawned with an open stdin pipe is provably holding
+/// the lock, with no sleeps and no polling, and closing the pipe releases it.
+fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
+    let session = match session
+        .map(str::to_string)
+        .map_or_else(|| store.active_session(), |s| Ok(Some(s)))
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => die_with(2, "no active session; pass --session"),
+        Err(e) => die_with(1, &format!("cannot read the active session: {e}")),
+    };
+
+    // Registration happens BEFORE acquisition, even though failing fast on a
+    // bad lock looks more logical: two writers racing for the same cassette
+    // must both land in writers.toml even when one of them loses the lock.
+    let writer = match store.ensure_writer(&whoami(), store::writers::Kind::Human) {
+        Ok(w) => w,
+        Err(e) => die_with(1, &format!("cannot register a writer: {e}")),
+    };
+    let who = store::lock::Attribution::for_now(&writer, &whoami());
+
+    let guard = match store.lock(&session, id, &who) {
+        Ok(g) => g,
+        Err(store::lock::LockError::Busy(held)) => {
+            let who = held
+                .map(|a| format!("{} (since {})", a.name, a.since))
+                .unwrap_or_else(|| "another writer".to_string());
+            die_with(3, &format!("'{id}' is open by {who} — try again later"))
+        }
+        // `Store::lock` cannot distinguish "no such cassette" from a real I/O
+        // failure in its own error type — both arrive as `LockError::Io`. The
+        // former always carries `NotFound` (the cassette lookup's own
+        // `ok_or_else`, or a session directory that doesn't exist yet), so
+        // that is the signal used here to render it as the usage error (2)
+        // it is, rather than the operational failure (1) a real I/O error is.
+        Err(store::lock::LockError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+            die_with(2, &format!("no cassette '{id}' in session '{session}'"))
+        }
+        Err(store::lock::LockError::Io(e)) => die_with(1, &format!("cannot lock '{id}': {e}")),
+    };
+
+    // Lock first, stdin second. Reversing these would make the tests racy.
+    let mut body = String::new();
+    if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut body) {
+        die_with(1, &format!("cannot read stdin: {e}"));
+    }
+
+    let current = match guard.read() {
+        Ok(c) => c,
+        Err(e) => die_with(1, &format!("cannot read '{id}': {e}")),
+    };
+    let mut m = current.meta;
+    m.last_writer = writer;
+    m.updated_at = store::meta::now_utc();
+    if let Err(e) = guard.write(&m, &body) {
+        die_with(1, &format!("cannot write '{id}': {e}"));
+    }
+    std::process::exit(0)
+}
+
+/// The human's name for attribution: `$USER`, falling back to `unknown`.
+fn whoami() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Exit with an arbitrary code — unlike `die`, which is only ever a CLI usage
+/// error (always 2, always suggesting `--help`). `queue_write`'s failures are
+/// domain errors (a missing session, a busy lock, a real I/O failure) where
+/// "try --help" would not tell the caller anything useful, and they span
+/// three different exit codes `die` cannot express.
+fn die_with(code: i32, msg: &str) -> ! {
+    eprintln!("cassette: {msg}");
+    std::process::exit(code);
+}
+
+/// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.
+///
+/// The environment override exists so tests never touch the real store at
+/// `~/.local/share/cassette`. Phase 6 adds a `data_dir` config key beside it;
+/// the existing `notes_dir` key points at the old flat notes folder and is
+/// deliberately NOT consulted here.
+fn store_root() -> PathBuf {
+    std::env::var_os("CASSETTE_DATA_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(store::Store::default_root)
+        .unwrap_or_else(|| die("cannot determine a data dir"))
 }
 
 #[cfg(test)]
