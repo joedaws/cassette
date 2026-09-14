@@ -269,6 +269,10 @@ impl Store {
     /// the first-run case, where the TUI registers from `$USER` while an agent
     /// registers itself.
     pub fn ensure_writer(&self, name: &str, kind: writers::Kind) -> io::Result<String> {
+        // `_registry`, NOT `_`: a bare underscore drops the guard immediately
+        // and silently reopens the lost-update race this whole function exists
+        // to close. No test catches the difference — the critical section is
+        // too fast to lose reliably — so this comment is the pin.
         let _registry = self.lock_registry()?;
         writers::ensure(&self.root, name, kind)
     }
