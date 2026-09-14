@@ -1510,11 +1510,17 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     // The temp name carries a ULID so two writers never collide on it.
     let tmp = dir.join(format!(".tmp-{}", ids::new_id()));
-    std::fs::write(&tmp, contents)?;
+    // Never leave a stray temp file behind on failure — including a partial
+    // one from the initial write itself (e.g. disk-full), not just a failed
+    // rename. Leaking a partial file from the function whose whole job is to
+    // prevent partial files would be the worst place to do it.
+    if let Err(e) = std::fs::write(&tmp, contents) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(e) => {
-            // Never leave a stray temp file behind on failure.
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
