@@ -554,7 +554,7 @@ phases, each independently testable and each leaving the tool working.
 5. **TUI integration.** Per-cassette autosave, flush-on-blur, live-sync polling and
    `merge_external`, read-only banner for busy cassettes, priority ordering, the collapsed
    closed row, sticky-lock indicators.
-6. **Repoint and remove.** `stats`, `find`, `today`, `--resume`, `export`; delete the
+6. **Repoint and remove.** `stats`, `find`, `today`, `resume`, `export`; delete the
    append/draft/conflict-rename machinery listed under Deletions; `0700` data dir; the
    cloud-sync warning; man page and completions.
 
