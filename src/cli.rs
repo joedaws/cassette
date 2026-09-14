@@ -16,7 +16,7 @@ pub struct Args {
     pub stats: bool,
     /// `find` with the query words that followed it; empty = list all.
     pub find: Option<Vec<String>>,
-    /// `--resume` with an optional note name: `Some(None)` resumes the most
+    /// `resume` with an optional note name: `Some(None)` resumes the most
     /// recently modified note.
     pub resume: Option<Option<String>>,
 }

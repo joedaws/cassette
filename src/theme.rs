@@ -212,10 +212,10 @@ pub fn resolve(name: Option<&str>, user: &HashMap<String, ThemeSpec>) -> Result<
     if let Some(spec) = user.get(name) {
         return apply_spec(base.unwrap_or_default(), spec, name);
     }
-    base.ok_or_else(|| format!("unknown theme '{name}' — run 'cassette +themes' to list themes"))
+    base.ok_or_else(|| format!("unknown theme '{name}' — run 'cassette themes' to list themes"))
 }
 
-/// All selectable themes for `+themes`: built-ins then extra user themes,
+/// All selectable themes for `themes`: built-ins then extra user themes,
 /// each resolved and flagged `true` when (partly) user-defined.
 pub fn all(user: &HashMap<String, ThemeSpec>) -> Vec<(String, Theme, bool)> {
     let mut out: Vec<(String, Theme, bool)> = Vec::new();
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(g.background, Some(Color::Rgb(0x28, 0x28, 0x28)));
         assert!(resolve(Some("no-such"), &none)
             .unwrap_err()
-            .contains("+themes"));
+            .contains("cassette themes"));
         assert_eq!(resolve(None, &none).unwrap(), Theme::default());
     }
 

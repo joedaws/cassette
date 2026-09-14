@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   first — date, word count, draft marker, topics, and a first-line
   preview, capped at 10 with an "… N more" hint. Any words after `find`
   become one case-insensitive filter over name, topic, and content;
-  the listing points at `--resume` to pick a note back up. Rows show each
-  note's full path (`~`-abbreviated), ready to open in an editor. (#55)
+  the listing points at `resume` to pick a note back up. Rows show each
+  note's full path (`~`-abbreviated), ready to open in an editor.
 
 ### Changed
 - The CLI now parses with clap v4 (derive API) instead of a hand-rolled

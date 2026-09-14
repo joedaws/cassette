@@ -445,7 +445,7 @@ fn finish_session(app: &App, sink: Option<&mut Sink>) {
     }
 }
 
-/// Print the `+themes` listing: every selectable theme with a color swatch
+/// Print the `themes` listing: every selectable theme with a color swatch
 /// (RGB themes only — the default theme has no colors of its own to show).
 fn print_themes(cfg: &config::Config) {
     let active = cfg.theme.as_deref().unwrap_or("default");
