@@ -27,18 +27,27 @@ pub fn slug(topic: Option<&str>) -> String {
     let mut out = String::with_capacity(SLUG_MAX);
     let mut pending_dash = false;
     for ch in topic.unwrap_or_default().chars() {
-        if ch.is_ascii_alphanumeric() {
-            if pending_dash && !out.is_empty() {
-                out.push('-');
-            }
-            pending_dash = false;
-            out.push(ch.to_ascii_lowercase());
-            if out.len() == SLUG_MAX {
-                break;
-            }
-        } else {
+        if !ch.is_ascii_alphanumeric() {
             pending_dash = true;
+            continue;
         }
+        // Check the budget BEFORE pushing, counting the separator this char
+        // would drag in with it. Checking afterwards for an exact `== SLUG_MAX`
+        // lets a dash+char pair step from 31 straight to 33, and since the
+        // length only grows the cap can then never be hit again.
+        let needed = if pending_dash && !out.is_empty() {
+            2
+        } else {
+            1
+        };
+        if out.len() + needed > SLUG_MAX {
+            break;
+        }
+        if pending_dash && !out.is_empty() {
+            out.push('-');
+        }
+        pending_dash = false;
+        out.push(ch.to_ascii_lowercase());
     }
     if out.is_empty() {
         return SLUG_FALLBACK.to_string();
@@ -113,6 +122,19 @@ mod tests {
         let words = "aaaaaaaaaa ".repeat(10);
         let s = slug(Some(&words));
         assert!(s.len() <= SLUG_MAX, "{s}");
+        assert!(!s.ends_with('-'), "{s}");
+    }
+
+    #[test]
+    fn slug_cap_holds_when_a_word_boundary_straddles_it() {
+        // Regression: a separator plus the char after it can step the length
+        // from 31 to 33 in one iteration. An `== SLUG_MAX` check placed after
+        // the push misses that and never fires again, uncapping the rest of
+        // the topic. Any topic whose alnum run reaches 31 just before a
+        // boundary reproduces it.
+        let topic = format!("{} {}", "a".repeat(31), "c".repeat(100));
+        let s = slug(Some(&topic));
+        assert!(s.len() <= SLUG_MAX, "cap bypassed: {} chars — {s}", s.len());
         assert!(!s.ends_with('-'), "{s}");
     }
 
