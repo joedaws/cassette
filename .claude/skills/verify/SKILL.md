@@ -23,6 +23,21 @@ fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
 # write keys with os.write(fd, ...), drain with select+os.read between sends
 ```
 
+- **Answer cursor-position queries or the driver lies to you.** Since ratatui
+  0.30, `Terminal::clear()` reads the cursor position, so a driver that never
+  replies to `ESC[6n` makes the app die with "The cursor position could not be
+  read within a normal duration" (exit 1) on any path that clears -- Ctrl+Z
+  resume, for one. Real terminals always reply; a bare `pty.fork()` does not.
+  Reply from inside the drain loop:
+
+  ```python
+  DSR = re.compile(rb'\x1b\[6n')
+  for _ in DSR.findall(chunk):
+      os.write(fd, b"\x1b[1;1R")   # row 1, col 1
+  ```
+
+  Without this you will chase a regression that is not there.
+
 - Strip ANSI for assertions: `re.compile(rb'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]|\x1b[>=]|\x1b\][^\x07]*\x07')`.
   The first drain (~1.2s) is a full screen; later drains are ratatui diffs —
   assert on substrings, not layout.
