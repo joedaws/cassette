@@ -54,6 +54,26 @@ fn zero_is_rejected_for_numeric_options() {
 }
 
 #[test]
+fn a_timer_too_large_to_convert_to_seconds_is_rejected() {
+    // `-t` is minutes and the app stores seconds; an unbounded value used to
+    // overflow the `* 60` and panic in debug builds. It must be a usage error.
+    let out = run(&["-t", "100000000"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("panicked"),
+        "should be a usage error, not a panic: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn the_largest_convertible_timer_is_accepted() {
+    // u32::MAX / 60 minutes is the boundary: it must still parse.
+    let out = run(&["-t", &(u32::MAX / 60).to_string(), "themes"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+#[test]
 fn non_numeric_values_are_rejected() {
     let out = run(&["-t", "abc"]);
     assert_eq!(out.status.code(), Some(2));

@@ -33,8 +33,10 @@ struct Cli {
     command: Option<Command>,
 
     /// countdown timer in minutes
+    // Capped so `timer * 60` in `into_args` cannot overflow u32: a debug
+    // build panicked on `-t 100000000`. clap rejects it as a usage error.
     #[arg(short = 't', value_name = "MINUTES", global = true,
-          value_parser = clap::value_parser!(u32).range(1..))]
+          value_parser = clap::value_parser!(u32).range(1..=(u32::MAX / 60) as i64))]
     timer: Option<u32>,
 
     /// word goal (winds the tape reel)
