@@ -1,3 +1,9 @@
+// Nothing in the non-test build reaches the store until Phase 4 wires the CLI
+// to it, so every item here is dead code to clippy until then. Lint attributes
+// are inherited by nested modules, so this one covers the whole subtree.
+// Remove it when Phase 4 lands.
+#![allow(dead_code)]
+
 //! The session store: session directories of per-cassette markdown files.
 //!
 //! Layout under the data dir (created `0700`):
@@ -20,3 +26,4 @@
 //! the write calls.
 
 pub mod ids;
+pub mod meta;

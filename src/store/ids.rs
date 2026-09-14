@@ -1,17 +1,14 @@
 //! Cassette and session identity: ULIDs, and the slug half of a file name.
 
 /// Longest slug allowed in a file name; the ULID and `.md` follow it.
-#[allow(dead_code)]
 pub const SLUG_MAX: usize = 32;
 
 /// Used when a topic yields no usable slug characters.
-#[allow(dead_code)]
 const SLUG_FALLBACK: &str = "cassette";
 
 /// A fresh ULID: 26 Crockford base32 characters, roughly sortable by
 /// creation time. Roughly is enough — the id is only ever a tiebreak, never
 /// an ordering guarantee (see the spec's "Identity and file naming").
-#[allow(dead_code)]
 pub fn new_id() -> String {
     ulid::Ulid::generate().to_string()
 }
@@ -22,7 +19,6 @@ pub fn new_id() -> String {
 /// is. ASCII alphanumerics are kept lowercased, every other run becomes a
 /// single `-`, and a topic that leaves nothing behind (absent, blank, or
 /// entirely non-ASCII) falls back to `cassette`.
-#[allow(dead_code)]
 pub fn slug(topic: Option<&str>) -> String {
     let mut out = String::with_capacity(SLUG_MAX);
     let mut pending_dash = false;
@@ -58,7 +54,6 @@ pub fn slug(topic: Option<&str>) -> String {
 /// `<slug>-<id>.md`. Priority is deliberately absent: encoding order in the
 /// name would make every reprioritization a rename, and renames desynchronize
 /// an flock from the path other writers resolve.
-#[allow(dead_code)]
 pub fn file_name(topic: Option<&str>, id: &str) -> String {
     format!("{}-{}.md", slug(topic), id)
 }
@@ -66,7 +61,6 @@ pub fn file_name(topic: Option<&str>, id: &str) -> String {
 /// Recover a cassette id from its file name — the segment after the LAST
 /// dash, since slugs contain dashes of their own. `None` when the name is not
 /// a `<slug>-<id>.md` pair.
-#[allow(dead_code)]
 pub fn id_from_file_name(name: &str) -> Option<&str> {
     let stem = name.strip_suffix(".md")?;
     let (_, id) = stem.rsplit_once('-')?;
@@ -74,7 +68,6 @@ pub fn id_from_file_name(name: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-#[allow(unused_imports)]
 mod tests {
     use super::*;
 
