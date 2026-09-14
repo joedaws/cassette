@@ -821,10 +821,15 @@ way — through a guard, never by reinstating the method.
 
 - [ ] **Step 6: Verify invariant 1 structurally**
 
-Run: `grep -rn 'fn write_cassette' src/`
-Expected: exactly one hit — `LockGuard::write`'s neighbour in `src/store/lock.rs` is named
-`write`, so this should return **nothing**. If `Store::write_cassette` still exists, the
-task is not done.
+Run: `grep -rnw 'write_cassette' src/`
+Expected: **only** the test function `write_cassette_updates_in_place_without_renaming`,
+whose name retains the historical term. No `fn write_cassette` method may remain —
+`LockGuard`'s method is named `write`. If `Store::write_cassette` still exists, the task
+is not done.
+
+(An earlier revision of this step said the plain grep "should return nothing", which
+contradicted itself: the test's own name contains the substring, so a plain
+`grep 'fn write_cassette'` always matches it.)
 
 - [ ] **Step 7: Commit**
 
