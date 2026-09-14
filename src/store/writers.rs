@@ -47,11 +47,18 @@ impl Writers {
     }
 }
 
-/// A missing registry is an empty one — the first writer creates it.
+/// A missing registry is an empty one — the first writer creates it. Every
+/// OTHER read failure propagates: `read_to_string` also errors on
+/// permission-denied, on a directory, and on non-UTF-8 content, and treating
+/// those as "empty" is a data-loss path — the next `ensure` would write a
+/// fresh single-entry registry over a file that was merely unreadable,
+/// destroying every existing writer id.
 pub fn read(root: &Path) -> io::Result<Writers> {
     let path = root.join(WRITERS_FILE);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(Writers::default());
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Writers::default()),
+        Err(e) => return Err(e),
     };
     toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
@@ -105,6 +112,21 @@ mod tests {
     fn a_missing_registry_reads_as_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(read(dir.path()).expect("read").writers.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_registry_errors_rather_than_reading_as_empty() {
+        // Only NotFound may mean "empty". Any other read failure must
+        // propagate: reporting an empty registry would let the next `ensure`
+        // overwrite a real one, losing every writer id in the store. A
+        // directory where the file should be is the portable way to make
+        // `read_to_string` fail for a reason other than NotFound.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(WRITERS_FILE)).expect("mkdir");
+        assert!(
+            read(dir.path()).is_err(),
+            "an unreadable registry must not read as empty"
+        );
     }
 
     #[test]
