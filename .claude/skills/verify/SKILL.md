@@ -17,7 +17,8 @@ pid, fd = pty.fork()
 if pid == 0:
     os.environ["XDG_CONFIG_HOME"] = scratch_xdg   # isolate config.toml
     os.environ["TERM"] = "xterm-256color"
-    os.execv(binary, [binary, "-t", "1", note_path])
+    # Note path is a `new` argument -- there is no top-level positional.
+    os.execv(binary, [binary, "-t", "1", "new", note_path])
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
 # write keys with os.write(fd, ...), drain with select+os.read between sends
 ```
@@ -33,8 +34,9 @@ fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
   before driving the binary or you'll verify stale code.
 - Key bytes: Esc `\x1b`, Enter `\r`, Backspace `\x7f`, Tab `\t`, Ctrl+X = chr(x & 0x1f)
   (Ctrl+B `\x02`, Ctrl+N `\x0e`, Ctrl+C `\x03`).
-- Point the note arg at a scratch path and read the markdown after quit (`Esc` then `q`) —
-  the saved file is the best end-to-end assertion.
+- Point `new <path>` at a scratch path and read the markdown after quit (`Esc` then `q`) —
+  the saved file is the best end-to-end assertion. Never drive `resume` with no
+  argument: it opens the newest note in the real notes dir and quitting rewrites it.
 - Config isolation: write `$SCRATCH/xdg/cassette/config.toml` and set `XDG_CONFIG_HOME`.
 - CLI error paths (`-h`, bad flags, unknown `-T` template) exit before raw mode,
   so they can be run directly without a pty.
