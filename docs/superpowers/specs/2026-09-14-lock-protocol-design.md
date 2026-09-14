@@ -123,8 +123,12 @@ defines, written into the anchor *after* acquiring — an ordering the lock itse
 serializes. A blocked writer reads it to render:
 
 ```
-cassette: 'refactor notes' is open by joseph (since 14:02) — try again later
+cassette: 'refactor notes' is open by joseph (since 2026-09-14T14:02:11Z) — try again later
 ```
+
+The full RFC3339 stamp, not a bare `14:02`, is deliberate: a lock can have been held since
+yesterday, and a bare time of day is ambiguous across days when that happens — exactly the
+case a user most needs to understand.
 
 Display-only. Stale bytes after a crash are harmless, because lockedness is kernel state
 and never the file's contents.
