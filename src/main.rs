@@ -20,6 +20,7 @@ mod config;
 mod find;
 mod output;
 mod stats;
+mod store;
 mod theme;
 mod ui;
 
