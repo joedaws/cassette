@@ -289,6 +289,37 @@ impl Store {
         lock::acquire(id, path, &anchor_path, as_writer, lock::Blocking::No)
     }
 
+    /// Acquire several cassette locks at once, all or nothing.
+    ///
+    /// Locks are always taken in **ascending id order**, regardless of the
+    /// order requested. This is a liveness device and nothing more: a total
+    /// order makes deadlock between two overlapping multi-lock operations
+    /// impossible. It is emphatically **not** queue order — that is `priority`
+    /// first, closed last, with the id only as a tiebreak; nothing here is
+    /// ever displayed or used to decide which cassette a writer sees next.
+    ///
+    /// On contention every guard already taken is dropped, so a loser never
+    /// wedges locks the winner needs. Duplicate ids in `ids` are collapsed to
+    /// one acquisition each — the caller is asking to hold a set of locks,
+    /// not to hold the same lock twice, and a second acquisition of the same
+    /// id from a fresh `File` would only self-contend and fail.
+    pub fn lock_many(
+        &self,
+        session: &str,
+        ids: &[&str],
+        as_writer: &lock::Attribution,
+    ) -> Result<Vec<lock::LockGuard>, lock::LockError> {
+        let mut ordered: Vec<&str> = ids.to_vec();
+        ordered.sort_unstable();
+        ordered.dedup();
+        let mut guards = Vec::with_capacity(ordered.len());
+        for id in ordered {
+            // `?` drops `guards` on the way out, releasing everything taken.
+            guards.push(self.lock(session, id, as_writer)?);
+        }
+        Ok(guards)
+    }
+
     /// Every cassette in a session, in queue order. A missing session, files
     /// that are not `.md`, and `.md` files without parseable frontmatter are
     /// all skipped rather than erroring — the store shares a directory with

@@ -443,4 +443,74 @@ mod tests {
             "locking a cassette that does not exist must fail"
         );
     }
+
+    #[test]
+    fn lock_many_takes_them_all() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        for id in ["aaa00000000000000000000000", "bbb00000000000000000000000"] {
+            s.add_cassette(&sid, &cassette_meta(id), "").expect("add");
+        }
+        let who = Attribution::for_now("writer-1", "joseph");
+        let guards = s
+            .lock_many(
+                &sid,
+                &["bbb00000000000000000000000", "aaa00000000000000000000000"],
+                &who,
+            )
+            .expect("acquire");
+        assert_eq!(guards.len(), 2);
+    }
+
+    #[test]
+    fn lock_many_acquires_in_ascending_id_order() {
+        // Acquisition order is a liveness device and nothing else: it stops two
+        // overlapping multi-lock operations from livelocking. It is NOT queue
+        // order, which is priority-first with the id only as a tiebreak.
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        for id in ["aaa00000000000000000000000", "bbb00000000000000000000000"] {
+            s.add_cassette(&sid, &cassette_meta(id), "").expect("add");
+        }
+        let who = Attribution::for_now("writer-1", "joseph");
+        let guards = s
+            .lock_many(
+                &sid,
+                &["bbb00000000000000000000000", "aaa00000000000000000000000"],
+                &who,
+            )
+            .expect("acquire");
+        assert_eq!(
+            guards.iter().map(|g| g.id()).collect::<Vec<_>>(),
+            vec!["aaa00000000000000000000000", "bbb00000000000000000000000"],
+            "requested b,a — must be taken a,b"
+        );
+    }
+
+    #[test]
+    fn lock_many_releases_everything_it_took_when_one_is_busy() {
+        // All or nothing: a partial hold would leave the loser wedging locks
+        // the winner needs, which is the livelock the ordering rule prevents.
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        for id in ["aaa00000000000000000000000", "bbb00000000000000000000000"] {
+            s.add_cassette(&sid, &cassette_meta(id), "").expect("add");
+        }
+        let who = Attribution::for_now("writer-1", "joseph");
+        let held = s
+            .lock(&sid, "bbb00000000000000000000000", &who)
+            .expect("hold b");
+
+        let other = Attribution::for_now("writer-2", "agent");
+        let r = s.lock_many(
+            &sid,
+            &["aaa00000000000000000000000", "bbb00000000000000000000000"],
+            &other,
+        );
+        assert!(matches!(r, Err(LockError::Busy(_))), "must fail on b");
+        // a must be free again — if lock_many kept it, this would be Busy.
+        s.lock(&sid, "aaa00000000000000000000000", &other)
+            .expect("a must have been released");
+        drop(held);
+    }
 }
