@@ -7,7 +7,15 @@
 //! *existence* carries no meaning: lockedness is kernel state, tested by
 //! attempting acquisition.
 
+use std::fs::File;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use fs4::FileExt;
+
 use crate::store::meta;
+use crate::store::meta::CassetteMeta;
+use crate::store::StoredCassette;
 
 /// Who holds a lock. Written into the anchor after acquiring — an ordering the
 /// lock itself serializes — and read by a blocked writer for its message.
@@ -59,6 +67,163 @@ impl Attribution {
             since: since.to_string(),
         })
     }
+}
+
+/// Why a lock could not be taken.
+#[derive(Debug)]
+pub enum LockError {
+    /// Another live writer holds it. `None` when the holder left no readable
+    /// attribution — a crash before writing its line, or garbled bytes. It
+    /// still blocks us; we just cannot name it.
+    Busy(Option<Attribution>),
+    Io(io::Error),
+}
+
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LockError::Busy(Some(a)) => {
+                write!(f, "held by {} (since {})", a.name, a.since)
+            }
+            LockError::Busy(None) => write!(f, "held by another writer"),
+            LockError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<io::Error> for LockError {
+    fn from(e: io::Error) -> LockError {
+        LockError::Io(e)
+    }
+}
+
+/// A held cassette lock. The only way to write an existing cassette.
+///
+/// The lock is released when this value is dropped, and by the kernel if the
+/// process dies for any reason including `SIGKILL` — which is why there is no
+/// reaper, no pid file and no `--force-unlock`.
+#[derive(Debug)]
+pub struct LockGuard {
+    id: String,
+    /// The cassette file. Resolved once at acquisition: the slug is frozen at
+    /// creation, so this path cannot be derived from a (possibly retopicked)
+    /// `CassetteMeta`.
+    path: PathBuf,
+    /// Holding the `File` IS holding the lock: dropping it closes the fd and
+    /// the kernel releases. No `Drop` impl needed, and none should be added —
+    /// an explicit `unlock()` before close would be redundant and would give a
+    /// future reader the impression that release is our responsibility.
+    _anchor: File,
+}
+
+impl LockGuard {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The cassette's current state, read under the lock.
+    pub fn read(&self) -> io::Result<StoredCassette> {
+        let content = std::fs::read_to_string(&self.path)?;
+        let (meta, body) = crate::store::meta::split(&content);
+        let meta = meta.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("'{}' has no cassette frontmatter", self.path.display()),
+            )
+        })?;
+        Ok(StoredCassette {
+            path: self.path.clone(),
+            meta,
+            body: body.to_string(),
+        })
+    }
+
+    /// Replace the cassette. The file keeps the name it was minted with: a
+    /// rename would move the inode out from under another writer's resolved
+    /// path, which is the same hazard that put the lock on a sidecar.
+    pub fn write(&self, m: &CassetteMeta, body: &str) -> io::Result<()> {
+        crate::store::atomic_write(
+            &self.path,
+            &format!("{}\n{}", crate::store::meta::build_frontmatter(m), body),
+        )
+    }
+}
+
+/// Whether an acquisition waits. See the spec's "never block on a lock a human
+/// can hold": cassette locks are `No`, the writer registry is `Yes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Blocking {
+    No,
+    Yes,
+}
+
+/// Open (creating if needed) the anchor, take the flock, and stamp the holder.
+///
+/// The anchor is created on demand so a cassette written by hand — or one
+/// predating this phase — is still lockable. Two processes creating it race
+/// benignly: `create(true)` on the same path yields the same inode, because no
+/// `rename` is involved.
+pub(crate) fn acquire(
+    id: &str,
+    path: PathBuf,
+    anchor_path: &Path,
+    as_writer: &Attribution,
+    blocking: Blocking,
+) -> Result<LockGuard, LockError> {
+    if let Some(parent) = anchor_path.parent() {
+        crate::store::ensure_private_dir(parent)?;
+    }
+    let anchor = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(anchor_path)?;
+
+    // Bound via the trait explicitly (UFCS), not `anchor.lock()`/`.try_lock()`:
+    // this toolchain's `std::fs::File` has stabilized inherent methods of the
+    // same names, and an inherent method always wins over a trait method on
+    // method-call syntax regardless of which trait is imported. Calling
+    // through `FileExt::` keeps this bound to fs4's `TryLockError`, which is
+    // what the `Busy` match arms below are typed against.
+    match blocking {
+        Blocking::Yes => FileExt::lock(&anchor).map_err(LockError::Io)?,
+        Blocking::No => {
+            if let Err(e) = FileExt::try_lock(&anchor) {
+                return Err(match e {
+                    fs4::TryLockError::WouldBlock => {
+                        // Read the holder's line without the lock: it is
+                        // display-only, so a torn read costs us a message, not
+                        // correctness.
+                        let held = std::fs::read_to_string(anchor_path)
+                            .ok()
+                            .and_then(|s| Attribution::parse(&s));
+                        LockError::Busy(held)
+                    }
+                    fs4::TryLockError::Error(e) => LockError::Io(e),
+                });
+            }
+        }
+    }
+
+    // Stamp the holder AFTER acquiring — the lock serializes this write, so
+    // two holders can never interleave their lines.
+    use std::io::{Seek, Write};
+    let mut anchor = anchor;
+    anchor.set_len(0)?;
+    anchor.rewind()?;
+    writeln!(anchor, "{}", as_writer.render())?;
+    anchor.flush()?;
+
+    Ok(LockGuard {
+        id: id.to_string(),
+        path,
+        _anchor: anchor,
+    })
 }
 
 #[cfg(test)]
@@ -123,5 +288,150 @@ mod tests {
         assert_eq!(a.name, "joseph");
         assert_eq!(a.pid, std::process::id());
         assert!(a.since.ends_with('Z'), "{}", a.since);
+    }
+
+    use crate::store::meta::{CassetteMeta, Status};
+    use crate::store::session::SessionMeta;
+    use crate::store::Store;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        (dir, store)
+    }
+
+    fn session_meta() -> SessionMeta {
+        SessionMeta {
+            alias: None,
+            created: meta::now_utc(),
+            timer_secs: None,
+            word_goal: None,
+        }
+    }
+
+    fn cassette_meta(id: &str) -> CassetteMeta {
+        CassetteMeta {
+            id: id.to_string(),
+            topic: Some("gratitude".to_string()),
+            priority: 10,
+            status: Status::Open,
+            locked_by: None,
+            created_by: "writer-1".to_string(),
+            last_writer: "writer-1".to_string(),
+            updated_at: meta::now_utc(),
+        }
+    }
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+
+    #[test]
+    fn a_lock_can_be_taken_and_written_through() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        let m = cassette_meta(ID);
+        s.add_cassette(&sid, &m, "## Side A\n\nold\n").expect("add");
+
+        let who = Attribution::for_now("writer-1", "joseph");
+        let guard = s.lock(&sid, ID, &who).expect("acquire");
+        assert_eq!(guard.read().expect("read").body, "## Side A\n\nold\n");
+        guard.write(&m, "## Side A\n\nnew\n").expect("write");
+        assert_eq!(guard.read().expect("read").body, "## Side A\n\nnew\n");
+    }
+
+    #[test]
+    fn a_second_acquisition_is_busy_and_names_the_holder() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+
+        let who = Attribution::for_now("writer-1", "joseph");
+        let _held = s.lock(&sid, ID, &who).expect("first acquire");
+        match s.lock(&sid, ID, &Attribution::for_now("writer-2", "agent")) {
+            Err(LockError::Busy(Some(a))) => {
+                assert_eq!(
+                    a.name, "joseph",
+                    "the blocked writer must learn who holds it"
+                );
+                assert_eq!(a.pid, std::process::id());
+            }
+            other => panic!("expected Busy with attribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dropping_the_guard_releases_the_lock() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+        let who = Attribution::for_now("writer-1", "joseph");
+        {
+            let _g = s.lock(&sid, ID, &who).expect("acquire");
+        }
+        s.lock(&sid, ID, &who).expect("must be free after drop");
+    }
+
+    #[test]
+    fn two_threads_genuinely_contend() {
+        // flock is per open file description, so two threads in one process
+        // really do contend. Under fcntl locks they would silently share the
+        // lock and this would pass for the wrong reason.
+        use std::sync::mpsc;
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+        let who = Attribution::for_now("writer-1", "joseph");
+        let held = s.lock(&sid, ID, &who).expect("acquire");
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let r = s.lock(&sid, ID, &Attribution::for_now("writer-2", "agent"));
+                tx.send(matches!(r, Err(LockError::Busy(_)))).expect("send");
+            });
+        });
+        assert!(rx.recv().expect("recv"), "the other thread must be blocked");
+        drop(held);
+    }
+
+    #[test]
+    fn locking_creates_the_anchor_when_it_is_missing() {
+        // A cassette written by hand, or predating this phase, must still be
+        // lockable — the anchor is created on demand.
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+        // Tolerant of both sides of Task 3: today `add_cassette` does not
+        // create an anchor, and after Task 3 it does. Either way this test
+        // must exercise the on-demand path in `lock`.
+        let _ = std::fs::remove_file(s.locks_dir(&sid).join(ID));
+        let who = Attribution::for_now("writer-1", "joseph");
+        s.lock(&sid, ID, &who)
+            .expect("must create the anchor on demand");
+        assert!(s.locks_dir(&sid).join(ID).is_file());
+    }
+
+    #[test]
+    fn a_garbled_anchor_still_blocks_without_inventing_a_holder() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+        let who = Attribution::for_now("writer-1", "joseph");
+        let _held = s.lock(&sid, ID, &who).expect("acquire");
+        std::fs::write(s.locks_dir(&sid).join(ID), "garbage").expect("clobber");
+        match s.lock(&sid, ID, &who) {
+            Err(LockError::Busy(None)) => {}
+            other => panic!("expected Busy(None), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn locking_an_unknown_cassette_is_an_error_not_a_lock() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        let who = Attribution::for_now("writer-1", "joseph");
+        assert!(
+            s.lock(&sid, "nosuchcassette0000000000AB", &who).is_err(),
+            "locking a cassette that does not exist must fail"
+        );
     }
 }

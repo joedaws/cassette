@@ -221,6 +221,49 @@ impl Store {
         session::write_active(&self.root, session)
     }
 
+    /// The file backing a cassette id, found by its `-<id>.md` suffix. The
+    /// slug half of the name is frozen at creation, so the path cannot be
+    /// derived from a `CassetteMeta` whose topic may since have changed.
+    pub fn cassette_path(&self, session: &str, id: &str) -> io::Result<Option<PathBuf>> {
+        let dir = self.cassettes_dir(session);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if ids::id_from_file_name(&name) == Some(id) {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Acquire a cassette's lock. **Never blocks** — a human may hold this one
+    /// for as long as they keep the cassette focused, so a blocked caller gets
+    /// `Busy` and writes a different cassette instead.
+    ///
+    /// `as_writer` is stamped into the anchor after acquiring, which the lock
+    /// itself serializes.
+    pub fn lock(
+        &self,
+        session: &str,
+        id: &str,
+        as_writer: &lock::Attribution,
+    ) -> Result<lock::LockGuard, lock::LockError> {
+        let path = self.cassette_path(session, id)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no cassette '{id}' in session '{session}'"),
+            )
+        })?;
+        let anchor_path = self.locks_dir(session).join(id);
+        lock::acquire(id, path, &anchor_path, as_writer, lock::Blocking::No)
+    }
+
     /// Every cassette in a session, in queue order. A missing session, files
     /// that are not `.md`, and `.md` files without parseable frontmatter are
     /// all skipped rather than erroring — the store shares a directory with
