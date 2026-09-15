@@ -12,9 +12,20 @@ use crate::store::meta::{CassetteMeta, Status};
 pub const STEP: i64 = 10;
 
 /// Tail placement — the default for a new cassette. An agent adding work
-/// cannot jump the human's line.
-pub fn last(existing: &[i64]) -> i64 {
-    existing.iter().copied().max().unwrap_or(0) + STEP
+/// cannot jump the human's line. `None` when there is no room left above the
+/// maximum, which means this run must be renumbered.
+///
+/// Returns `Option` rather than a bare `i64` so an unrepresentable result is a
+/// value the caller must handle, not a debug-build panic. Priorities come from
+/// frontmatter, which `parse_frontmatter` will accept as any i64-parseable
+/// string, so `i64::MAX` is reachable by hand-editing a file.
+pub fn last(existing: &[i64]) -> Option<i64> {
+    existing
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .checked_add(STEP)
 }
 
 /// Head placement. `min - STEP` normally; when that would reach zero, half
@@ -30,10 +41,12 @@ pub fn first(existing: &[i64]) -> Option<i64> {
     (halved > 0).then_some(halved)
 }
 
-/// Midpoint of two neighbours. `None` when they are adjacent or equal, which
-/// means this run must be renumbered.
+/// Midpoint of two neighbours. `None` when they are adjacent or equal, when
+/// they are reversed, or when the span between them is not representable —
+/// all of which mean the same thing to a caller: this run must be renumbered.
 pub fn between(lo: i64, hi: i64) -> Option<i64> {
-    let mid = lo + (hi - lo) / 2;
+    let span = hi.checked_sub(lo)?;
+    let mid = lo.checked_add(span / 2)?;
     (mid > lo && mid < hi).then_some(mid)
 }
 
@@ -77,14 +90,27 @@ mod tests {
 
     #[test]
     fn tail_placement_is_max_plus_a_step() {
-        assert_eq!(last(&[10, 20, 30]), 40);
+        assert_eq!(last(&[10, 20, 30]), Some(40));
         // Out-of-order input must still append after the true maximum.
-        assert_eq!(last(&[30, 10, 20]), 40);
+        assert_eq!(last(&[30, 10, 20]), Some(40));
     }
 
     #[test]
     fn tail_placement_on_an_empty_queue_is_the_first_step() {
-        assert_eq!(last(&[]), STEP);
+        assert_eq!(last(&[]), Some(STEP));
+    }
+
+    #[test]
+    fn tail_placement_refuses_to_overflow() {
+        // Reachable from a hand-edited frontmatter priority: `parse_frontmatter`
+        // accepts any i64-parseable string. A debug build panicked here.
+        assert_eq!(last(&[i64::MAX]), None, "no room above i64::MAX");
+        assert_eq!(last(&[i64::MAX - 1]), None, "nor within one STEP of it");
+        assert_eq!(
+            last(&[i64::MAX - STEP]),
+            Some(i64::MAX),
+            "exactly one step fits"
+        );
     }
 
     #[test]
@@ -116,6 +142,26 @@ mod tests {
     fn between_gives_up_on_adjacent_values() {
         assert_eq!(between(15, 16), None);
         assert_eq!(between(15, 15), None);
+    }
+
+    #[test]
+    fn between_refuses_to_overflow() {
+        // `hi - lo` overflows before the midpoint guard ever runs.
+        assert_eq!(
+            between(i64::MIN, i64::MAX),
+            None,
+            "the span is not representable"
+        );
+        // Also unrepresentable: `0 - i64::MIN` is `i64::MAX + 1`. Returning
+        // None here is correct — it reads as "renumber this run", and real
+        // priorities are positive by construction anyway.
+        assert_eq!(between(i64::MIN, 0), None, "this span overflows too");
+        // A span that IS representable must still produce a midpoint.
+        assert_eq!(
+            between(-10, 10),
+            Some(0),
+            "a representable span still works"
+        );
     }
 
     #[test]
