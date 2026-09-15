@@ -29,13 +29,20 @@ pub fn last(existing: &[i64]) -> Option<i64> {
 }
 
 /// Head placement. `min - STEP` normally; when that would reach zero, half
-/// the minimum instead. `None` when even that leaves no room.
+/// the minimum instead. `None` when even that leaves no room — including when
+/// `min - STEP` is not representable at all, which reads the same way to a
+/// caller: renumber this run.
 pub fn first(existing: &[i64]) -> Option<i64> {
     let Some(min) = existing.iter().copied().min() else {
         return Some(STEP);
     };
-    if min - STEP > 0 {
-        return Some(min - STEP);
+    // Checked BEFORE comparing: computing `min - STEP` inside the condition
+    // underflows for a minimum near i64::MIN, which is reachable from a
+    // hand-edited frontmatter priority.
+    if let Some(below) = min.checked_sub(STEP) {
+        if below > 0 {
+            return Some(below);
+        }
     }
     let halved = min / 2;
     (halved > 0).then_some(halved)
@@ -130,6 +137,23 @@ mod tests {
     #[test]
     fn head_placement_gives_up_when_there_is_no_room_below() {
         assert_eq!(first(&[1]), None, "nothing fits below 1");
+    }
+
+    #[test]
+    fn head_placement_refuses_to_underflow() {
+        // The third instance of the same bug: `min - STEP` was computed inside
+        // the `if` condition, so a minimum near i64::MIN underflowed before any
+        // guard could run. Reachable from a hand-edited frontmatter priority.
+        assert_eq!(first(&[i64::MIN]), None, "nothing fits below i64::MIN");
+        assert_eq!(first(&[i64::MIN + 1]), None, "nor within one STEP of it");
+        // A negative minimum that IS representable still falls through to the
+        // halving branch, which is meaningless for a negative domain but must
+        // not panic.
+        assert_eq!(
+            first(&[-100]),
+            None,
+            "halving a negative never yields a positive"
+        );
     }
 
     #[test]
