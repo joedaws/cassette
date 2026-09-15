@@ -588,9 +588,8 @@ phases, each independently testable and each leaving the tool working.
      knows, so an agent registered as a human stays one permanently with no repair path.
      Also fixes `priority::last`/`between` overflow — `queue new` and `queue move` are
      the first callers to take user-supplied priorities — gives `LockError::Busy` the
-     cassette id it lacks, adds `Store::holds` so a caller cannot be told it is blocked
-     by itself, and lifts `queue write` out of `main.rs` into a per-command module
-     matching `stats.rs`/`find.rs`.
+     cassette id it lacks, and lifts `queue write` out of `main.rs` into a per-command
+     module matching `stats.rs`/`find.rs`.
    - **4b — Session and queue core.** `session new` / `list` / `use` / `alias`;
      `queue list` / `next` / `new` / `show` / `close` / `reopen` / `move`; exit codes 5
      and 6. `queue move` is the first real consumer of `lock_many`, which is why
