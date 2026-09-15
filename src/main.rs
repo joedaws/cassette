@@ -969,7 +969,7 @@ fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource
         Ok(user) if !user.trim().is_empty() => {
             Ok((user.trim().to_string(), queue::WriterSource::Env))
         }
-        _ => Err("no writer: $USER is unset, so pass --writer <NAME>".to_string()),
+        _ => Err("no writer: $USER is empty or unset, so pass --writer <NAME>".to_string()),
     }
 }
 

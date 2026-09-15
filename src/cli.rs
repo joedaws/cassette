@@ -21,7 +21,7 @@ pub struct Args {
     pub resume: Option<Option<String>>,
     /// `queue write`: the cassette id and the session it lives in.
     pub queue_write: Option<(String, Option<String>)>,
-    /// writer to act as (default: $USER)
+    /// registered writer to act as (default: $USER, registered on first use)
     pub writer: Option<String>,
     /// `writer register|list|whoami`, if that's what was invoked.
     pub writer_cmd: Option<WriterCmd>,
@@ -82,7 +82,7 @@ struct Cli {
     #[arg(short = 'o', long = "output", global = true)]
     print_stdout: bool,
 
-    /// writer to act as (default: $USER)
+    /// registered writer to act as (default: $USER, registered on first use)
     #[arg(long, value_name = "NAME", global = true)]
     writer: Option<String>,
 }

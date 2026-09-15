@@ -16,7 +16,10 @@ use crate::store::Store;
 /// variant, not just a rendered message, to pick between them.
 pub fn register(store: &Store, name: &str, kind: Kind) -> Result<String, WriterError> {
     let id = store.ensure_writer(name, kind)?;
-    Ok(format!("{id}  {name} ({})", kind.as_str()))
+    // Echo the trimmed name, not the caller's: the store trims at its boundary,
+    // so `--name " bot "` stores `bot`. Echoing the padded form would show the
+    // operator a name that `writer whoami " bot "` resolves to something else.
+    Ok(format!("{id}  {} ({})", name.trim(), kind.as_str()))
 }
 
 /// One line per writer, sorted by name. The registry is a `BTreeMap` keyed by
@@ -116,6 +119,21 @@ mod tests {
             !out.contains("human") && !out.contains("agent"),
             "must not invent a kind: {out}"
         );
+    }
+
+    #[test]
+    fn register_echoes_the_name_the_store_actually_kept() {
+        // The store trims at its boundary, so echoing the caller's padded name
+        // would print an identity that no later command resolves to.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let msg = register(&store, "  bot  ", Kind::Agent).expect("register");
+        assert!(msg.contains("bot"), "{msg}");
+        assert!(!msg.contains("  bot  "), "echoed the untrimmed name: {msg}");
+
+        // ...and the trimmed name is the one that resolves.
+        let who = whoami(&store, "bot").expect("whoami");
+        assert!(who.contains("agent"), "{who}");
     }
 
     #[test]
