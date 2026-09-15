@@ -919,8 +919,8 @@ fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
 
     let guard = match store.lock(&session, id, &who) {
         Ok(g) => g,
-        Err(store::lock::LockError::Busy(held)) => {
-            let who = held
+        Err(store::lock::LockError::Busy { holder, .. }) => {
+            let who = holder
                 .map(|a| format!("{} (since {})", a.name, a.since))
                 .unwrap_or_else(|| "another writer".to_string());
             die_with(3, &format!("'{id}' is open by {who} — try again later"))

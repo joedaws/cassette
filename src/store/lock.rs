@@ -91,10 +91,14 @@ impl Attribution {
 /// Why a lock could not be taken.
 #[derive(Debug)]
 pub enum LockError {
-    /// Another live writer holds it. `None` when the holder left no readable
-    /// attribution — a crash before writing its line, or garbled bytes. It
-    /// still blocks us; we just cannot name it.
-    Busy(Option<Attribution>),
+    /// Another live writer holds it. `holder` is `None` when they left no
+    /// readable attribution — a crash before writing their line, or garbled
+    /// bytes. It still blocks us; we just cannot name them. `id` is always
+    /// present, so a caller locking several cassettes can say which one.
+    Busy {
+        id: String,
+        holder: Option<Attribution>,
+    },
     /// No cassette with this id in this session. A distinct variant rather
     /// than an `Io(NotFound)` so callers can render a usage error without
     /// matching on `io::ErrorKind` — that heuristic silently depends on
@@ -109,10 +113,15 @@ pub enum LockError {
 impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LockError::Busy(Some(a)) => {
-                write!(f, "held by {} (since {})", a.name, a.since)
+            LockError::Busy {
+                id,
+                holder: Some(a),
+            } => {
+                write!(f, "'{id}' is held by {} (since {})", a.name, a.since)
             }
-            LockError::Busy(None) => write!(f, "held by another writer"),
+            LockError::Busy { id, holder: None } => {
+                write!(f, "'{id}' is held by another writer")
+            }
             LockError::NoSuchCassette { session, id } => {
                 write!(f, "no cassette '{id}' in session '{session}'")
             }
@@ -135,7 +144,7 @@ impl From<LockError> for io::Error {
         match e {
             LockError::Io(e) => e,
             LockError::NoSuchCassette { .. } => io::Error::new(io::ErrorKind::NotFound, msg),
-            LockError::Busy(_) => io::Error::new(io::ErrorKind::WouldBlock, msg),
+            LockError::Busy { .. } => io::Error::new(io::ErrorKind::WouldBlock, msg),
         }
     }
 }
@@ -257,7 +266,10 @@ pub(crate) fn acquire(
                         let held = std::fs::read_to_string(anchor_path)
                             .ok()
                             .and_then(|s| Attribution::parse(&s));
-                        LockError::Busy(held)
+                        LockError::Busy {
+                            id: id.to_string(),
+                            holder: held,
+                        }
                     }
                     fs4::TryLockError::Error(e) => LockError::Io(e),
                 });
@@ -425,7 +437,9 @@ mod tests {
         let who = Attribution::for_now("writer-1", "joseph");
         let _held = s.lock(&sid, ID, &who).expect("first acquire");
         match s.lock(&sid, ID, &Attribution::for_now("writer-2", "agent")) {
-            Err(LockError::Busy(Some(a))) => {
+            Err(LockError::Busy {
+                holder: Some(a), ..
+            }) => {
                 assert_eq!(
                     a.name, "joseph",
                     "the blocked writer must learn who holds it"
@@ -433,6 +447,24 @@ mod tests {
                 assert_eq!(a.pid, std::process::id());
             }
             other => panic!("expected Busy with attribution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn busy_names_the_cassette_as_well_as_the_holder() {
+        // With `lock_many` behind `queue move`, "held by joseph" is not
+        // actionable unless it says which cassette.
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+        let who = Attribution::for_now("writer-1", "joseph");
+        let _held = s.lock(&sid, ID, &who).expect("first");
+        match s.lock(&sid, ID, &Attribution::for_now("writer-2", "agent")) {
+            Err(LockError::Busy { id, holder }) => {
+                assert_eq!(id, ID, "the blocked caller must learn which cassette");
+                assert_eq!(holder.expect("holder").name, "joseph");
+            }
+            other => panic!("expected Busy with an id, got {other:?}"),
         }
     }
 
@@ -464,7 +496,8 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 let r = s.lock(&sid, ID, &Attribution::for_now("writer-2", "agent"));
-                tx.send(matches!(r, Err(LockError::Busy(_)))).expect("send");
+                tx.send(matches!(r, Err(LockError::Busy { .. })))
+                    .expect("send");
             });
         });
         assert!(rx.recv().expect("recv"), "the other thread must be blocked");
@@ -497,8 +530,8 @@ mod tests {
         let _held = s.lock(&sid, ID, &who).expect("acquire");
         std::fs::write(s.locks_dir(&sid).join(ID), "garbage").expect("clobber");
         match s.lock(&sid, ID, &who) {
-            Err(LockError::Busy(None)) => {}
-            other => panic!("expected Busy(None), got {other:?}"),
+            Err(LockError::Busy { holder: None, .. }) => {}
+            other => panic!("expected Busy with no holder, got {other:?}"),
         }
     }
 
@@ -592,7 +625,7 @@ mod tests {
             &["aaa00000000000000000000000", "bbb00000000000000000000000"],
             &other,
         );
-        assert!(matches!(r, Err(LockError::Busy(_))), "must fail on b");
+        assert!(matches!(r, Err(LockError::Busy { .. })), "must fail on b");
         // a must be free again — if lock_many kept it, this would be Busy.
         s.lock(&sid, "aaa00000000000000000000000", &other)
             .expect("a must have been released");
@@ -647,7 +680,7 @@ mod tests {
             &["bbb00000000000000000000000", "aaa00000000000000000000000"],
             &other,
         );
-        assert!(matches!(r, Err(LockError::Busy(_))), "must fail on a");
+        assert!(matches!(r, Err(LockError::Busy { .. })), "must fail on a");
 
         let b_anchor =
             std::fs::read_to_string(s.locks_dir(&sid).join("bbb00000000000000000000000"))
