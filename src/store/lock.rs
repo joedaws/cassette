@@ -625,7 +625,13 @@ mod tests {
             &["aaa00000000000000000000000", "bbb00000000000000000000000"],
             &other,
         );
-        assert!(matches!(r, Err(LockError::Busy { .. })), "must fail on b");
+        match r {
+            Err(LockError::Busy { id, .. }) => assert_eq!(
+                id, "bbb00000000000000000000000",
+                "must name the cassette that actually blocked, not the first requested"
+            ),
+            other => panic!("expected Busy, got {other:?}"),
+        }
         // a must be free again — if lock_many kept it, this would be Busy.
         s.lock(&sid, "aaa00000000000000000000000", &other)
             .expect("a must have been released");
@@ -680,7 +686,14 @@ mod tests {
             &["bbb00000000000000000000000", "aaa00000000000000000000000"],
             &other,
         );
-        assert!(matches!(r, Err(LockError::Busy { .. })), "must fail on a");
+        match r {
+            Err(LockError::Busy { id, .. }) => assert_eq!(
+                id, "aaa00000000000000000000000",
+                "acquisition is ascending-id, so the blocked id is the LOWEST — not \
+                 'bbb…', which was requested first but never reached"
+            ),
+            other => panic!("expected Busy, got {other:?}"),
+        }
 
         let b_anchor =
             std::fs::read_to_string(s.locks_dir(&sid).join("bbb00000000000000000000000"))
