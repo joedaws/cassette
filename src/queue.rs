@@ -10,7 +10,13 @@ pub enum QueueError {
     /// writer, or a kind mismatch. Exit 2.
     Usage(String),
     /// Another writer holds the cassette. Exit 3. Carries the rendered
-    /// message so the wording lives next to the logic that produces it.
+    /// message rather than `{ id, holder }`, unlike `LockError::Busy` and
+    /// `WriterError::KindMismatch` — a deliberate divergence, not an
+    /// oversight: the sole caller needs only the text, and the holder
+    /// formatting belongs beside the code that produces it. A `queue move`
+    /// in 4b can render its own message while it still has the id. 4c's
+    /// `--json` is what will likely need the fields back, since it emits
+    /// `id` and `holder` raw rather than prose.
     Busy(String),
     /// Anything else. Exit 1.
     Io(String),
