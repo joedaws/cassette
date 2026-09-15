@@ -154,6 +154,37 @@ pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, Writ
     Ok(id)
 }
 
+/// The id and kind for `name`, registering it as a human on first sight.
+///
+/// Unlike `ensure`, this declares nothing: an existing writer's kind is
+/// returned as it stands, so a registered agent is not asked to claim it is a
+/// human. Only `writer register` declares a kind, because only there does a
+/// person choose one. A brand-new name defaults to human — the spec's
+/// "auto-registered from $USER on first run" — and anyone who wants to be an
+/// agent registers first.
+pub(crate) fn resolve(root: &Path, name: &str) -> Result<(String, Kind), WriterError> {
+    let mut all = read(root)?;
+    if let Some((id, kind)) = all
+        .writers
+        .iter()
+        .find(|(_, w)| w.name == name)
+        .map(|(id, w)| (id.clone(), w.kind))
+    {
+        return Ok((id, kind));
+    }
+    let id = ids::new_id();
+    all.writers.insert(
+        id.clone(),
+        Writer {
+            name: name.to_string(),
+            kind: Kind::Human,
+            created: meta::now_utc(),
+        },
+    );
+    write(root, &all)?;
+    Ok((id, Kind::Human))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +299,37 @@ mod tests {
         let first = ensure(dir.path(), "joseph", Kind::Human).expect("first");
         let again = ensure(dir.path(), "joseph", Kind::Human).expect("again");
         assert_eq!(first, again);
+        assert_eq!(read(dir.path()).expect("read").writers.len(), 1);
+    }
+
+    #[test]
+    fn resolve_returns_a_registered_agent_as_an_agent() {
+        // The write path must not make a registered agent claim to be human —
+        // that is what `queue write` was doing, and it locked agents out
+        // entirely once mismatches started being rejected.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registered = ensure(dir.path(), "bot", Kind::Agent).expect("register");
+        let (id, kind) = resolve(dir.path(), "bot").expect("resolve");
+        assert_eq!(id, registered, "same writer, not a new id");
+        assert_eq!(kind, Kind::Agent, "the registered kind is returned as-is");
+    }
+
+    #[test]
+    fn resolve_auto_registers_an_unknown_name_as_human() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (id, kind) = resolve(dir.path(), "newcomer").expect("resolve");
+        assert_eq!(kind, Kind::Human, "first sight defaults to human");
+        let all = read(dir.path()).expect("read");
+        assert_eq!(all.writers[&id].name, "newcomer");
+        assert_eq!(all.writers.len(), 1);
+    }
+
+    #[test]
+    fn resolve_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (first, _) = resolve(dir.path(), "joseph").expect("first");
+        let (again, _) = resolve(dir.path(), "joseph").expect("again");
+        assert_eq!(first, again, "no second id minted");
         assert_eq!(read(dir.path()).expect("read").writers.len(), 1);
     }
 

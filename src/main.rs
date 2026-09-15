@@ -899,10 +899,24 @@ fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
     // Registration happens BEFORE acquisition, even though failing fast on a
     // bad lock looks more logical: two writers racing for the same cassette
     // must both land in writers.toml even when one of them loses the lock.
-    let writer = match store.ensure_writer(&whoami(), store::writers::Kind::Human) {
+    //
+    // Resolved, not asserted: a write must not declare `Kind::Human` on every
+    // call, or a writer already registered as an agent could never write at
+    // all once a `kind` mismatch became an error. Only `writer register`
+    // declares a kind; every write path defers to whatever is already on
+    // record, registering brand-new names as human (the spec's
+    // "auto-registered from $USER on first run").
+    //
+    // `_kind` is unused today: nothing here needs to tell a human from an
+    // agent yet. 4b's `queue close` is where it starts to matter (an agent
+    // refuses to close a cassette whose `locked_by` is set; a human may), so
+    // this is where that lookup will plug in rather than a second `resolve`.
+    let (writer, _kind) = match store.resolve_writer(&whoami()) {
         Ok(w) => w,
-        // A distinct variant from `WriterError::Io`, so this is a usage error
-        // (2) by construction rather than by matching on `io::ErrorKind`.
+        // `resolve_writer` never rejects — it never declares a kind, so
+        // there is nothing to mismatch. The `KindMismatch` arm exists only
+        // because `WriterError` is shared with `ensure_writer`; matched
+        // here for exhaustiveness, not because it can occur.
         Err(e @ store::writers::WriterError::KindMismatch { .. }) => die_with(2, &e.to_string()),
         Err(store::writers::WriterError::Io(e)) => {
             die_with(1, &format!("cannot register a writer: {e}"))
