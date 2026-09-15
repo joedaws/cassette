@@ -812,8 +812,8 @@ mod tests {
         });
         let all = s.writers().expect("read");
         assert_eq!(all.writers.len(), 2, "both registrations must survive");
-        assert!(all.find_by_name("joseph").is_some());
-        assert!(all.find_by_name("agent").is_some());
+        assert!(writers::lookup_by_name(&all, "joseph").is_some());
+        assert!(writers::lookup_by_name(&all, "agent").is_some());
     }
 
     #[cfg(unix)]

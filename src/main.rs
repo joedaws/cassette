@@ -23,6 +23,7 @@ mod stats;
 mod store;
 mod theme;
 mod ui;
+mod writer;
 
 use app::{App, Mode};
 
@@ -161,6 +162,10 @@ fn main() -> io::Result<()> {
             session.as_deref(),
             &who_name,
         );
+    }
+
+    if let Some(cmd) = &args.writer_cmd {
+        run_writer_cmd(cmd, args.writer.as_deref());
     }
 
     // Resolve the theme and topic template before touching the terminal so
@@ -958,6 +963,48 @@ fn queue_write(store: &store::Store, id: &str, session: Option<&str>, who_name: 
         die_with(1, &format!("cannot write '{id}': {e}"));
     }
     std::process::exit(0)
+}
+
+/// `cassette writer register|list|whoami`. Rendering lives in `writer.rs` as
+/// pure functions over `&Store`; this is the one place that turns their
+/// results into exit codes.
+///
+/// `register` is the only command that can fail with `WriterError`: `list`
+/// and `whoami` only ever see an I/O error reading the registry (exit 1). A
+/// `KindMismatch` from `register` is a usage error (exit 2) — the caller
+/// asked to register a name under a kind it already holds a different one
+/// under, not a system failure.
+fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
+    let store = store::Store::new(store_root());
+    match cmd {
+        cli::WriterCmd::Register { name, kind } => match writer::register(&store, name, *kind) {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0)
+            }
+            Err(e @ store::writers::WriterError::KindMismatch { .. }) => {
+                die_with(2, &e.to_string())
+            }
+            Err(e @ store::writers::WriterError::Io(_)) => die_with(1, &e.to_string()),
+        },
+        cli::WriterCmd::List => match writer::list(&store) {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0)
+            }
+            Err(e) => die_with(1, &e),
+        },
+        cli::WriterCmd::Whoami => {
+            let who_name = resolve_writer_name(writer_flag).unwrap_or_else(|e| die_with(2, &e));
+            match writer::whoami(&store, &who_name) {
+                Ok(msg) => {
+                    println!("{msg}");
+                    std::process::exit(0)
+                }
+                Err(e) => die_with(1, &e),
+            }
+        }
+    }
 }
 
 /// The writer to act as: `--writer`, else `$USER`. There is deliberately no

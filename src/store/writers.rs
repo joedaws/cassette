@@ -89,16 +89,6 @@ pub struct Writers {
     pub writers: BTreeMap<String, Writer>,
 }
 
-impl Writers {
-    /// The id registered under `name`, if any.
-    pub fn find_by_name(&self, name: &str) -> Option<&str> {
-        self.writers
-            .iter()
-            .find(|(_, w)| w.name == name)
-            .map(|(id, _)| id.as_str())
-    }
-}
-
 /// A missing registry is an empty one — the first writer creates it. Every
 /// OTHER read failure propagates: `read_to_string` also errors on
 /// permission-denied, on a directory, and on non-UTF-8 content, and treating
@@ -125,13 +115,15 @@ pub(crate) fn write(root: &Path, w: &Writers) -> io::Result<()> {
 /// `resolve`, which differ in what they do with the result, not in how they
 /// find it. The map is keyed by id, so this is a linear scan over values.
 ///
-/// Deliberately a separate, private helper rather than an extension of
-/// `Writers::find_by_name`: that method is `pub`, returns only `Option<&str>`,
-/// and has its own direct test asserting exactly that shape (plus two more
-/// call sites in `store::mod`'s tests) — widening its return type to include
-/// `Kind` would ripple into all of those for a shape only `ensure`/`resolve`
-/// need internally.
-fn lookup_by_name(all: &Writers, name: &str) -> Option<(String, Kind)> {
+/// `pub(crate)` rather than private: `writer::render_whoami` needs this exact
+/// shape (id + kind) too, and giving it a third copy of the same scan would
+/// reintroduce the duplication `ensure`/`resolve` were collapsed onto this
+/// helper to remove. The older `Writers::find_by_name` (id only, `pub`) was
+/// removed rather than widened: once Task 5 needed the same lookup, keeping
+/// two near-identical scans around — one narrow and public, one wider and
+/// crate-only — would have been the very duplication this helper exists to
+/// avoid, and `find_by_name` had no production caller of its own, only tests.
+pub(crate) fn lookup_by_name(all: &Writers, name: &str) -> Option<(String, Kind)> {
     all.writers
         .iter()
         .find(|(_, w)| w.name == name)
@@ -344,20 +336,5 @@ mod tests {
         let (again, _) = resolve(dir.path(), "joseph").expect("again");
         assert_eq!(first, again, "no second id minted");
         assert_eq!(read(dir.path()).expect("read").writers.len(), 1);
-    }
-
-    #[test]
-    fn find_by_name_locates_an_existing_writer() {
-        let mut w = Writers::default();
-        w.writers.insert(
-            "id-1".to_string(),
-            Writer {
-                name: "joseph".to_string(),
-                kind: Kind::Human,
-                created: String::new(),
-            },
-        );
-        assert_eq!(w.find_by_name("joseph"), Some("id-1"));
-        assert_eq!(w.find_by_name("nobody"), None);
     }
 }

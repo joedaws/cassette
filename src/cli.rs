@@ -23,6 +23,19 @@ pub struct Args {
     pub queue_write: Option<(String, Option<String>)>,
     /// writer to act as (default: $USER)
     pub writer: Option<String>,
+    /// `writer register|list|whoami`, if that's what was invoked.
+    pub writer_cmd: Option<WriterCmd>,
+}
+
+/// `writer …` as `main()` consumes it.
+#[derive(Debug, PartialEq)]
+pub enum WriterCmd {
+    Register {
+        name: String,
+        kind: crate::store::writers::Kind,
+    },
+    List,
+    Whoami,
 }
 
 #[derive(Parser, Debug)]
@@ -104,6 +117,11 @@ enum Command {
         #[command(subcommand)]
         action: QueueAction,
     },
+    /// register and inspect writers
+    Writer {
+        #[command(subcommand)]
+        action: WriterAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -116,6 +134,37 @@ enum QueueAction {
         #[arg(long, value_name = "ID")]
         session: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum WriterAction {
+    /// register a writer; the kind is fixed at registration
+    Register {
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        /// human or agent — what this writer is permitted to do
+        #[arg(long, value_name = "KIND")]
+        kind: WriterKindArg,
+    },
+    /// list registered writers
+    List,
+    /// show the writer this invocation acts as
+    Whoami,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum WriterKindArg {
+    Human,
+    Agent,
+}
+
+impl From<WriterKindArg> for crate::store::writers::Kind {
+    fn from(k: WriterKindArg) -> crate::store::writers::Kind {
+        match k {
+            WriterKindArg::Human => crate::store::writers::Kind::Human,
+            WriterKindArg::Agent => crate::store::writers::Kind::Agent,
+        }
+    }
 }
 
 impl Cli {
@@ -143,6 +192,16 @@ impl Cli {
             Some(Command::Queue { action }) => match action {
                 QueueAction::Write { id, session } => args.queue_write = Some((id, session)),
             },
+            Some(Command::Writer { action }) => {
+                args.writer_cmd = Some(match action {
+                    WriterAction::Register { name, kind } => WriterCmd::Register {
+                        name,
+                        kind: kind.into(),
+                    },
+                    WriterAction::List => WriterCmd::List,
+                    WriterAction::Whoami => WriterCmd::Whoami,
+                });
+            }
         }
         args
     }

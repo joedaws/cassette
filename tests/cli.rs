@@ -169,3 +169,60 @@ fn the_writer_flag_is_global() {
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(text.contains("--writer"), "{text}");
 }
+
+#[test]
+fn writer_register_then_list_then_whoami() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let reg = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(reg.status.code(), Some(0), "{}", stderr(&reg));
+
+    let list = Command::new(bin())
+        .args(["writer", "list"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let text = String::from_utf8_lossy(&list.stdout).to_string();
+    assert!(text.contains("bot"), "{text}");
+    assert!(text.contains("agent"), "{text}");
+
+    let who = Command::new(bin())
+        .args(["--writer", "bot", "writer", "whoami"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let text = String::from_utf8_lossy(&who.stdout).to_string();
+    assert!(text.contains("bot"), "{text}");
+    assert!(
+        text.contains("agent"),
+        "kind comes from the registry: {text}"
+    );
+}
+
+#[test]
+fn registering_a_known_name_with_a_different_kind_exits_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let first = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(first.status.code(), Some(0));
+
+    let second = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "human"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(second.status.code(), Some(2), "{}", stderr(&second));
+    assert!(
+        stderr(&second).contains("already registered"),
+        "{}",
+        stderr(&second)
+    );
+}
