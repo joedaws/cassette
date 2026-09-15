@@ -913,14 +913,7 @@ fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
     // this is where that lookup will plug in rather than a second `resolve`.
     let (writer, _kind) = match store.resolve_writer(&whoami()) {
         Ok(w) => w,
-        // `resolve_writer` never rejects — it never declares a kind, so
-        // there is nothing to mismatch. The `KindMismatch` arm exists only
-        // because `WriterError` is shared with `ensure_writer`; matched
-        // here for exhaustiveness, not because it can occur.
-        Err(e @ store::writers::WriterError::KindMismatch { .. }) => die_with(2, &e.to_string()),
-        Err(store::writers::WriterError::Io(e)) => {
-            die_with(1, &format!("cannot register a writer: {e}"))
-        }
+        Err(e) => die_with(1, &format!("cannot register a writer: {e}")),
     };
     let who = store::lock::Attribution::for_now(&writer, &whoami());
 

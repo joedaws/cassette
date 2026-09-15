@@ -121,17 +121,29 @@ pub(crate) fn write(root: &Path, w: &Writers) -> io::Result<()> {
     crate::store::atomic_write(&root.join(WRITERS_FILE), &text)
 }
 
+/// The id and kind registered under `name`, if any. Shared by `ensure` and
+/// `resolve`, which differ in what they do with the result, not in how they
+/// find it. The map is keyed by id, so this is a linear scan over values.
+///
+/// Deliberately a separate, private helper rather than an extension of
+/// `Writers::find_by_name`: that method is `pub`, returns only `Option<&str>`,
+/// and has its own direct test asserting exactly that shape (plus two more
+/// call sites in `store::mod`'s tests) — widening its return type to include
+/// `Kind` would ripple into all of those for a shape only `ensure`/`resolve`
+/// need internally.
+fn lookup_by_name(all: &Writers, name: &str) -> Option<(String, Kind)> {
+    all.writers
+        .iter()
+        .find(|(_, w)| w.name == name)
+        .map(|(id, w)| (id.clone(), w.kind))
+}
+
 /// The id for `name`, registering it on first sight. Idempotent for a matching
 /// `kind`; a mismatch is rejected rather than silently updated — see
 /// `WriterError::KindMismatch`.
 pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, WriterError> {
     let mut all = read(root)?;
-    if let Some((id, existing)) = all
-        .writers
-        .iter()
-        .find(|(_, w)| w.name == name)
-        .map(|(id, w)| (id.clone(), w.kind))
-    {
+    if let Some((id, existing)) = lookup_by_name(&all, name) {
         if existing != kind {
             return Err(WriterError::KindMismatch {
                 name: name.to_string(),
@@ -162,14 +174,15 @@ pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, Writ
 /// person choose one. A brand-new name defaults to human — the spec's
 /// "auto-registered from $USER on first run" — and anyone who wants to be an
 /// agent registers first.
-pub(crate) fn resolve(root: &Path, name: &str) -> Result<(String, Kind), WriterError> {
+///
+/// Returns `io::Result` rather than `Result<_, WriterError>`: this function
+/// declares no kind, so a mismatch is not a state it can reach. Using the
+/// shared error type would put an unreachable `KindMismatch` arm in every
+/// caller, enforced by a comment — which is the same thing
+/// `WriterError::KindMismatch` exists to avoid.
+pub(crate) fn resolve(root: &Path, name: &str) -> io::Result<(String, Kind)> {
     let mut all = read(root)?;
-    if let Some((id, kind)) = all
-        .writers
-        .iter()
-        .find(|(_, w)| w.name == name)
-        .map(|(id, w)| (id.clone(), w.kind))
-    {
+    if let Some((id, kind)) = lookup_by_name(&all, name) {
         return Ok((id, kind));
     }
     let id = ids::new_id();

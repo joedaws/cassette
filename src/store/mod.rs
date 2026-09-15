@@ -284,10 +284,7 @@ impl Store {
     /// The id and kind for `name`, registering as a human on first sight.
     /// Used by every command that writes; only `writer register` declares a
     /// kind. See `writers::resolve`.
-    pub fn resolve_writer(
-        &self,
-        name: &str,
-    ) -> Result<(String, writers::Kind), writers::WriterError> {
+    pub fn resolve_writer(&self, name: &str) -> io::Result<(String, writers::Kind)> {
         // `_registry`, NOT `_`: see `ensure_writer`. Same read-modify-write,
         // same race if the guard drops early.
         let _registry = self.lock_registry()?;
