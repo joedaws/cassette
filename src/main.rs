@@ -19,6 +19,7 @@ mod cli;
 mod config;
 mod find;
 mod output;
+mod queue;
 mod stats;
 mod store;
 mod theme;
@@ -154,14 +155,17 @@ fn main() -> io::Result<()> {
     }
 
     if let Some((id, session)) = &args.queue_write {
-        let who_name =
-            resolve_writer_name(args.writer.as_deref()).unwrap_or_else(|e| die_with(2, &e));
-        queue_write(
-            &store::Store::new(store_root()),
-            id,
-            session.as_deref(),
-            &who_name,
-        );
+        let store = store::Store::new(store_root());
+        let who_name = match resolve_writer_name(args.writer.as_deref()) {
+            Ok(w) => w,
+            Err(msg) => die_with(2, &msg),
+        };
+        match queue::write(&store, id, session.as_deref(), &who_name) {
+            Ok(()) => std::process::exit(0),
+            Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+            Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+            Err(queue::QueueError::Io(m)) => die_with(1, &m),
+        }
     }
 
     if let Some(cmd) = &args.writer_cmd {
@@ -892,79 +896,6 @@ fn die(msg: &str) -> ! {
     std::process::exit(2);
 }
 
-/// `cassette queue write <ID>`: acquire the cassette's lock, THEN read the body
-/// from stdin, write, and release.
-///
-/// The ordering is deliberate and is what makes the concurrency tests
-/// deterministic: a child spawned with an open stdin pipe is provably holding
-/// the lock, with no sleeps and no polling, and closing the pipe releases it.
-fn queue_write(store: &store::Store, id: &str, session: Option<&str>, who_name: &str) -> ! {
-    let session = match session
-        .map(str::to_string)
-        .map_or_else(|| store.active_session(), |s| Ok(Some(s)))
-    {
-        Ok(Some(s)) => s,
-        Ok(None) => die_with(2, "no active session; pass --session"),
-        Err(e) => die_with(1, &format!("cannot read the active session: {e}")),
-    };
-
-    // Registration happens BEFORE acquisition, even though failing fast on a
-    // bad lock looks more logical: two writers racing for the same cassette
-    // must both land in writers.toml even when one of them loses the lock.
-    //
-    // Resolved, not asserted: a write must not declare `Kind::Human` on every
-    // call, or a writer already registered as an agent could never write at
-    // all once a `kind` mismatch became an error. Only `writer register`
-    // declares a kind; every write path defers to whatever is already on
-    // record, registering brand-new names as human (the spec's
-    // "auto-registered from $USER on first run").
-    //
-    // `_kind` is unused today: nothing here needs to tell a human from an
-    // agent yet. 4b's `queue close` is where it starts to matter (an agent
-    // refuses to close a cassette whose `locked_by` is set; a human may), so
-    // this is where that lookup will plug in rather than a second `resolve`.
-    let (writer, _kind) = match store.resolve_writer(who_name) {
-        Ok(w) => w,
-        Err(e) => die_with(1, &format!("cannot register a writer: {e}")),
-    };
-    let who = store::lock::Attribution::for_now(&writer, who_name);
-
-    let guard = match store.lock(&session, id, &who) {
-        Ok(g) => g,
-        Err(store::lock::LockError::Busy { holder, .. }) => {
-            let who = holder
-                .map(|a| format!("{} (since {})", a.name, a.since))
-                .unwrap_or_else(|| "another writer".to_string());
-            die_with(3, &format!("'{id}' is open by {who} — try again later"))
-        }
-        // A distinct variant from `LockError::Io`, so this is a usage error
-        // (2) by construction rather than by matching on `io::ErrorKind` and
-        // hoping `acquire` never surfaces `NotFound` for another reason.
-        Err(store::lock::LockError::NoSuchCassette { .. }) => {
-            die_with(2, &format!("no cassette '{id}' in session '{session}'"))
-        }
-        Err(store::lock::LockError::Io(e)) => die_with(1, &format!("cannot lock '{id}': {e}")),
-    };
-
-    // Lock first, stdin second. Reversing these would make the tests racy.
-    let mut body = String::new();
-    if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut body) {
-        die_with(1, &format!("cannot read stdin: {e}"));
-    }
-
-    let current = match guard.read() {
-        Ok(c) => c,
-        Err(e) => die_with(1, &format!("cannot read '{id}': {e}")),
-    };
-    let mut m = current.meta;
-    m.last_writer = writer;
-    m.updated_at = store::meta::now_utc();
-    if let Err(e) = guard.write(&m, &body) {
-        die_with(1, &format!("cannot write '{id}': {e}"));
-    }
-    std::process::exit(0)
-}
-
 /// `cassette writer register|list|whoami`. Rendering lives in `writer.rs` as
 /// pure functions over `&Store`; this is the one place that turns their
 /// results into exit codes.
@@ -1026,7 +957,7 @@ fn resolve_writer_name(cli: Option<&str>) -> Result<String, String> {
 }
 
 /// Exit with an arbitrary code — unlike `die`, which is only ever a CLI usage
-/// error (always 2, always suggesting `--help`). `queue_write`'s failures are
+/// error (always 2, always suggesting `--help`). `queue::write`'s failures are
 /// domain errors (a missing session, a busy lock, a real I/O failure) where
 /// "try --help" would not tell the caller anything useful, and they span
 /// three different exit codes `die` cannot express.
