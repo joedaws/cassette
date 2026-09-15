@@ -573,6 +573,34 @@ phases, each independently testable and each leaving the tool working.
    is the phase that should prove it.
 4. **CLI commands.** `session`, `queue`, `writer`, `--json`, exit codes. At the end of
    this phase an agent can drive the queue end-to-end with no TUI involvement.
+
+   **Split into three sub-phases (decided 2026-09-14).** As written this is ~18
+   subcommands across three namespaces plus a JSON contract with derived fields plus
+   three new exit codes — several times the size of Phase 2 or Phase 3, and past the
+   500-line threshold this document sets for decomposition. Each sub-phase leaves the
+   tool working:
+
+   - **4a — Foundations and writers.** The defects Phases 2 and 3 carried forward, then
+     `--writer` and `writer register` / `list` / `whoami`. Attribution has to be correct
+     *before* any queue command writes records that depend on it: `kind` is load-bearing
+     in this spec (an `agent` refuses to close a cassette whose `locked_by` is set; a
+     `human` may), and `writers::ensure` currently ignores `kind` for a name it already
+     knows, so an agent registered as a human stays one permanently with no repair path.
+     Also fixes `priority::last`/`between` overflow — `queue new` and `queue move` are
+     the first callers to take user-supplied priorities — gives `LockError::Busy` the
+     cassette id it lacks, adds `Store::holds` so a caller cannot be told it is blocked
+     by itself, and lifts `queue write` out of `main.rs` into a per-command module
+     matching `stats.rs`/`find.rs`.
+   - **4b — Session and queue core.** `session new` / `list` / `use` / `alias`;
+     `queue list` / `next` / `new` / `show` / `close` / `reopen` / `move`; exit codes 5
+     and 6. `queue move` is the first real consumer of `lock_many`, which is why
+     `Store::holds` lands in 4a.
+   - **4c — JSON and the sticky lock.** The `--json` contract including the derived
+     `waiting_on` / `busy` / `words` fields, `queue lock` / `unlock`, and exit code 4.
+
+   **`cassette sessions` — the interactive picker ("15 recent, 'a' = all") — moves to
+   Phase 5.** It is an interactive UI, not a CLI command, and belongs with the TUI work
+   rather than with the scriptable surface an agent drives.
 5. **TUI integration.** Per-cassette autosave, flush-on-blur, live-sync polling and
    `merge_external`, read-only banner for busy cassettes, priority ordering, the collapsed
    closed row, sticky-lock indicators.
