@@ -249,6 +249,63 @@ more than one:
   gratitude: 120 · cassette 2: 227
 ```
 
+## The session store (in progress)
+
+Cassette is growing a second way to hold your writing: a **session store**, where
+each cassette is its own file, so you and one or more agents can write different
+cassettes in the same session without overwriting each other. It is being built
+in phases and is not yet wired into the TUI — today the only command that reaches
+it is `cassette queue write`.
+
+The store lives under `~/.local/share/cassette/`, or wherever
+`$CASSETTE_DATA_DIR` points:
+
+```
+~/.local/share/cassette/
+  writers.toml                     # who may be credited with writing
+  active                           # id of the session in use
+  .locks/writers                   # lock anchor for the registry
+  sessions/<session id>/
+    session.toml
+    cassettes/<slug>-<id>.md       # one file per cassette
+    .locks/<id>                    # lock anchor, one per cassette
+```
+
+The whole directory is created `0700` — freewriting is private by default, and
+the mode is set as the directory is created rather than tightened afterwards, so
+it is never briefly readable by other users on a shared machine.
+
+Writing a cassette takes a lock on its `.locks/<id>` anchor first. If someone
+else holds it you get exit code 3 and a message naming them, and the right move
+is to write a different cassette rather than wait. The lock is held by the
+kernel, so it is released even if a writer is killed outright — there is nothing
+to clean up and no stale-lock state to repair.
+
+### `writers.toml` is managed by cassette, not by you
+
+Every cassette records *who* created it and who wrote it last, by writer id.
+`writers.toml` is what turns those ids back into a name and a kind
+(`human` or `agent`).
+
+**Avoid editing it by hand, and never while cassette is running.** It is not
+protected by file permissions — the reason is how it is written:
+
+- Cassette takes a lock and rewrites the **whole file** on every change. Your
+  editor does not take that lock, so an edit saved while a write is in flight is
+  silently overwritten in full.
+- If the file does not parse, writes fail loudly rather than quietly starting
+  over — which is the safe behaviour, but it does mean a stray keystroke stops
+  you writing until you fix it.
+- Deleting an entry orphans every cassette that credits it: the id stays in
+  those files and no longer resolves to anyone.
+- Reordering entries achieves nothing. The file is rewritten in a fixed order
+  (by writer id, which is roughly registration order), so any hand-sorting is
+  normalised away on the next write.
+
+There is one edit that is currently legitimate: correcting a writer's `kind` if
+it was registered wrongly. A command for that may come later; until then, do it
+while cassette is not running.
+
 ## Configuration
 
 Cassette reads `$XDG_CONFIG_HOME/cassette/config.toml` — that's
@@ -334,6 +391,7 @@ Commands:
   stats   streak, weekly/monthly notes and words, totals
   find    list recent notes newest-first; TEXT filters by name, topic, or content
   themes  list available themes (built-in and from config.toml)
+  queue   write a cassette in the session store, holding its lock
 
 Options:
   -t <MINUTES>        countdown timer in minutes
