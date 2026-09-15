@@ -901,7 +901,12 @@ fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
     // must both land in writers.toml even when one of them loses the lock.
     let writer = match store.ensure_writer(&whoami(), store::writers::Kind::Human) {
         Ok(w) => w,
-        Err(e) => die_with(1, &format!("cannot register a writer: {e}")),
+        // A distinct variant from `WriterError::Io`, so this is a usage error
+        // (2) by construction rather than by matching on `io::ErrorKind`.
+        Err(e @ store::writers::WriterError::KindMismatch { .. }) => die_with(2, &e.to_string()),
+        Err(store::writers::WriterError::Io(e)) => {
+            die_with(1, &format!("cannot register a writer: {e}"))
+        }
     };
     let who = store::lock::Attribution::for_now(&writer, &whoami());
 

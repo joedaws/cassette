@@ -268,7 +268,11 @@ impl Store {
     /// both insert, and the second write clobbers the first — which is exactly
     /// the first-run case, where the TUI registers from `$USER` while an agent
     /// registers itself.
-    pub fn ensure_writer(&self, name: &str, kind: writers::Kind) -> io::Result<String> {
+    pub fn ensure_writer(
+        &self,
+        name: &str,
+        kind: writers::Kind,
+    ) -> Result<String, writers::WriterError> {
         // `_registry`, NOT `_`: a bare underscore drops the guard immediately
         // and silently reopens the lost-update race this whole function exists
         // to close. No test catches the difference — the critical section is

@@ -27,6 +27,53 @@ pub enum Kind {
     Agent,
 }
 
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Human => "human",
+            Kind::Agent => "agent",
+        }
+    }
+}
+
+/// Why a writer could not be resolved.
+#[derive(Debug)]
+pub enum WriterError {
+    /// This name is registered with a different `kind`. A distinct variant
+    /// rather than an `Io(InvalidInput)` so a caller renders a usage error
+    /// without matching on `io::ErrorKind`.
+    KindMismatch {
+        name: String,
+        registered: Kind,
+        requested: Kind,
+    },
+    Io(io::Error),
+}
+
+impl std::fmt::Display for WriterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriterError::KindMismatch {
+                name,
+                registered,
+                requested,
+            } => write!(
+                f,
+                "'{name}' is already registered as {} — cannot register as {}",
+                registered.as_str(),
+                requested.as_str()
+            ),
+            WriterError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<io::Error> for WriterError {
+    fn from(e: io::Error) -> WriterError {
+        WriterError::Io(e)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Writer {
     pub name: String,
@@ -74,12 +121,25 @@ pub(crate) fn write(root: &Path, w: &Writers) -> io::Result<()> {
     crate::store::atomic_write(&root.join(WRITERS_FILE), &text)
 }
 
-/// The id for `name`, registering it on first sight. Idempotent: calling it
-/// twice with the same name returns the same id rather than minting a second.
-pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> io::Result<String> {
+/// The id for `name`, registering it on first sight. Idempotent for a matching
+/// `kind`; a mismatch is rejected rather than silently updated — see
+/// `WriterError::KindMismatch`.
+pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, WriterError> {
     let mut all = read(root)?;
-    if let Some(id) = all.find_by_name(name) {
-        return Ok(id.to_string());
+    if let Some((id, existing)) = all
+        .writers
+        .iter()
+        .find(|(_, w)| w.name == name)
+        .map(|(id, w)| (id.clone(), w.kind))
+    {
+        if existing != kind {
+            return Err(WriterError::KindMismatch {
+                name: name.to_string(),
+                registered: existing,
+                requested: kind,
+            });
+        }
+        return Ok(id);
     }
     let id = ids::new_id();
     all.writers.insert(
@@ -170,6 +230,45 @@ mod tests {
         let all = read(dir.path()).expect("read");
         assert_eq!(all.writers.len(), 2);
         assert_eq!(all.writers[&agent].kind, Kind::Agent);
+    }
+
+    #[test]
+    fn re_registering_with_a_different_kind_is_rejected() {
+        // `kind` is what the permission boundary rests on: an agent refuses to
+        // close a cassette whose `locked_by` is set, a human may. Letting a
+        // second registration silently flip it would let any caller change an
+        // identity — including an agent re-registering itself as human.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = ensure(dir.path(), "bot", Kind::Agent).expect("first");
+        match ensure(dir.path(), "bot", Kind::Human) {
+            Err(WriterError::KindMismatch {
+                name,
+                registered,
+                requested,
+            }) => {
+                assert_eq!(name, "bot");
+                assert_eq!(registered, Kind::Agent);
+                assert_eq!(requested, Kind::Human);
+            }
+            other => panic!("expected KindMismatch, got {other:?}"),
+        }
+        // And the record must be untouched.
+        let all = read(dir.path()).expect("read");
+        assert_eq!(
+            all.writers[&id].kind,
+            Kind::Agent,
+            "the registered kind stands"
+        );
+        assert_eq!(all.writers.len(), 1, "no second id was minted");
+    }
+
+    #[test]
+    fn re_registering_with_the_same_kind_is_still_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ensure(dir.path(), "joseph", Kind::Human).expect("first");
+        let again = ensure(dir.path(), "joseph", Kind::Human).expect("again");
+        assert_eq!(first, again);
+        assert_eq!(read(dir.path()).expect("read").writers.len(), 1);
     }
 
     #[test]
