@@ -902,9 +902,9 @@ fn die(msg: &str) -> ! {
 ///
 /// `register` is the only command that can fail with `WriterError`: `list`
 /// and `whoami` only ever see an I/O error reading the registry (exit 1). A
-/// `KindMismatch` from `register` is a usage error (exit 2) — the caller
-/// asked to register a name under a kind it already holds a different one
-/// under, not a system failure.
+/// `KindMismatch` or `EmptyName` from `register` is a usage error (exit 2) —
+/// the caller asked for something the registry cannot honor, not a system
+/// failure.
 fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
     let store = store::Store::new(store_root());
     match cmd {
@@ -916,6 +916,7 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
             Err(e @ store::writers::WriterError::KindMismatch { .. }) => {
                 die_with(2, &e.to_string())
             }
+            Err(e @ store::writers::WriterError::EmptyName) => die_with(2, &e.to_string()),
             Err(e @ store::writers::WriterError::Io(_)) => die_with(1, &e.to_string()),
         },
         cli::WriterCmd::List => match writer::list(&store) {

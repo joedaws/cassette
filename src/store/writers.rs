@@ -47,6 +47,11 @@ pub enum WriterError {
         registered: Kind,
         requested: Kind,
     },
+    /// The name has no characters left after trimming. A distinct variant
+    /// rather than an `Io(InvalidInput)`, for the same reason as
+    /// `KindMismatch`: the caller renders a usage error without matching on
+    /// `io::ErrorKind`.
+    EmptyName,
     Io(io::Error),
 }
 
@@ -63,6 +68,7 @@ impl std::fmt::Display for WriterError {
                 registered.as_str(),
                 requested.as_str()
             ),
+            WriterError::EmptyName => write!(f, "writer name cannot be blank"),
             WriterError::Io(e) => write!(f, "{e}"),
         }
     }
@@ -133,7 +139,18 @@ pub(crate) fn lookup_by_name(all: &Writers, name: &str) -> Option<(String, Kind)
 /// The id for `name`, registering it on first sight. Idempotent for a matching
 /// `kind`; a mismatch is rejected rather than silently updated — see
 /// `WriterError::KindMismatch`.
+///
+/// Trims `name` before doing anything else, and rejects an empty-after-trim
+/// name outright: this is the store boundary, so it is the one place that
+/// normalisation cannot be skipped by a caller that forgot to trim (the CLI,
+/// or the Phase 5 TUI). Skipping the trim here let `" bot "` register as a
+/// name distinct from `"bot"` — a silent identity split once anything trims
+/// before comparing, which `--writer` already did.
 pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, WriterError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(WriterError::EmptyName);
+    }
     let mut all = read(root)?;
     if let Some((id, existing)) = lookup_by_name(&all, name) {
         if existing != kind {
@@ -167,12 +184,18 @@ pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, Writ
 /// "auto-registered from $USER on first run" — and anyone who wants to be an
 /// agent registers first.
 ///
-/// Returns `io::Result` rather than `Result<_, WriterError>`: this function
-/// declares no kind, so a mismatch is not a state it can reach. Using the
-/// shared error type would put an unreachable `KindMismatch` arm in every
-/// caller, enforced by a comment — which is the same thing
-/// `WriterError::KindMismatch` exists to avoid.
-pub(crate) fn resolve(root: &Path, name: &str) -> io::Result<(String, Kind)> {
+/// Trims `name` first and rejects an empty-after-trim name, for the same
+/// store-boundary reason as `ensure`.
+///
+/// Returns `Result<_, WriterError>` rather than `io::Result`: it never
+/// declares a kind, so `KindMismatch` is not a state it can reach, but an
+/// empty name is — and it needs `WriterError::EmptyName` to say so distinctly
+/// rather than via `io::ErrorKind`.
+pub(crate) fn resolve(root: &Path, name: &str) -> Result<(String, Kind), WriterError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(WriterError::EmptyName);
+    }
     let mut all = read(root)?;
     if let Some((id, kind)) = lookup_by_name(&all, name) {
         return Ok((id, kind));
@@ -336,5 +359,39 @@ mod tests {
         let (again, _) = resolve(dir.path(), "joseph").expect("again");
         assert_eq!(first, again, "no second id minted");
         assert_eq!(read(dir.path()).expect("read").writers.len(), 1);
+    }
+
+    #[test]
+    fn a_blank_name_cannot_be_registered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for blank in ["", "   ", "\t"] {
+            match ensure(dir.path(), blank, Kind::Agent) {
+                Err(WriterError::EmptyName) => {}
+                other => panic!("{blank:?} must be rejected, got {other:?}"),
+            }
+        }
+        assert!(read(dir.path()).expect("read").writers.is_empty());
+    }
+
+    #[test]
+    fn a_padded_name_normalises_to_one_identity() {
+        // The identity-split bug: " bot " registered, then `--writer " bot "`
+        // trims to "bot" and finds nothing — so a second writer is born.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = ensure(dir.path(), " bot ", Kind::Agent).expect("register padded");
+        let again = ensure(dir.path(), "bot", Kind::Agent).expect("register trimmed");
+        assert_eq!(first, again, "padded and trimmed must be the SAME writer");
+        let all = read(dir.path()).expect("read");
+        assert_eq!(all.writers.len(), 1, "no second identity");
+        assert_eq!(all.writers[&first].name, "bot", "stored trimmed");
+    }
+
+    #[test]
+    fn resolve_also_normalises() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registered = ensure(dir.path(), "bot", Kind::Agent).expect("register");
+        let (id, kind) = resolve(dir.path(), "  bot  ").expect("resolve padded");
+        assert_eq!(id, registered);
+        assert_eq!(kind, Kind::Agent, "not a fresh human identity");
     }
 }
