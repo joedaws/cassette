@@ -52,6 +52,9 @@ pub enum WriterError {
     /// `KindMismatch`: the caller renders a usage error without matching on
     /// `io::ErrorKind`.
     EmptyName,
+    /// `name` is not in the registry, and the caller is not allowed to
+    /// auto-create it — see `require_registered`.
+    Unregistered(String),
     Io(io::Error),
 }
 
@@ -69,6 +72,10 @@ impl std::fmt::Display for WriterError {
                 requested.as_str()
             ),
             WriterError::EmptyName => write!(f, "writer name cannot be blank"),
+            WriterError::Unregistered(name) => write!(
+                f,
+                "'{name}' is not a registered writer — run 'cassette writer register' first"
+            ),
             WriterError::Io(e) => write!(f, "{e}"),
         }
     }
@@ -176,6 +183,8 @@ pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, Writ
 }
 
 /// The id and kind for `name`, registering it as a human on first sight.
+/// Only for a name that is allowed to bootstrap itself — today, the `$USER`
+/// default. See `require_registered` for a name that must already exist.
 ///
 /// Unlike `ensure`, this declares nothing: an existing writer's kind is
 /// returned as it stands, so a registered agent is not asked to claim it is a
@@ -211,6 +220,26 @@ pub(crate) fn resolve(root: &Path, name: &str) -> Result<(String, Kind), WriterE
     );
     write(root, &all)?;
     Ok((id, Kind::Human))
+}
+
+/// The id and kind for `name`, requiring that it already be registered.
+///
+/// The strict counterpart to `resolve`: where `resolve` bootstraps an unknown
+/// `$USER` as human on first run (the case the spec blesses), this is for a
+/// name a caller named *explicitly* — `--writer` — where an unknown name is a
+/// typo, not a first run. Auto-creating it would fail open, since the
+/// default kind is `Human`, the *privileged* one; failing loudly here instead
+/// means a typo is caught rather than silently spawning a second identity.
+///
+/// Trims `name` first and rejects an empty-after-trim name, same as `ensure`
+/// and `resolve`.
+pub(crate) fn require_registered(root: &Path, name: &str) -> Result<(String, Kind), WriterError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(WriterError::EmptyName);
+    }
+    let all = read(root)?;
+    lookup_by_name(&all, name).ok_or_else(|| WriterError::Unregistered(name.to_string()))
 }
 
 #[cfg(test)]
@@ -393,5 +422,39 @@ mod tests {
         let (id, kind) = resolve(dir.path(), "  bot  ").expect("resolve padded");
         assert_eq!(id, registered);
         assert_eq!(kind, Kind::Agent, "not a fresh human identity");
+    }
+
+    #[test]
+    fn require_registered_finds_a_known_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registered = ensure(dir.path(), "bot", Kind::Agent).expect("register");
+        let (id, kind) = require_registered(dir.path(), "  bot  ").expect("require");
+        assert_eq!(id, registered, "same writer, and normalised");
+        assert_eq!(kind, Kind::Agent);
+    }
+
+    #[test]
+    fn require_registered_refuses_to_invent_an_unknown_name() {
+        // The Finding 2 fix: an explicit `--writer` naming an unknown writer
+        // must fail loudly (exit 2 upstream) rather than auto-creating a
+        // human — the privileged kind — which would fail open on a typo.
+        let dir = tempfile::tempdir().expect("tempdir");
+        match require_registered(dir.path(), "nosuchwriter") {
+            Err(WriterError::Unregistered(name)) => assert_eq!(name, "nosuchwriter"),
+            other => panic!("expected Unregistered, got {other:?}"),
+        }
+        assert!(
+            read(dir.path()).expect("read").writers.is_empty(),
+            "must not have created anything"
+        );
+    }
+
+    #[test]
+    fn require_registered_rejects_a_blank_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match require_registered(dir.path(), "   ") {
+            Err(WriterError::EmptyName) => {}
+            other => panic!("expected EmptyName, got {other:?}"),
+        }
     }
 }

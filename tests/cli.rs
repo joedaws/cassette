@@ -204,6 +204,70 @@ fn writer_register_then_list_then_whoami() {
 }
 
 #[test]
+fn an_unknown_writer_flag_is_a_usage_error() {
+    // A typo in --writer must fail loudly rather than silently creating a
+    // second identity — and an auto-created one would be `human`, the
+    // privileged kind, so this fails open if it is wrong.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let out = Command::new(bin())
+        .args(["--writer", "nosuchwriter", "writer", "list"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    // `writer list` does not resolve a writer, so this must still succeed —
+    // the point is that merely NAMING an unknown writer is not itself fatal.
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
+    // The command that DOES resolve a writer: `queue write --writer <typo>`
+    // must exit 2 rather than auto-registering a second, human identity.
+    // Hand-built fixture, same shape as tests/lock.rs — no CLI command
+    // creates a session yet.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    const SESSION: &str = "01K5GQ2R8V3XQZ0000000000AB";
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    let cassettes = root.join("sessions").join(SESSION).join("cassettes");
+    std::fs::create_dir_all(&cassettes).expect("mkdir");
+    std::fs::create_dir_all(root.join("sessions").join(SESSION).join(".locks")).expect("mkdir");
+    std::fs::write(
+        root.join("sessions").join(SESSION).join("session.toml"),
+        "created = \"2026-09-14T09:25:57Z\"\n",
+    )
+    .expect("session.toml");
+    std::fs::write(root.join("active"), format!("{SESSION}\n")).expect("active");
+    std::fs::write(
+        cassettes.join(format!("gratitude-{ID}.md")),
+        format!(
+            "---\nid: {ID}\ntopic: gratitude\npriority: 10\nstatus: open\nlocked_by:\n\
+             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             ## Side A\n\noriginal\n"
+        ),
+    )
+    .expect("cassette");
+
+    let out = Command::new(bin())
+        .args(["--writer", "nosuchwriter", "queue", "write", ID])
+        .env("CASSETTE_DATA_DIR", &root)
+        .stdin(std::process::Stdio::piped())
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("nosuchwriter"), "{}", stderr(&out));
+
+    // And the registry must not have gained a second, auto-created identity.
+    let registry = root.join("writers.toml");
+    assert!(
+        !registry.exists(),
+        "an unknown --writer must not create anything: {}",
+        std::fs::read_to_string(&registry).unwrap_or_default()
+    );
+}
+
+#[test]
 fn registering_a_known_name_with_a_different_kind_exits_two() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");

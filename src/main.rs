@@ -156,11 +156,11 @@ fn main() -> io::Result<()> {
 
     if let Some((id, session)) = &args.queue_write {
         let store = store::Store::new(store_root());
-        let who_name = match resolve_writer_name(args.writer.as_deref()) {
+        let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
             Ok(w) => w,
             Err(msg) => die_with(2, &msg),
         };
-        match queue::write(&store, id, session.as_deref(), &who_name) {
+        match queue::write(&store, id, session.as_deref(), &who_name, writer_source) {
             Ok(()) => std::process::exit(0),
             Err(queue::QueueError::Usage(m)) => die_with(2, &m),
             Err(queue::QueueError::Busy(m)) => die_with(3, &m),
@@ -918,6 +918,11 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
             }
             Err(e @ store::writers::WriterError::EmptyName) => die_with(2, &e.to_string()),
             Err(e @ store::writers::WriterError::Io(_)) => die_with(1, &e.to_string()),
+            // `ensure_writer` never looks up without creating, so this never
+            // fires; kept only so the match stays exhaustive as `WriterError`
+            // grows rather than by a wildcard that could later hide a real
+            // new variant.
+            Err(e @ store::writers::WriterError::Unregistered(_)) => die_with(1, &e.to_string()),
         },
         cli::WriterCmd::List => match writer::list(&store) {
             Ok(msg) => {
@@ -927,7 +932,11 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
             Err(e) => die_with(1, &e),
         },
         cli::WriterCmd::Whoami => {
-            let who_name = resolve_writer_name(writer_flag).unwrap_or_else(|e| die_with(2, &e));
+            // `whoami` only ever looks a name up (`writer::render_whoami`
+            // never resolves or creates), so where the name came from makes
+            // no difference here — `.0` drops the `WriterSource`.
+            let (who_name, _source) =
+                resolve_writer_name(writer_flag).unwrap_or_else(|e| die_with(2, &e));
             match writer::whoami(&store, &who_name) {
                 Ok(msg) => {
                     println!("{msg}");
@@ -939,20 +948,27 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
     }
 }
 
-/// The writer to act as: `--writer`, else `$USER`. There is deliberately no
-/// fallback — a shared `"unknown"` identity would silently attribute every
-/// agent's work to the same writer, in a system whose entire purpose is
-/// knowing who wrote what.
-fn resolve_writer_name(cli: Option<&str>) -> Result<String, String> {
+/// The writer to act as, and where that name came from: `--writer`, else
+/// `$USER`. There is deliberately no fallback — a shared `"unknown"` identity
+/// would silently attribute every agent's work to the same writer, in a
+/// system whose entire purpose is knowing who wrote what.
+///
+/// The source travels with the name rather than being flattened away: a
+/// command that resolves a writer (`queue write` today; six more in 4b) must
+/// treat an unregistered `--writer` as a usage error while still bootstrapping
+/// an unregistered `$USER` as a new human writer — see `queue::WriterSource`.
+fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource), String> {
     if let Some(name) = cli {
         let name = name.trim();
         if name.is_empty() {
             return Err("--writer cannot be empty".to_string());
         }
-        return Ok(name.to_string());
+        return Ok((name.to_string(), queue::WriterSource::Flag));
     }
     match std::env::var("USER") {
-        Ok(user) if !user.trim().is_empty() => Ok(user.trim().to_string()),
+        Ok(user) if !user.trim().is_empty() => {
+            Ok((user.trim().to_string(), queue::WriterSource::Env))
+        }
         _ => Err("no writer: $USER is unset, so pass --writer <NAME>".to_string()),
     }
 }

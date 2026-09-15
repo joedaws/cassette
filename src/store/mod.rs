@@ -283,8 +283,9 @@ impl Store {
     }
 
     /// The id and kind for `name`, registering as a human on first sight.
-    /// Used by every command that writes; only `writer register` declares a
-    /// kind. See `writers::resolve`.
+    /// Only for a name allowed to bootstrap itself — today, the `$USER`
+    /// default. See `writers::resolve` and, for a name that must already be
+    /// registered (an explicit `--writer`), `require_writer`.
     pub fn resolve_writer(
         &self,
         name: &str,
@@ -293,6 +294,21 @@ impl Store {
         // same race if the guard drops early.
         let _registry = self.lock_registry()?;
         writers::resolve(&self.root, name)
+    }
+
+    /// The id and kind for `name`, requiring that it already be registered —
+    /// no auto-create. For a name a caller named explicitly (`--writer`),
+    /// where an unknown name is a typo (usage error) rather than a first run.
+    /// See `writers::require_registered`.
+    ///
+    /// Read-only, so unlike `ensure_writer`/`resolve_writer` this does not
+    /// take the registry lock: there is no write for a concurrent registration
+    /// to race.
+    pub fn require_writer(
+        &self,
+        name: &str,
+    ) -> Result<(String, writers::Kind), writers::WriterError> {
+        writers::require_registered(&self.root, name)
     }
 
     /// The active session id, or `None` when no session is active.

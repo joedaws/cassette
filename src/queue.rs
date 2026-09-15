@@ -2,6 +2,24 @@
 //! `next`, `new`, `show`, `close`, `reopen`, `move`.
 
 use crate::store;
+use crate::store::writers::WriterError;
+
+/// Where a writer name came from. The distinction is load-bearing: an
+/// unknown `$USER` is bootstrapped on first run, which the spec blesses,
+/// while an unknown `--writer` is a typo and must fail loudly rather than
+/// silently spawning a second identity — one auto-created as human, the
+/// *privileged* kind, would fail open on exactly that typo.
+///
+/// Every queue command that resolves a writer takes this alongside the name,
+/// so the seven commands 4b adds all pick the same way `write` does here
+/// rather than each re-deriving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriterSource {
+    /// Explicit `--writer`. An unknown name here is a usage error.
+    Flag,
+    /// Derived from `$USER`. An unknown name here is a first run.
+    Env,
+}
 
 /// Why a queue command failed, in the shape `main.rs` maps to an exit code.
 #[derive(Debug)]
@@ -33,6 +51,7 @@ pub fn write(
     id: &str,
     session: Option<&str>,
     who_name: &str,
+    source: WriterSource,
 ) -> Result<(), QueueError> {
     let session = match session
         .map(str::to_string)
@@ -51,25 +70,30 @@ pub fn write(
         }
     };
 
-    // Registration happens BEFORE acquisition, even though failing fast on a
-    // bad lock looks more logical: two writers racing for the same cassette
-    // must both land in writers.toml even when one of them loses the lock.
+    // Registration/lookup happens BEFORE acquisition, even though failing
+    // fast on a bad lock looks more logical: two writers racing for the same
+    // cassette must both land in writers.toml (or both fail cleanly) even
+    // when one of them loses the lock.
     //
-    // Resolved, not asserted: a write must not declare `Kind::Human` on every
-    // call, or a writer already registered as an agent could never write at
-    // all once a `kind` mismatch became an error. Only `writer register`
-    // declares a kind; every write path defers to whatever is already on
-    // record, registering brand-new names as human (the spec's
-    // "auto-registered from $USER on first run").
+    // Which of `resolve_writer`/`require_writer` runs depends on where the
+    // name came from, not on whether it happens to be new: an unknown
+    // `$USER` (`WriterSource::Env`) is a first run (the spec's
+    // "auto-registered from $USER on first run") and is created as human, but
+    // an unknown `--writer` (`WriterSource::Flag`) is a typo and must fail
+    // loudly — exit 2 via `QueueError::Usage` — rather than silently
+    // spawning a second identity as human, the *privileged* kind. Only
+    // `writer register` declares a kind; both paths here defer to whatever
+    // is already on record for a name that already exists.
     //
     // `_kind` is unused today: nothing here needs to tell a human from an
     // agent yet. 4b's `queue close` is where it starts to matter (an agent
     // refuses to close a cassette whose `locked_by` is set; a human may), so
-    // this is where that lookup will plug in rather than a second `resolve`.
-    let (writer, _kind) = match store.resolve_writer(who_name) {
-        Ok(w) => w,
-        Err(e) => return Err(QueueError::Io(format!("cannot register a writer: {e}"))),
-    };
+    // this is where that lookup will plug in rather than a second lookup.
+    let (writer, _kind) = match source {
+        WriterSource::Env => store.resolve_writer(who_name),
+        WriterSource::Flag => store.require_writer(who_name),
+    }
+    .map_err(writer_error_to_queue_error)?;
     let who = store::lock::Attribution::for_now(&writer, who_name);
 
     let guard = match store.lock(&session, id, &who) {
@@ -112,4 +136,20 @@ pub fn write(
         return Err(QueueError::Io(format!("cannot write '{id}': {e}")));
     }
     Ok(())
+}
+
+/// Render a writer-resolution failure as the exit code it deserves.
+/// `EmptyName` and `Unregistered` are usage errors (2): both are about what
+/// the caller asked for, not a system failure. `KindMismatch` cannot actually
+/// reach here — neither `resolve_writer` nor `require_writer` declares a
+/// kind — but the arm stays so this match stays exhaustive as `WriterError`
+/// grows, rather than by a wildcard that would silently swallow a real new
+/// variant into `Io`.
+fn writer_error_to_queue_error(e: WriterError) -> QueueError {
+    match e {
+        WriterError::EmptyName => QueueError::Usage(e.to_string()),
+        WriterError::Unregistered(_) => QueueError::Usage(e.to_string()),
+        WriterError::KindMismatch { .. } => QueueError::Usage(e.to_string()),
+        WriterError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
+    }
 }
