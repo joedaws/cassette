@@ -143,8 +143,6 @@ mod tests {
             Err(WriterError::KindMismatch { name, .. }) => assert_eq!(name, "bot"),
             other => panic!("expected KindMismatch, got {other:?}"),
         }
-        // One call to `ensure_writer`, not two: the registry still holds
-        // exactly the one entry from the first registration.
         assert_eq!(store.writers().expect("read").writers.len(), 1);
     }
 

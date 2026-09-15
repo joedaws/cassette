@@ -112,7 +112,7 @@ enum Command {
     },
     /// list available themes (built-in and from config.toml)
     Themes,
-    /// write a cassette, holding its lock for the duration
+    /// work with the shared cassette queue
     Queue {
         #[command(subcommand)]
         action: QueueAction,

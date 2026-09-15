@@ -1,9 +1,9 @@
 //! Queue ordering and sparse priority insertion.
 //!
 //! Priorities are sparse (10, 20, 30 …) so most insertions are a single
-//! frontmatter edit rather than a renumbering of the whole queue. `first` and
-//! `between` return `None` when a run has no integer gap left; the caller
-//! renumbers just that run, taking just those locks. There is no
+//! frontmatter edit rather than a renumbering of the whole queue. `first`,
+//! `last`, and `between` return `None` when a run has no integer gap left;
+//! the caller renumbers just that run, taking just those locks. There is no
 //! normalize-on-open pass — it would rewrite every cassette.
 
 use crate::store::meta::{CassetteMeta, Status};

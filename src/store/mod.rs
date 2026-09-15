@@ -244,8 +244,9 @@ impl Store {
     /// read-modify-write over a small file, so nobody can wedge it, and a
     /// caller that cannot register a writer has no fallback to fall back to.
     ///
-    /// Deliberately private. `ensure_writer` is the only caller, so blocking
-    /// acquisition cannot leak into a code path where a human could hold it.
+    /// Deliberately private. `ensure_writer` and `resolve_writer` are its only
+    /// callers, so blocking acquisition cannot leak into a code path where a
+    /// human could hold it.
     fn lock_registry(&self) -> io::Result<lock::LockGuard> {
         ensure_private_dir(&self.root)?;
         let anchor = self.root_locks_dir().join("writers");
