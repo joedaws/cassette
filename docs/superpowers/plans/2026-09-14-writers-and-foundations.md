@@ -97,7 +97,12 @@ Add to the test module in `src/store/priority.rs`:
     fn between_refuses_to_overflow() {
         // `hi - lo` overflows before the midpoint guard ever runs.
         assert_eq!(between(i64::MIN, i64::MAX), None, "the span is not representable");
-        assert_eq!(between(i64::MIN, 0), Some(i64::MIN / 2), "a representable span still works");
+        // Also unrepresentable: `0 - i64::MIN` is `i64::MAX + 1`. Returning
+        // None here is correct — it reads as "renumber this run", and real
+        // priorities are positive by construction anyway.
+        assert_eq!(between(i64::MIN, 0), None, "this span overflows too");
+        // A span that IS representable must still produce a midpoint.
+        assert_eq!(between(-10, 10), Some(0), "a representable span still works");
     }
 ```
 
