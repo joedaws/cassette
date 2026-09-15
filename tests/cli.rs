@@ -1,7 +1,11 @@
 use std::process::{Command, Output};
 
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cassette")
+}
+
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_cassette"))
+    Command::new(bin())
         .args(args)
         .output()
         .expect("failed to run the cassette binary")
@@ -138,4 +142,30 @@ fn queue_write_appears_in_help() {
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(text.contains("queue"), "{text}");
+}
+
+#[test]
+fn a_writer_name_is_required_when_user_is_unset() {
+    // No shared "unknown" identity: attribution is the point of the system.
+    let out = Command::new(bin())
+        .args(["queue", "write", "01K5GR7T2M9WPD0000000000AB"])
+        .env_remove("USER")
+        .env("CASSETTE_DATA_DIR", "/nonexistent-store")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--writer"),
+        "the error must name the fix: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn the_writer_flag_is_global() {
+    let out = run(&["--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("--writer"), "{text}");
 }

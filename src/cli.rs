@@ -21,6 +21,8 @@ pub struct Args {
     pub resume: Option<Option<String>>,
     /// `queue write`: the cassette id and the session it lives in.
     pub queue_write: Option<(String, Option<String>)>,
+    /// writer to act as (default: $USER)
+    pub writer: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -66,6 +68,10 @@ struct Cli {
     /// print to stdout on quit instead of writing a file
     #[arg(short = 'o', long = "output", global = true)]
     print_stdout: bool,
+
+    /// writer to act as (default: $USER)
+    #[arg(long, value_name = "NAME", global = true)]
+    writer: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -123,6 +129,7 @@ impl Cli {
             theme: self.theme,
             record: self.record,
             print_stdout: self.print_stdout,
+            writer: self.writer,
             ..Args::default()
         };
         match self.command {

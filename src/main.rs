@@ -153,7 +153,14 @@ fn main() -> io::Result<()> {
     }
 
     if let Some((id, session)) = &args.queue_write {
-        queue_write(&store::Store::new(store_root()), id, session.as_deref());
+        let who_name =
+            resolve_writer_name(args.writer.as_deref()).unwrap_or_else(|e| die_with(2, &e));
+        queue_write(
+            &store::Store::new(store_root()),
+            id,
+            session.as_deref(),
+            &who_name,
+        );
     }
 
     // Resolve the theme and topic template before touching the terminal so
@@ -886,7 +893,7 @@ fn die(msg: &str) -> ! {
 /// The ordering is deliberate and is what makes the concurrency tests
 /// deterministic: a child spawned with an open stdin pipe is provably holding
 /// the lock, with no sleeps and no polling, and closing the pipe releases it.
-fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
+fn queue_write(store: &store::Store, id: &str, session: Option<&str>, who_name: &str) -> ! {
     let session = match session
         .map(str::to_string)
         .map_or_else(|| store.active_session(), |s| Ok(Some(s)))
@@ -911,11 +918,11 @@ fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
     // agent yet. 4b's `queue close` is where it starts to matter (an agent
     // refuses to close a cassette whose `locked_by` is set; a human may), so
     // this is where that lookup will plug in rather than a second `resolve`.
-    let (writer, _kind) = match store.resolve_writer(&whoami()) {
+    let (writer, _kind) = match store.resolve_writer(who_name) {
         Ok(w) => w,
         Err(e) => die_with(1, &format!("cannot register a writer: {e}")),
     };
-    let who = store::lock::Attribution::for_now(&writer, &whoami());
+    let who = store::lock::Attribution::for_now(&writer, who_name);
 
     let guard = match store.lock(&session, id, &who) {
         Ok(g) => g,
@@ -953,9 +960,22 @@ fn queue_write(store: &store::Store, id: &str, session: Option<&str>) -> ! {
     std::process::exit(0)
 }
 
-/// The human's name for attribution: `$USER`, falling back to `unknown`.
-fn whoami() -> String {
-    std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
+/// The writer to act as: `--writer`, else `$USER`. There is deliberately no
+/// fallback — a shared `"unknown"` identity would silently attribute every
+/// agent's work to the same writer, in a system whose entire purpose is
+/// knowing who wrote what.
+fn resolve_writer_name(cli: Option<&str>) -> Result<String, String> {
+    if let Some(name) = cli {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("--writer cannot be empty".to_string());
+        }
+        return Ok(name.to_string());
+    }
+    match std::env::var("USER") {
+        Ok(user) if !user.trim().is_empty() => Ok(user.trim().to_string()),
+        _ => Err("no writer: $USER is unset, so pass --writer <NAME>".to_string()),
+    }
 }
 
 /// Exit with an arbitrary code — unlike `die`, which is only ever a CLI usage
