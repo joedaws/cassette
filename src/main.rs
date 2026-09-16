@@ -157,20 +157,37 @@ fn main() -> io::Result<()> {
 
     if let Some(cmd) = &args.queue_cmd {
         let store = store::Store::new(store_root());
-        let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
-            Ok(w) => w,
-            Err(msg) => die_with(2, &msg),
-        };
-        let result = match cmd {
+        match cmd {
+            // The only queue command that writes, so it's the only one that
+            // needs a writer identity to attribute the write to.
             cli::QueueCmd::Write { id, session } => {
-                queue::write(&store, id, session, &who_name, writer_source)
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                match queue::write(&store, id, session, &who_name, writer_source) {
+                    Ok(()) => std::process::exit(0),
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
             }
-        };
-        match result {
-            Ok(()) => std::process::exit(0),
-            Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-            Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-            Err(queue::QueueError::Io(m)) => die_with(1, &m),
+            // `list` and `show` attribute nothing, so unlike `write` they
+            // never resolve a writer — a viewer with no $USER and no
+            // registered identity can still read the queue.
+            cli::QueueCmd::List {
+                session,
+                status,
+                since,
+            } => exit_on_queue_result(queue::view::list(
+                &store,
+                session,
+                *status,
+                since.as_deref(),
+            )),
+            cli::QueueCmd::Show { id, session } => {
+                exit_on_queue_result(queue::view::show(&store, session, id))
+            }
         }
     }
 
@@ -1022,6 +1039,21 @@ fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource
 fn die_with(code: i32, msg: &str) -> ! {
     eprintln!("cassette: {msg}");
     std::process::exit(code);
+}
+
+/// Print and exit for `queue list`/`queue show`, which both succeed with a
+/// message to print rather than nothing — unlike `queue write`, handled
+/// separately since `Ok(())` has nothing to print.
+fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
+    match result {
+        Ok(msg) => {
+            println!("{msg}");
+            std::process::exit(0)
+        }
+        Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+        Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+        Err(queue::QueueError::Io(m)) => die_with(1, &m),
+    }
 }
 
 /// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.

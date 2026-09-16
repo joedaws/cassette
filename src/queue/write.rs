@@ -1,44 +1,12 @@
-//! The `cassette queue` commands. Only `write` exists in 4a; 4b adds `list`,
-//! `next`, `new`, `show`, `close`, `reopen`, `move`.
+//! `cassette queue write`: the one command that mutates a cassette body.
+//!
+//! Everything shared with the read-only commands in `view.rs` — `QueueError`,
+//! `WriterSource`, `StatusFilter`, and the writer-error mappers — lives in
+//! `queue/mod.rs` instead, so this module can stay the only place a lock is
+//! ever acquired for writing.
 
+use super::{require_error_to_queue_error, resolve_error_to_queue_error, QueueError, WriterSource};
 use crate::store;
-use crate::store::writers;
-
-/// Where a writer name came from. The distinction is load-bearing: an
-/// unknown `$USER` is bootstrapped on first run, which the spec blesses,
-/// while an unknown `--writer` is a typo and must fail loudly rather than
-/// silently spawning a second identity — one auto-created as human, the
-/// *privileged* kind, would fail open on exactly that typo.
-///
-/// Every queue command that resolves a writer takes this alongside the name,
-/// so the seven commands 4b adds all pick the same way `write` does here
-/// rather than each re-deriving it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriterSource {
-    /// Explicit `--writer`. An unknown name here is a usage error.
-    Flag,
-    /// Derived from `$USER`. An unknown name here is a first run.
-    Env,
-}
-
-/// Why a queue command failed, in the shape `main.rs` maps to an exit code.
-#[derive(Debug)]
-pub enum QueueError {
-    /// Bad invocation, unknown session, unknown cassette, unregistered
-    /// writer, or a kind mismatch. Exit 2.
-    Usage(String),
-    /// Another writer holds the cassette. Exit 3. Carries the rendered
-    /// message rather than `{ id, holder }`, unlike `LockError::Busy` and
-    /// `writers::EnsureError::KindMismatch` — a deliberate divergence, not an
-    /// oversight: the sole caller needs only the text, and the holder
-    /// formatting belongs beside the code that produces it. A `queue move`
-    /// in 4b can render its own message while it still has the id. 4c's
-    /// `--json` is what will likely need the fields back, since it emits
-    /// `id` and `holder` raw rather than prose.
-    Busy(String),
-    /// Anything else. Exit 1.
-    Io(String),
-}
 
 /// `cassette queue write <ID>`: acquire the cassette's lock, THEN read the body
 /// from stdin, write, and release.
@@ -122,25 +90,4 @@ pub fn write(
         return Err(QueueError::Io(format!("cannot write '{id}': {e}")));
     }
     Ok(())
-}
-
-/// Render a `resolve_writer` failure as the exit code it deserves.
-/// `resolve` declares no kind and always auto-creates, so `EmptyName` is its
-/// only usage error (2) and everything else is `Io` (1).
-fn resolve_error_to_queue_error(e: writers::ResolveError) -> QueueError {
-    match e {
-        writers::ResolveError::EmptyName => QueueError::Usage(e.to_string()),
-        writers::ResolveError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
-    }
-}
-
-/// Render a `require_writer` failure as the exit code it deserves.
-/// `EmptyName` and `Unregistered` are usage errors (2): both are about what
-/// the caller asked for, not a system failure.
-fn require_error_to_queue_error(e: writers::RequireError) -> QueueError {
-    match e {
-        writers::RequireError::EmptyName => QueueError::Usage(e.to_string()),
-        writers::RequireError::Unregistered(_) => QueueError::Usage(e.to_string()),
-        writers::RequireError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
-    }
 }

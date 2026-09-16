@@ -345,3 +345,158 @@ fn session_alias_on_an_unknown_id_exits_two() {
         .expect("spawn");
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
+
+/// Hand-write a cassette file into `session`'s cassettes dir — there is no
+/// CLI command that creates cassettes yet, so tests exercising `queue list`
+/// and `queue show` build the fixture directly, same shape as
+/// `queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one`.
+fn write_fixture_cassette(root: &std::path::Path, session: &str, id: &str, topic: &str) {
+    let cassettes = root.join("sessions").join(session).join("cassettes");
+    std::fs::create_dir_all(&cassettes).expect("mkdir");
+    std::fs::write(
+        cassettes.join(format!("{topic}-{id}.md")),
+        format!(
+            "---\nid: {id}\ntopic: {topic}\npriority: 10\nstatus: open\nlocked_by:\n\
+             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             ## Side A\n\nhello from {topic}\n"
+        ),
+    )
+    .expect("cassette");
+}
+
+#[test]
+fn queue_list_and_show_round_trip_through_a_real_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(new.status.code(), Some(0), "{}", stderr(&new));
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let list = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(list.status.code(), Some(0), "{}", stderr(&list));
+    let text = String::from_utf8_lossy(&list.stdout).to_string();
+    assert!(text.contains(ID), "{text}");
+    assert!(text.contains("gratitude"), "{text}");
+
+    let show = Command::new(bin())
+        .args(["queue", "show", ID, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(show.status.code(), Some(0), "{}", stderr(&show));
+    let shown = String::from_utf8_lossy(&show.stdout).to_string();
+    assert!(shown.contains(&format!("id: {ID}")), "{shown}");
+    assert!(shown.contains("hello from gratitude"), "{shown}");
+}
+
+#[test]
+fn queue_list_says_so_when_a_session_has_no_cassettes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "no cassettes");
+}
+
+#[test]
+fn queue_list_status_filter_excludes_closed_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let cassettes = root.join("sessions").join(&sid).join("cassettes");
+    std::fs::create_dir_all(&cassettes).expect("mkdir");
+    std::fs::write(
+        cassettes.join("closed-01K5GR7T2M9WPD0000000000CD.md"),
+        "---\nid: 01K5GR7T2M9WPD0000000000CD\ntopic: closed\npriority: 10\nstatus: closed\n\
+         locked_by:\ncreated_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+         ## Side A\n\nold\n",
+    )
+    .expect("cassette");
+
+    let default_list = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(
+        String::from_utf8_lossy(&default_list.stdout).trim(),
+        "no cassettes",
+        "closed cassettes are hidden unless asked for"
+    );
+
+    let all_list = Command::new(bin())
+        .args(["queue", "list", "--session", &sid, "--status", "all"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(
+        String::from_utf8_lossy(&all_list.stdout).contains("closed"),
+        "{}",
+        String::from_utf8_lossy(&all_list.stdout)
+    );
+}
+
+#[test]
+fn queue_show_on_an_unknown_id_exits_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "show", "nosuchid", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_list_and_show_need_no_writer_identity() {
+    // Read-only: neither attributes anything, so neither should fail just
+    // because $USER is unset and no --writer was passed — unlike `queue
+    // write`, see `a_writer_name_is_required_when_user_is_unset`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", "01K5GQ2R8V3XQZ0000000000AB"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}

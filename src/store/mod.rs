@@ -111,6 +111,16 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The result of reading a session's cassettes, including how many files
+/// could not be read or parsed. The count is carried rather than logged: a
+/// damaged cassette that vanishes from `queue list` is invisible work, and
+/// the operator has no other view of the store.
+#[derive(Debug, Default)]
+pub struct SessionScan {
+    pub cassettes: Vec<StoredCassette>,
+    pub unreadable: usize,
+}
+
 /// One cassette as it exists on disk.
 #[derive(Debug, Clone)]
 pub struct StoredCassette {
@@ -395,27 +405,33 @@ impl Store {
         Ok(guards)
     }
 
-    /// Every cassette in a session, in queue order. A missing session, files
-    /// that are not `.md`, and `.md` files without parseable frontmatter are
-    /// all skipped rather than erroring — the store shares a directory with
-    /// editors and their swap files.
-    pub fn scan_session(&self, session: &str) -> io::Result<Vec<StoredCassette>> {
+    /// Every cassette in a session, in queue order, plus a count of files
+    /// that could not be read or parsed. A missing session directory scans as
+    /// empty; a file that is not `.md`, or a `.md` file without parseable
+    /// frontmatter, increments `unreadable` rather than erroring outright —
+    /// the store shares a directory with editors and their swap files, but a
+    /// cassette that once had valid frontmatter and lost it is exactly the
+    /// kind of damage `queue list` exists to surface (see `SessionScan`).
+    pub fn scan_session(&self, session: &str) -> io::Result<SessionScan> {
         let dir = self.cassettes_dir(session);
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(SessionScan::default()),
             Err(e) => return Err(e),
         };
         let mut found = Vec::new();
+        let mut unreadable = 0usize;
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&path) else {
+                unreadable += 1;
                 continue;
             };
             let (Some(meta), body) = meta::split(&content) else {
+                unreadable += 1;
                 continue;
             };
             found.push(StoredCassette {
@@ -433,7 +449,10 @@ impl Store {
                 .position(|id| *id == c.meta.id)
                 .unwrap_or(usize::MAX)
         });
-        Ok(found)
+        Ok(SessionScan {
+            cassettes: found,
+            unreadable,
+        })
     }
 
     /// Every session, newest first by `created` (ties broken by id,
@@ -637,9 +656,12 @@ mod tests {
         s.add_cassette(&sid, &m, body).expect("add");
 
         let found = s.scan_session(&sid).expect("scan");
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].meta, m);
-        assert_eq!(found[0].body, body, "body must survive byte-for-byte");
+        assert_eq!(found.cassettes.len(), 1);
+        assert_eq!(found.cassettes[0].meta, m);
+        assert_eq!(
+            found.cassettes[0].body, body,
+            "body must survive byte-for-byte"
+        );
     }
 
     #[test]
@@ -657,6 +679,7 @@ mod tests {
         let ids: Vec<String> = s
             .scan_session(&sid)
             .expect("scan")
+            .cassettes
             .into_iter()
             .map(|c| c.meta.id)
             .collect();
@@ -680,13 +703,13 @@ mod tests {
         // An editor swap file and a file with no frontmatter must not appear.
         std::fs::write(s.cassettes_dir(&sid).join("notes.txt"), "stray").expect("write");
         std::fs::write(s.cassettes_dir(&sid).join("broken.md"), "no frontmatter\n").expect("write");
-        assert_eq!(s.scan_session(&sid).expect("scan").len(), 1);
+        assert_eq!(s.scan_session(&sid).expect("scan").cassettes.len(), 1);
     }
 
     #[test]
     fn scanning_a_missing_session_is_empty_not_an_error() {
         let (_dir, s) = store();
-        assert!(s.scan_session("nope").expect("scan").is_empty());
+        assert!(s.scan_session("nope").expect("scan").cassettes.is_empty());
     }
 
     #[test]
@@ -737,11 +760,18 @@ mod tests {
 
         assert!(path.is_file(), "the file must not have been renamed");
         let found = s.scan_session(&sid).expect("scan");
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].meta.topic.as_deref(), Some("completely different"));
-        assert_eq!(found[0].body, "new\n");
+        assert_eq!(found.cassettes.len(), 1);
         assert_eq!(
-            found[0].path.file_name().unwrap().to_string_lossy(),
+            found.cassettes[0].meta.topic.as_deref(),
+            Some("completely different")
+        );
+        assert_eq!(found.cassettes[0].body, "new\n");
+        assert_eq!(
+            found.cassettes[0]
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
             "gratitude-01K5GR7T2M9WPD0000000000AB.md",
             "the slug stays as minted"
         );

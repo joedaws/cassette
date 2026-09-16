@@ -33,7 +33,19 @@ pub struct Args {
 /// there is no active session to fall back to.
 #[derive(Debug, PartialEq)]
 pub enum QueueCmd {
-    Write { id: String, session: String },
+    Write {
+        id: String,
+        session: String,
+    },
+    List {
+        session: String,
+        status: crate::queue::StatusFilter,
+        since: Option<String>,
+    },
+    Show {
+        id: String,
+        session: String,
+    },
 }
 
 /// `writer …` as `main()` consumes it.
@@ -156,6 +168,26 @@ enum QueueAction {
         #[arg(long, value_name = "ID")]
         session: String,
     },
+    /// list a session's cassettes in queue order
+    List {
+        /// session to list
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// which cassettes to show
+        #[arg(long, value_enum, default_value = "open")]
+        status: crate::queue::StatusFilter,
+        /// only cassettes updated at or after this RFC3339 timestamp
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
+    },
+    /// print one cassette's frontmatter and body
+    Show {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -237,6 +269,16 @@ impl Cli {
             Some(Command::Queue { action }) => {
                 args.queue_cmd = Some(match action {
                     QueueAction::Write { id, session } => QueueCmd::Write { id, session },
+                    QueueAction::List {
+                        session,
+                        status,
+                        since,
+                    } => QueueCmd::List {
+                        session,
+                        status,
+                        since,
+                    },
+                    QueueAction::Show { id, session } => QueueCmd::Show { id, session },
                 });
             }
             Some(Command::Writer { action }) => {
