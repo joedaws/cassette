@@ -226,11 +226,6 @@ impl Store {
         writers::read(&self.root)
     }
 
-    /// Replace the writer registry wholesale.
-    pub fn write_writers(&self, w: &writers::Writers) -> io::Result<()> {
-        writers::write(&self.root, w)
-    }
-
     /// Anchors for store-wide locks, as opposed to a session's per-cassette
     /// ones. Currently just the writer registry.
     pub fn root_locks_dir(&self) -> PathBuf {
@@ -272,7 +267,7 @@ impl Store {
         &self,
         name: &str,
         kind: writers::Kind,
-    ) -> Result<String, writers::WriterError> {
+    ) -> Result<String, writers::EnsureError> {
         // `_registry`, NOT `_`: a bare underscore drops the guard immediately
         // and silently reopens the lost-update race this whole function exists
         // to close. No test catches the difference — the critical section is
@@ -288,7 +283,7 @@ impl Store {
     pub fn resolve_writer(
         &self,
         name: &str,
-    ) -> Result<(String, writers::Kind), writers::WriterError> {
+    ) -> Result<(String, writers::Kind), writers::ResolveError> {
         // `_registry`, NOT `_`: see `ensure_writer`. Same read-modify-write,
         // same race if the guard drops early.
         let _registry = self.lock_registry()?;
@@ -306,7 +301,7 @@ impl Store {
     pub fn require_writer(
         &self,
         name: &str,
-    ) -> Result<(String, writers::Kind), writers::WriterError> {
+    ) -> Result<(String, writers::Kind), writers::RequireError> {
         writers::require_registered(&self.root, name)
     }
 

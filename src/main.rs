@@ -905,7 +905,7 @@ fn die(msg: &str) -> ! {
 /// pure functions over `&Store`; this is the one place that turns their
 /// results into exit codes.
 ///
-/// `register` is the only command that can fail with `WriterError`: `list`
+/// `register` is the only command that can fail with `EnsureError`: `list`
 /// and `whoami` only ever see an I/O error reading the registry (exit 1). A
 /// `KindMismatch` or `EmptyName` from `register` is a usage error (exit 2) —
 /// the caller asked for something the registry cannot honor, not a system
@@ -918,16 +918,11 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
                 println!("{msg}");
                 std::process::exit(0)
             }
-            Err(e @ store::writers::WriterError::KindMismatch { .. }) => {
+            Err(e @ store::writers::EnsureError::KindMismatch { .. }) => {
                 die_with(2, &e.to_string())
             }
-            Err(e @ store::writers::WriterError::EmptyName) => die_with(2, &e.to_string()),
-            Err(e @ store::writers::WriterError::Io(_)) => die_with(1, &e.to_string()),
-            // `ensure_writer` never looks up without creating, so this never
-            // fires; kept only so the match stays exhaustive as `WriterError`
-            // grows rather than by a wildcard that could later hide a real
-            // new variant.
-            Err(e @ store::writers::WriterError::Unregistered(_)) => die_with(1, &e.to_string()),
+            Err(e @ store::writers::EnsureError::EmptyName) => die_with(2, &e.to_string()),
+            Err(e @ store::writers::EnsureError::Io(_)) => die_with(1, &e.to_string()),
         },
         cli::WriterCmd::List => match writer::list(&store) {
             Ok(msg) => {

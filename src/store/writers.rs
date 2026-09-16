@@ -3,7 +3,7 @@
 //! The read/write entry points are `pub(crate)` and reached through `Store`
 //! rather than called directly: `Store` owns the data-dir root, so routing
 //! every write through it is what keeps the root's `0700` creation in one
-//! place. See `Store::writers`, `Store::write_writers`, `Store::ensure_writer`.
+//! place. See `Store::writers`, `Store::ensure_writer`.
 //!
 //! Attribution is cooperative: this registry names writers, it does not
 //! authenticate them. OS-level enforcement is explicitly deferred in the spec.
@@ -36,9 +36,9 @@ impl Kind {
     }
 }
 
-/// Why a writer could not be resolved.
+/// Failures of `ensure`, which declares a kind and may auto-create.
 #[derive(Debug)]
-pub enum WriterError {
+pub enum EnsureError {
     /// This name is registered with a different `kind`. A distinct variant
     /// rather than an `Io(InvalidInput)` so a caller renders a usage error
     /// without matching on `io::ErrorKind`.
@@ -52,16 +52,13 @@ pub enum WriterError {
     /// `KindMismatch`: the caller renders a usage error without matching on
     /// `io::ErrorKind`.
     EmptyName,
-    /// `name` is not in the registry, and the caller is not allowed to
-    /// auto-create it — see `require_registered`.
-    Unregistered(String),
     Io(io::Error),
 }
 
-impl std::fmt::Display for WriterError {
+impl std::fmt::Display for EnsureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WriterError::KindMismatch {
+            EnsureError::KindMismatch {
                 name,
                 registered,
                 requested,
@@ -71,19 +68,67 @@ impl std::fmt::Display for WriterError {
                 registered.as_str(),
                 requested.as_str()
             ),
-            WriterError::EmptyName => write!(f, "writer name cannot be blank"),
-            WriterError::Unregistered(name) => write!(
-                f,
-                "'{name}' is not a registered writer — run 'cassette writer register' first"
-            ),
-            WriterError::Io(e) => write!(f, "{e}"),
+            EnsureError::EmptyName => write!(f, "writer name cannot be blank"),
+            EnsureError::Io(e) => write!(f, "{e}"),
         }
     }
 }
 
-impl From<io::Error> for WriterError {
-    fn from(e: io::Error) -> WriterError {
-        WriterError::Io(e)
+impl From<io::Error> for EnsureError {
+    fn from(e: io::Error) -> EnsureError {
+        EnsureError::Io(e)
+    }
+}
+
+/// Failures of `resolve`, which declares no kind and may auto-create. It
+/// cannot report a mismatch (it requests no kind) and cannot report an
+/// unknown name (it creates one).
+#[derive(Debug)]
+pub enum ResolveError {
+    EmptyName,
+    Io(io::Error),
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::EmptyName => write!(f, "writer name cannot be blank"),
+            ResolveError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<io::Error> for ResolveError {
+    fn from(e: io::Error) -> ResolveError {
+        ResolveError::Io(e)
+    }
+}
+
+/// Failures of `require_registered`, which never inserts.
+#[derive(Debug)]
+pub enum RequireError {
+    EmptyName,
+    /// `name` is not in the registry and this caller may not create it.
+    Unregistered(String),
+    Io(io::Error),
+}
+
+impl std::fmt::Display for RequireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequireError::EmptyName => write!(f, "writer name cannot be blank"),
+            RequireError::Unregistered(name) => write!(
+                f,
+                "'{name}' is not a registered writer — run 'cassette writer register' first"
+            ),
+            RequireError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<io::Error> for RequireError {
+    fn from(e: io::Error) -> RequireError {
+        RequireError::Io(e)
     }
 }
 
@@ -145,7 +190,7 @@ pub(crate) fn lookup_by_name(all: &Writers, name: &str) -> Option<(String, Kind)
 
 /// The id for `name`, registering it on first sight. Idempotent for a matching
 /// `kind`; a mismatch is rejected rather than silently updated — see
-/// `WriterError::KindMismatch`.
+/// `EnsureError::KindMismatch`.
 ///
 /// Trims `name` before doing anything else, and rejects an empty-after-trim
 /// name outright: this is the store boundary, so it is the one place that
@@ -153,15 +198,15 @@ pub(crate) fn lookup_by_name(all: &Writers, name: &str) -> Option<(String, Kind)
 /// or the Phase 5 TUI). Skipping the trim here let `" bot "` register as a
 /// name distinct from `"bot"` — a silent identity split once anything trims
 /// before comparing, which `--writer` already did.
-pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, WriterError> {
+pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, EnsureError> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(WriterError::EmptyName);
+        return Err(EnsureError::EmptyName);
     }
     let mut all = read(root)?;
     if let Some((id, existing)) = lookup_by_name(&all, name) {
         if existing != kind {
-            return Err(WriterError::KindMismatch {
+            return Err(EnsureError::KindMismatch {
                 name: name.to_string(),
                 registered: existing,
                 requested: kind,
@@ -196,14 +241,14 @@ pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, Writ
 /// Trims `name` first and rejects an empty-after-trim name, for the same
 /// store-boundary reason as `ensure`.
 ///
-/// Returns `Result<_, WriterError>` rather than `io::Result`: it never
-/// declares a kind, so `KindMismatch` is not a state it can reach, but an
-/// empty name is — and it needs `WriterError::EmptyName` to say so distinctly
+/// Returns `Result<_, ResolveError>` rather than `io::Result`: it never
+/// declares a kind, so a mismatch is not a state it can reach, but an empty
+/// name is — and it needs `ResolveError::EmptyName` to say so distinctly
 /// rather than via `io::ErrorKind`.
-pub(crate) fn resolve(root: &Path, name: &str) -> Result<(String, Kind), WriterError> {
+pub(crate) fn resolve(root: &Path, name: &str) -> Result<(String, Kind), ResolveError> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(WriterError::EmptyName);
+        return Err(ResolveError::EmptyName);
     }
     let mut all = read(root)?;
     if let Some((id, kind)) = lookup_by_name(&all, name) {
@@ -233,13 +278,13 @@ pub(crate) fn resolve(root: &Path, name: &str) -> Result<(String, Kind), WriterE
 ///
 /// Trims `name` first and rejects an empty-after-trim name, same as `ensure`
 /// and `resolve`.
-pub(crate) fn require_registered(root: &Path, name: &str) -> Result<(String, Kind), WriterError> {
+pub(crate) fn require_registered(root: &Path, name: &str) -> Result<(String, Kind), RequireError> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(WriterError::EmptyName);
+        return Err(RequireError::EmptyName);
     }
     let all = read(root)?;
-    lookup_by_name(&all, name).ok_or_else(|| WriterError::Unregistered(name.to_string()))
+    lookup_by_name(&all, name).ok_or_else(|| RequireError::Unregistered(name.to_string()))
 }
 
 #[cfg(test)]
@@ -329,7 +374,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let id = ensure(dir.path(), "bot", Kind::Agent).expect("first");
         match ensure(dir.path(), "bot", Kind::Human) {
-            Err(WriterError::KindMismatch {
+            Err(EnsureError::KindMismatch {
                 name,
                 registered,
                 requested,
@@ -395,7 +440,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         for blank in ["", "   ", "\t"] {
             match ensure(dir.path(), blank, Kind::Agent) {
-                Err(WriterError::EmptyName) => {}
+                Err(EnsureError::EmptyName) => {}
                 other => panic!("{blank:?} must be rejected, got {other:?}"),
             }
         }
@@ -440,7 +485,7 @@ mod tests {
         // human — the privileged kind — which would fail open on a typo.
         let dir = tempfile::tempdir().expect("tempdir");
         match require_registered(dir.path(), "nosuchwriter") {
-            Err(WriterError::Unregistered(name)) => assert_eq!(name, "nosuchwriter"),
+            Err(RequireError::Unregistered(name)) => assert_eq!(name, "nosuchwriter"),
             other => panic!("expected Unregistered, got {other:?}"),
         }
         assert!(
@@ -453,8 +498,34 @@ mod tests {
     fn require_registered_rejects_a_blank_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         match require_registered(dir.path(), "   ") {
-            Err(WriterError::EmptyName) => {}
+            Err(RequireError::EmptyName) => {}
             other => panic!("expected EmptyName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_cannot_report_a_kind_mismatch() {
+        // `resolve` declares no kind, so a mismatch is not one of its outcomes.
+        // This is a type-level claim: it compiles only while ResolveError has
+        // no KindMismatch variant, which is the whole point of the split.
+        let dir = tempfile::tempdir().expect("tempdir");
+        ensure(dir.path(), "bot", Kind::Agent).expect("ensure");
+        let (id, kind) = resolve(dir.path(), "bot").expect("resolve");
+        assert!(!id.is_empty());
+        assert_eq!(kind, Kind::Agent, "resolve defers to the registered kind");
+
+        match resolve(dir.path(), "   ") {
+            Err(ResolveError::EmptyName) => {}
+            other => panic!("a blank name is EmptyName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_registered_reports_an_unknown_name_as_its_own_variant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match require_registered(dir.path(), "ghost") {
+            Err(RequireError::Unregistered(n)) => assert_eq!(n, "ghost"),
+            other => panic!("expected Unregistered, got {other:?}"),
         }
     }
 }

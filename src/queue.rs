@@ -2,7 +2,7 @@
 //! `next`, `new`, `show`, `close`, `reopen`, `move`.
 
 use crate::store;
-use crate::store::writers::WriterError;
+use crate::store::writers;
 
 /// Where a writer name came from. The distinction is load-bearing: an
 /// unknown `$USER` is bootstrapped on first run, which the spec blesses,
@@ -29,7 +29,7 @@ pub enum QueueError {
     Usage(String),
     /// Another writer holds the cassette. Exit 3. Carries the rendered
     /// message rather than `{ id, holder }`, unlike `LockError::Busy` and
-    /// `WriterError::KindMismatch` — a deliberate divergence, not an
+    /// `writers::EnsureError::KindMismatch` — a deliberate divergence, not an
     /// oversight: the sole caller needs only the text, and the holder
     /// formatting belongs beside the code that produces it. A `queue move`
     /// in 4b can render its own message while it still has the id. 4c's
@@ -73,10 +73,13 @@ pub fn write(
     // refuses to close a cassette whose `locked_by` is set; a human may), so
     // this is where that lookup will plug in rather than a second lookup.
     let (writer, _kind) = match source {
-        WriterSource::Env => store.resolve_writer(who_name),
-        WriterSource::Flag => store.require_writer(who_name),
-    }
-    .map_err(writer_error_to_queue_error)?;
+        WriterSource::Env => store
+            .resolve_writer(who_name)
+            .map_err(resolve_error_to_queue_error)?,
+        WriterSource::Flag => store
+            .require_writer(who_name)
+            .map_err(require_error_to_queue_error)?,
+    };
     let who = store::lock::Attribution::for_now(&writer, who_name);
 
     let guard = match store.lock(session, id, &who) {
@@ -121,18 +124,23 @@ pub fn write(
     Ok(())
 }
 
-/// Render a writer-resolution failure as the exit code it deserves.
-/// `EmptyName` and `Unregistered` are usage errors (2): both are about what
-/// the caller asked for, not a system failure. `KindMismatch` cannot actually
-/// reach here — neither `resolve_writer` nor `require_writer` declares a
-/// kind — but the arm stays so this match stays exhaustive as `WriterError`
-/// grows, rather than by a wildcard that would silently swallow a real new
-/// variant into `Io`.
-fn writer_error_to_queue_error(e: WriterError) -> QueueError {
+/// Render a `resolve_writer` failure as the exit code it deserves.
+/// `resolve` declares no kind and always auto-creates, so `EmptyName` is its
+/// only usage error (2) and everything else is `Io` (1).
+fn resolve_error_to_queue_error(e: writers::ResolveError) -> QueueError {
     match e {
-        WriterError::EmptyName => QueueError::Usage(e.to_string()),
-        WriterError::Unregistered(_) => QueueError::Usage(e.to_string()),
-        WriterError::KindMismatch { .. } => QueueError::Usage(e.to_string()),
-        WriterError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
+        writers::ResolveError::EmptyName => QueueError::Usage(e.to_string()),
+        writers::ResolveError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
+    }
+}
+
+/// Render a `require_writer` failure as the exit code it deserves.
+/// `EmptyName` and `Unregistered` are usage errors (2): both are about what
+/// the caller asked for, not a system failure.
+fn require_error_to_queue_error(e: writers::RequireError) -> QueueError {
+    match e {
+        writers::RequireError::EmptyName => QueueError::Usage(e.to_string()),
+        writers::RequireError::Unregistered(_) => QueueError::Usage(e.to_string()),
+        writers::RequireError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
     }
 }
