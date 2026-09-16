@@ -489,12 +489,14 @@ pub fn target_priority(sorted_open: &[i64], anchor_priority: i64, side: MoveSide
 /// to `anchor`, among the session's open cassettes. Shared by
 /// `move_cassette`'s first attempt and its single post-renumber retry.
 ///
-/// Restricted to `Status::Open` on both ends deliberately: `priority::queue_order`
-/// always sorts closed cassettes after every open one regardless of
-/// priority, so reordering relative to (or of) a closed cassette would
-/// change a priority number without changing anything anyone can see —
-/// `queue move` only makes sense between two cassettes that are actually in
-/// the visible, active queue.
+/// Restricted to `Status::Open` on both ends deliberately: `queue move`
+/// exists to sequence *active* work — `queue next` only ever walks open
+/// cassettes, so a closed cassette is never something a writer is waiting
+/// to take next. Reordering finished work is simply not this command's job,
+/// even though `priority::queue_order` does apply the priority comparison
+/// within the closed group too (visible under `queue list --status
+/// closed|all`) — this restriction is about scope, not about the ordering
+/// having no effect.
 fn compute_move_target(
     store: &Store,
     session: &str,
