@@ -49,27 +49,10 @@ pub enum QueueError {
 pub fn write(
     store: &store::Store,
     id: &str,
-    session: Option<&str>,
+    session: &str,
     who_name: &str,
     source: WriterSource,
 ) -> Result<(), QueueError> {
-    let session = match session
-        .map(str::to_string)
-        .map_or_else(|| store.active_session(), |s| Ok(Some(s)))
-    {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return Err(QueueError::Usage(
-                "no active session; pass --session".into(),
-            ))
-        }
-        Err(e) => {
-            return Err(QueueError::Io(format!(
-                "cannot read the active session: {e}"
-            )))
-        }
-    };
-
     // Registration/lookup happens BEFORE acquisition, even though failing
     // fast on a bad lock looks more logical: two writers racing for the same
     // cassette must both land in writers.toml (or both fail cleanly) even
@@ -96,7 +79,7 @@ pub fn write(
     .map_err(writer_error_to_queue_error)?;
     let who = store::lock::Attribution::for_now(&writer, who_name);
 
-    let guard = match store.lock(&session, id, &who) {
+    let guard = match store.lock(session, id, &who) {
         Ok(g) => g,
         Err(store::lock::LockError::Busy { holder, .. }) => {
             let who = holder

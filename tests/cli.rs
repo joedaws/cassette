@@ -148,7 +148,13 @@ fn queue_write_appears_in_help() {
 fn a_writer_name_is_required_when_user_is_unset() {
     // No shared "unknown" identity: attribution is the point of the system.
     let out = Command::new(bin())
-        .args(["queue", "write", "01K5GR7T2M9WPD0000000000AB"])
+        .args([
+            "queue",
+            "write",
+            "01K5GR7T2M9WPD0000000000AB",
+            "--session",
+            "01K5GQ2R8V3XQZ0000000000AB",
+        ])
         .env_remove("USER")
         .env("CASSETTE_DATA_DIR", "/nonexistent-store")
         .stdin(std::process::Stdio::null())
@@ -238,7 +244,6 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
         "created = \"2026-09-14T09:25:57Z\"\n",
     )
     .expect("session.toml");
-    std::fs::write(root.join("active"), format!("{SESSION}\n")).expect("active");
     std::fs::write(
         cassettes.join(format!("gratitude-{ID}.md")),
         format!(
@@ -250,7 +255,15 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
     .expect("cassette");
 
     let out = Command::new(bin())
-        .args(["--writer", "nosuchwriter", "queue", "write", ID])
+        .args([
+            "--writer",
+            "nosuchwriter",
+            "queue",
+            "write",
+            ID,
+            "--session",
+            SESSION,
+        ])
         .env("CASSETTE_DATA_DIR", &root)
         .stdin(std::process::Stdio::piped())
         .output()

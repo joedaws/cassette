@@ -29,7 +29,6 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         "created = \"2026-09-14T09:25:57Z\"\n",
     )
     .expect("session.toml");
-    std::fs::write(root.join("active"), format!("{SESSION}\n")).expect("active");
     std::fs::write(
         cassettes.join(format!("gratitude-{ID}.md")),
         format!(
@@ -52,7 +51,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 /// independently. Any other write error still propagates.
 fn spawn_write(root: &std::path::Path, id: &str, user: &str) -> Child {
     let mut child = Command::new(bin())
-        .args(["queue", "write", id])
+        .args(["queue", "write", id, "--session", SESSION])
         .env("CASSETTE_DATA_DIR", root)
         .env("USER", user)
         .stdin(Stdio::piped())
@@ -70,7 +69,7 @@ fn spawn_write(root: &std::path::Path, id: &str, user: &str) -> Child {
 
 fn try_write(root: &std::path::Path, body: &str) -> std::process::Output {
     let mut child = Command::new(bin())
-        .args(["queue", "write", ID])
+        .args(["queue", "write", ID, "--session", SESSION])
         .env("CASSETTE_DATA_DIR", root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -234,7 +233,7 @@ fn the_registry_lock_waits_rather_than_failing() {
     anchor.lock().expect("hold the registry");
 
     let mut child = Command::new(bin())
-        .args(["queue", "write", ID])
+        .args(["queue", "write", ID, "--session", SESSION])
         .env("CASSETTE_DATA_DIR", &root)
         .env("USER", "someone-new")
         .stdin(Stdio::piped())
@@ -287,7 +286,7 @@ fn registering_writers_concurrently_keeps_both() {
     let (_d, root) = fixture();
     let spawn = |user: &str| {
         Command::new(bin())
-            .args(["queue", "write", ID])
+            .args(["queue", "write", ID, "--session", SESSION])
             .env("CASSETTE_DATA_DIR", &root)
             .env("USER", user)
             .stdin(Stdio::piped())

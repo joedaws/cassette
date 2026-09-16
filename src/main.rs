@@ -154,13 +154,18 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    if let Some((id, session)) = &args.queue_write {
+    if let Some(cmd) = &args.queue_cmd {
         let store = store::Store::new(store_root());
         let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
             Ok(w) => w,
             Err(msg) => die_with(2, &msg),
         };
-        match queue::write(&store, id, session.as_deref(), &who_name, writer_source) {
+        let result = match cmd {
+            cli::QueueCmd::Write { id, session } => {
+                queue::write(&store, id, session, &who_name, writer_source)
+            }
+        };
+        match result {
             Ok(()) => std::process::exit(0),
             Err(queue::QueueError::Usage(m)) => die_with(2, &m),
             Err(queue::QueueError::Busy(m)) => die_with(3, &m),

@@ -11,7 +11,6 @@
 //! ```text
 //! ~/.local/share/cassette/
 //!   writers.toml
-//!   active                       # single line: active session id
 //!   .locks/
 //!     writers                    # flock anchor for the writer registry
 //!   sessions/
@@ -31,10 +30,10 @@
 //! **`Store` owns the data-dir root.** The `session` and `writers` modules hold
 //! the file formats, but their entry points are `pub(crate)` and everything
 //! outside this module goes through a `Store` method. That is deliberate: when
-//! `writers` and the active pointer took a bare root path of their own, they
-//! created the store root through `atomic_write` at the process umask, leaving
-//! a freewriting journal world-readable until some later call happened to
-//! tighten it. One owner, one place that creates the root.
+//! `writers` took a bare root path of its own, it created the store root
+//! through `atomic_write` at the process umask, leaving a freewriting journal
+//! world-readable until some later call happened to tighten it. One owner,
+//! one place that creates the root.
 
 pub mod ids;
 pub mod lock;
@@ -86,9 +85,9 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
 /// than chmod'd afterwards, so the directory is never briefly world-readable;
 /// parents keep their own permissions.
 ///
-/// Free-standing rather than a `Store` method because `writers` and the active
-/// pointer take a bare root path and would otherwise create the store root
-/// through `atomic_write` at the process umask.
+/// Free-standing rather than a `Store` method because `writers` takes a bare
+/// root path and would otherwise create the store root through `atomic_write`
+/// at the process umask.
 pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -309,16 +308,6 @@ impl Store {
         name: &str,
     ) -> Result<(String, writers::Kind), writers::WriterError> {
         writers::require_registered(&self.root, name)
-    }
-
-    /// The active session id, or `None` when no session is active.
-    pub fn active_session(&self) -> io::Result<Option<String>> {
-        session::read_active(&self.root)
-    }
-
-    /// Point `active` at `session`.
-    pub fn set_active_session(&self, session: &str) -> io::Result<()> {
-        session::write_active(&self.root, session)
     }
 
     /// The file backing a cassette id, found by its `-<id>.md` suffix. The
@@ -726,32 +715,6 @@ mod tests {
         assert_eq!(all.writers[&id].name, "joseph");
     }
 
-    #[test]
-    fn the_active_session_round_trips_through_the_store() {
-        let (_dir, s) = store();
-        assert_eq!(s.active_session().expect("read"), None, "none to start");
-        let id = s.create_session(&session_meta()).expect("create");
-        s.set_active_session(&id).expect("set");
-        assert_eq!(
-            s.active_session().expect("read").as_deref(),
-            Some(id.as_str())
-        );
-    }
-
-    #[test]
-    fn an_unreadable_active_pointer_errors_rather_than_reading_as_absent() {
-        // Moving the pointer onto Store was the moment to stop collapsing
-        // "no active session" into "could not read it" — the same conflation
-        // that made writers::read a data-loss path.
-        let (dir, s) = store();
-        s.create_session(&session_meta()).expect("create");
-        std::fs::create_dir(dir.path().join(session::ACTIVE_FILE)).expect("mkdir");
-        assert!(
-            s.active_session().is_err(),
-            "an unreadable pointer must not read as 'no active session'"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn registering_a_writer_creates_a_private_root() {
@@ -768,23 +731,6 @@ mod tests {
             mode & 0o777,
             0o700,
             "writer registration must create a private root"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn setting_the_active_session_creates_a_private_root() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("store");
-        Store::new(root.clone())
-            .set_active_session("01K5GQ2R8V3XQZ0000000000AB")
-            .expect("write");
-        let mode = std::fs::metadata(&root).unwrap().permissions().mode();
-        assert_eq!(
-            mode & 0o777,
-            0o700,
-            "the active pointer must not create a loose root"
         );
     }
 

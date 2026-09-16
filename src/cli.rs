@@ -19,12 +19,19 @@ pub struct Args {
     /// `resume` with an optional note name: `Some(None)` resumes the most
     /// recently modified note.
     pub resume: Option<Option<String>>,
-    /// `queue write`: the cassette id and the session it lives in.
-    pub queue_write: Option<(String, Option<String>)>,
+    /// `queue …`, if that's what was invoked.
+    pub queue_cmd: Option<QueueCmd>,
     /// registered writer to act as (default: $USER, registered on first use)
     pub writer: Option<String>,
     /// `writer register|list|whoami`, if that's what was invoked.
     pub writer_cmd: Option<WriterCmd>,
+}
+
+/// `queue …` as `main()` consumes it. Every variant carries `session`:
+/// there is no active session to fall back to.
+#[derive(Debug, PartialEq)]
+pub enum QueueCmd {
+    Write { id: String, session: String },
 }
 
 /// `writer …` as `main()` consumes it.
@@ -130,9 +137,9 @@ enum QueueAction {
     Write {
         #[arg(value_name = "ID")]
         id: String,
-        /// session to write in (default: the active session)
+        /// session the cassette lives in
         #[arg(long, value_name = "ID")]
-        session: Option<String>,
+        session: String,
     },
 }
 
@@ -189,9 +196,11 @@ impl Cli {
             Some(Command::Stats) => args.stats = true,
             Some(Command::Find { query }) => args.find = Some(query),
             Some(Command::Themes) => args.list_themes = true,
-            Some(Command::Queue { action }) => match action {
-                QueueAction::Write { id, session } => args.queue_write = Some((id, session)),
-            },
+            Some(Command::Queue { action }) => {
+                args.queue_cmd = Some(match action {
+                    QueueAction::Write { id, session } => QueueCmd::Write { id, session },
+                });
+            }
             Some(Command::Writer { action }) => {
                 args.writer_cmd = Some(match action {
                     WriterAction::Register { name, kind } => WriterCmd::Register {
