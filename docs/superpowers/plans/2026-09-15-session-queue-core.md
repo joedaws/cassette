@@ -1229,19 +1229,49 @@ The spec declined the equivalent for sessions on purpose: writer identity belong
 
 Test:
 
+**Pick the command under test carefully.** `writer whoami` is a *query*: with an
+unknown name it prints `ghost  (not registered — …)` and exits **0**, deliberately —
+`render_whoami`'s doc says it "reports plainly … rather than inventing a kind". Only a
+command that resolves a writer *to act as* exits 2 on an unknown name, which
+`tests/cli.rs` already marks explicitly ("The command that DOES resolve a writer").
+Test `queue new`, not `whoami`:
+
 ```rust
 #[test]
 fn cassette_writer_env_names_a_writer_but_must_already_be_registered() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");
+    let sid = {
+        let out = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // `queue new` resolves a writer to act as, so an unknown name is a typo,
+    // not a first run — exit 2 rather than a second identity created as
+    // `human`, the privileged kind.
     let out = Command::new(bin())
-        .args(["writer", "whoami"])
+        .args(["queue", "new", "a topic", "--session", &sid])
         .env("CASSETTE_DATA_DIR", &root)
         .env("CASSETTE_WRITER", "ghost")
         .env("USER", "tester")
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+
+    // ...and it must not have created one.
+    let listed = Command::new(bin())
+        .args(["writer", "list"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains("ghost"),
+        "a typo must not spawn an identity"
+    );
 }
 ```
 
