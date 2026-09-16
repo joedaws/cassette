@@ -155,26 +155,54 @@ fn place(placement: Placement, open_priorities: &[i64]) -> Result<Option<i64>, Q
     })
 }
 
-/// Turn a failed `Store::lock` into the `QueueError` it deserves. Shared by
-/// `close` and `reopen`, the two `edit` commands that lock an *existing*
-/// cassette (`new` mints a fresh id through `Store::add_cassette`, which
-/// cannot contend, so it never needs this).
+/// Turn a failed lock acquisition into the `QueueError` it deserves. The
+/// single route from `LockError` to an exit code in this module: `close`,
+/// `reopen` and `move` use it for their one-cassette `Store::lock`, and
+/// `renumber_all` routes `Store::lock_many` through it as well (via
+/// `renumber_lock_error`), so a contended renumber cannot come out with a
+/// different exit code than a contended single write of the same cassette.
 ///
 /// `Busy` covers everyone: a cassette another writer is actively holding
 /// cannot be closed or reopened by anyone, human or agent — that boundary is
 /// the advisory `flock`, not `locked_by`, and it binds regardless of `Kind`.
-fn lock_error_to_queue_error(id: &str, session: &str, e: LockError) -> QueueError {
+///
+/// `Busy` and `NoSuchCassette` name the cassette from the error itself, not
+/// from `id`: a `lock_many` run reports whichever of its many cassettes
+/// actually blocked, which is never knowable at the call site. `id` names
+/// what the caller was trying to lock and is used only by the `Io` arm,
+/// where the error carries no id of its own.
+fn lock_error_to_queue_error(id: &str, e: LockError) -> QueueError {
     match e {
-        LockError::Busy { holder, .. } => {
+        LockError::Busy { id: held, holder } => {
             let who = holder
                 .map(|a| format!("{} (since {})", a.name, a.since))
                 .unwrap_or_else(|| "another writer".to_string());
-            QueueError::Busy(format!("'{id}' is open by {who} — try again later"))
+            QueueError::Busy(format!("'{held}' is open by {who} — try again later"))
         }
-        LockError::NoSuchCassette { .. } => {
+        LockError::NoSuchCassette { session, id } => {
             QueueError::Usage(format!("no cassette '{id}' in session '{session}'"))
         }
         LockError::Io(e) => QueueError::Io(format!("cannot lock '{id}': {e}")),
+    }
+}
+
+/// `renumber_all`'s view of a failed `Store::lock_many`.
+///
+/// Routes through `lock_error_to_queue_error` so contention on a renumber is
+/// `Busy` (exit 3, "retry shortly") exactly as contention on a single
+/// cassette is. Mapping the whole `LockError` to `QueueError::Io` instead —
+/// which is what this did — made `queue move` disagree with itself: the same
+/// command returned 3 when its own cassette was held and 1 when the renumber
+/// it needed first hit any held cassette, so an agent keyed on "3 means
+/// retry" read a routine collision as a hard failure.
+///
+/// Only the `Io` arm is re-worded, to say what the lock run was for.
+fn renumber_lock_error(session: &str, e: LockError) -> QueueError {
+    match lock_error_to_queue_error(session, e) {
+        QueueError::Io(m) => QueueError::Io(format!(
+            "cannot lock session '{session}' for renumbering: {m}"
+        )),
+        other => other,
     }
 }
 
@@ -257,7 +285,7 @@ pub fn close(
 
     let guard = store
         .lock(session, id, &who)
-        .map_err(|e| lock_error_to_queue_error(id, session, e))?;
+        .map_err(|e| lock_error_to_queue_error(id, e))?;
 
     let current = guard
         .read()
@@ -319,7 +347,7 @@ pub fn reopen(
 
     let guard = store
         .lock(session, id, &who)
-        .map_err(|e| lock_error_to_queue_error(id, session, e))?;
+        .map_err(|e| lock_error_to_queue_error(id, e))?;
 
     let current = guard
         .read()
@@ -366,11 +394,9 @@ pub fn renumber_all(store: &Store, session: &str, who: &Attribution) -> Result<(
         metas.iter().map(|m| m.id.as_str()).zip(fresh).collect();
 
     let ids: Vec<&str> = metas.iter().map(|m| m.id.as_str()).collect();
-    let guards = store.lock_many(session, &ids, who).map_err(|e| {
-        QueueError::Io(format!(
-            "cannot lock session '{session}' for renumbering: {e}"
-        ))
-    })?;
+    let guards = store
+        .lock_many(session, &ids, who)
+        .map_err(|e| renumber_lock_error(session, e))?;
 
     for guard in &guards {
         let current = guard
@@ -622,7 +648,7 @@ pub fn move_cassette(
     let who = Attribution::for_now(&writer, who_name);
     let guard = store
         .lock(session, id, &who)
-        .map_err(|e| lock_error_to_queue_error(id, session, e))?;
+        .map_err(|e| lock_error_to_queue_error(id, e))?;
     let current = guard
         .read()
         .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
@@ -836,6 +862,50 @@ mod tests {
             .expect("aaa");
         assert_eq!(zzz.meta.priority, 10, "queue-first cassette gets p10");
         assert_eq!(aaa.meta.priority, 20, "queue-second cassette gets p20");
+    }
+
+    #[test]
+    fn renumber_all_reports_contention_as_busy_not_io() {
+        // Lock contention is exit 3 ("retry shortly") wherever it arises. A
+        // renumber that maps every `lock_many` failure to `Io` made `queue
+        // move` disagree with itself — 3 when its own cassette was held, 1
+        // when the renumber it needed first hit a held cassette — and an
+        // agent keyed on "3 means retry" reads exit 1 as a hard failure.
+        //
+        // flock is per-open-file-description, so a guard held here blocks
+        // `lock_many`'s own open of the same anchor: contention is real, in
+        // one process, with no sleeping or spawning.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("bbb00000000000000000000000", 20, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        let holder = Attribution::for_now("writer-1", "joseph");
+        let _held = store
+            .lock(&sid, "bbb00000000000000000000000", &holder)
+            .expect("hold it");
+
+        let who = Attribution::for_now("w", "tester");
+        match renumber_all(&store, &sid, &who) {
+            Err(QueueError::Busy(m)) => assert!(
+                m.contains("bbb00000000000000000000000"),
+                "must name the cassette that blocked: {m}"
+            ),
+            other => panic!("expected Busy (exit 3), got {other:?}"),
+        }
     }
 
     #[test]
