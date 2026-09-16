@@ -45,7 +45,6 @@ SQLite is a clean import later; the reverse is not.
 ```
 ~/.local/share/cassette/            # data_dir, created 0700
   writers.toml
-  active                            # single line: active session id
   sessions/
     01K5GQ2R8V3XQZ/                 # session id (ULID)
       session.toml
@@ -269,12 +268,11 @@ human's manual fixup of an agent's mess would be a different command than the ag
 ```
 # Sessions
 cassette sessions                            # interactive picker: 15 recent, 'a' = all
-cassette session new [--alias <name>]        # prints id, becomes active
+cassette session new [--alias <name>]        # prints the id
 cassette session list [--all]
-cassette session use <id>
-cassette session alias <id> <alias>
+cassette session alias <id> <alias>          # display label only; never resolves
 
-# Queue — acts on the active session unless --session <id>
+# Queue — --session <id> is required on every queue command
 cassette queue list [--status open|closed|all] [--since <ts>]
 cassette queue next
 cassette queue new <topic> [--first|--last|--priority N]
@@ -298,7 +296,9 @@ cassette resume [FILE]    # most recent session, or the named one
 cassette stats | find [TEXT...] | themes | export <session>
 ```
 
-Global flags: `--writer <name>`, `--session <id>`, `--json`.
+Global flags: `--writer <name>`, `--json`. `--session <id>` is **not** global: it is
+required on each `queue` command. See Phase 4b's spec, decision 1 — there is no active
+session, so there is nothing for it to fall back to.
 
 ### One surface, no top-level positional
 
@@ -590,12 +590,22 @@ phases, each independently testable and each leaving the tool working.
      the first callers to take user-supplied priorities — gives `LockError::Busy` the
      cassette id it lacks, and lifts `queue write` out of `main.rs` into a per-command
      module matching `stats.rs`/`find.rs`.
-   - **4b — Session and queue core.** `session new` / `list` / `use` / `alias`;
-     `queue list` / `next` / `new` / `show` / `close` / `reopen` / `move`; exit codes 5
-     and 6. `queue move` is the first real consumer of `lock_many`, which is why
-     `Store::holds` lands in 4a.
+   - **4b — Session and queue core.** `session new` / `list` / `alias`;
+     `queue list` / `next` / `new` / `show` / `close` / `reopen` / `move`; exit codes 4,
+     5 and 6. Removes the active session entirely. Spec:
+     `2026-09-15-session-queue-core-design.md`, which is authoritative for this
+     sub-phase and corrects the two claims below.
+
+     `Store::holds` does **not** land in 4a and 4b does not need it: it answers "do I
+     already hold this lock?", which only arises for a process holding locks across
+     operations — the TUI. A one-shot `queue move` starts holding nothing, so
+     `lock_many` suffices. `Store::holds` belongs to Phase 5.
+
+     Exit code 4 lands in 4b, not 4c: it serves the close permission rule, and
+     `locked_by` already exists in `CassetteMeta`. The arm is unreachable until 4c can
+     set the field, so 4c adds commands to an already-enforced rule.
    - **4c — JSON and the sticky lock.** The `--json` contract including the derived
-     `waiting_on` / `busy` / `words` fields, `queue lock` / `unlock`, and exit code 4.
+     `waiting_on` / `busy` / `words` fields, and `queue lock` / `unlock`.
 
    **`cassette sessions` — the interactive picker ("15 recent, 'a' = all") — moves to
    Phase 5.** It is an interactive UI, not a CLI command, and belongs with the TUI work
@@ -653,12 +663,14 @@ assigned — not open questions.
 
 **Phase 4 must address:**
 
-- **`priority::last()` and `priority::between()` both overflow.** `last(&[i64::MAX])`
-  panics on `+ STEP`; `between(i64::MIN, i64::MAX)` panics on `hi - lo` before the `mid`
-  guard runs. Both are debug-build panics reachable only through hand-edited frontmatter,
-  since `parse_frontmatter` accepts any `i64`-parseable string. Not fixable in Phase 2:
-  `last` returns a bare `i64` with no way to signal "no room". Phase 4 introduces the CLI
-  that sets priorities, so it either clamps on the way in or changes the signatures.
+- ~~**`priority::last()` and `priority::between()` both overflow.**~~ **Done, 2026-09-15
+  (4a).** Signatures changed rather than clamped: `first`, `last` and `between` all return
+  `Option<i64>`, so an unrepresentable result is a value the caller handles. `first` was a
+  third instance the original entry missed. **4b still owes the other half** — `queue new
+  --priority N` is the first CLI path that accepts a priority from a user, and `first`'s
+  `below > 0` / `halved > 0` guards mean the module's priorities are positive. 4b rejects
+  `N <= 0` at the CLI boundary rather than storing a value the placement functions treat
+  as no-room-left.
 - ~~**`session::read_active` swallows every I/O error into `None`.**~~ **Done, 2026-09-14.**
   Fixed while moving it onto `Store`, which was the cheapest possible moment: the signature
   is now `io::Result<Option<String>>` and only `NotFound` means "no active session".
