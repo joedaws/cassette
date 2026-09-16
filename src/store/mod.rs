@@ -234,6 +234,42 @@ impl Store {
         Ok(path)
     }
 
+    /// Resolve a caller-supplied session id to a session that actually
+    /// exists, on the two axes a `--session` argument can be wrong on.
+    ///
+    /// **Shape.** The id is joined straight onto the store root by
+    /// `session_dir`, so `ids::is_valid_id` is what stands between a
+    /// `--session ../../escaped` and a cassette written outside the store.
+    /// The spec's "sessions are named by ULID only" is asserted in half a
+    /// dozen doc comments; this is where it is enforced.
+    ///
+    /// **Existence.** A well-formed id for a session nobody created is a
+    /// typo, never an implicit create: `create_session` is the only code
+    /// that builds a session directory, and letting a command materialize
+    /// one by side effect produced cassettes in a directory `session list`
+    /// could never show, since it has no `session.toml` to list. So the
+    /// session directory must be there *and* carry a readable
+    /// `session.toml`; anything else is reported as the missing session it
+    /// is.
+    ///
+    /// Returns the message rather than an error enum: both axes are usage
+    /// errors (exit 2) at every call site, so the only thing a caller needs
+    /// from a failure is prose that says which of the two it was.
+    pub fn require_session(&self, session: &str) -> Result<(), String> {
+        if !ids::is_valid_id(session) {
+            return Err(format!(
+                "malformed session id '{session}': expected a {}-character ULID",
+                ids::ID_LEN
+            ));
+        }
+        match self.session_meta(session) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(format!(
+                "no session '{session}' — `cassette session list` shows what exists"
+            )),
+        }
+    }
+
     /// The session's own metadata (`session.toml`).
     pub fn session_meta(&self, session: &str) -> io::Result<SessionMeta> {
         session::read(&self.session_dir(session).join("session.toml"))
@@ -633,6 +669,54 @@ mod tests {
         let rows = s.list_sessions().expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, good);
+    }
+
+    #[test]
+    fn require_session_accepts_a_session_that_exists() {
+        let (_dir, s) = store();
+        let id = s.create_session(&session_meta()).expect("create");
+        assert!(s.require_session(&id).is_ok());
+    }
+
+    #[test]
+    fn require_session_rejects_a_traversal_without_touching_the_disk() {
+        let (dir, s) = store();
+        for bad in ["..", "../../escaped", "a/b", "", "nope"] {
+            let msg = s.require_session(bad).expect_err("must be rejected");
+            assert!(
+                msg.contains("malformed session id"),
+                "shape failure must say so, not 'no session': {msg}"
+            );
+        }
+        // Nothing was created anywhere on the way out — in particular not
+        // the `escaped/` directory the unvalidated path join produced.
+        assert!(!dir.path().join("escaped").exists());
+        assert!(!dir.path().parent().unwrap().join("escaped").exists());
+    }
+
+    #[test]
+    fn require_session_rejects_a_well_formed_id_that_names_no_session() {
+        // The phantom-session case: shape alone cannot be the whole check,
+        // or a typo'd but well-formed id creates an unreachable session.
+        let (_dir, s) = store();
+        let ghost = ids::new_id();
+        let msg = s.require_session(&ghost).expect_err("must be rejected");
+        assert!(msg.contains("no session"), "{msg}");
+        assert!(msg.contains(&ghost), "{msg}");
+        assert!(!s.session_dir(&ghost).exists(), "must not create it");
+    }
+
+    #[test]
+    fn require_session_rejects_a_directory_with_no_session_toml() {
+        // A bare directory under `sessions/` — what an unvalidated
+        // `--session <fresh ulid>` used to leave behind — is not a session:
+        // `session list` skips it, so accepting it would hand cassettes to a
+        // place nothing can ever list.
+        let (_dir, s) = store();
+        let ghost = ids::new_id();
+        std::fs::create_dir_all(s.cassettes_dir(&ghost)).expect("mkdir");
+        let msg = s.require_session(&ghost).expect_err("must be rejected");
+        assert!(msg.contains("no session"), "{msg}");
     }
 
     #[test]

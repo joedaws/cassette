@@ -6,11 +6,46 @@ pub const SLUG_MAX: usize = 32;
 /// Used when a topic yields no usable slug characters.
 const SLUG_FALLBACK: &str = "cassette";
 
+/// Length of a ULID in characters.
+pub const ID_LEN: usize = 26;
+
 /// A fresh ULID: 26 Crockford base32 characters, roughly sortable by
 /// creation time. Roughly is enough — the id is only ever a tiebreak, never
 /// an ordering guarantee (see the spec's "Identity and file naming").
 pub fn new_id() -> String {
     ulid::Ulid::generate().to_string()
+}
+
+/// Whether `s` is a well-formed ULID: exactly [`ID_LEN`] characters, each
+/// from Crockford base32 — the ten digits plus the letters, minus `I`, `L`,
+/// `O` and `U`, which Crockford strikes out to keep `1`/`I`/`l`, `0`/`O` and
+/// `U` from being confused by a human reading an id aloud.
+///
+/// This is the **only** guard between a `--session` argument and a path
+/// join: `Store::session_dir` joins the id straight onto the store root, so
+/// an unvalidated `../../escaped` writes a cassette outside the store
+/// entirely. Shape is checked here, beside `new_id`, because that is where
+/// the crate's knowledge of what an id *is* lives; whether the session so
+/// named exists is `Store::require_session`'s half of the question.
+///
+/// Case-insensitive, matching Crockford's own alphabet: `new_id` mints
+/// uppercase, and a lowercased id is well-formed but simply names no
+/// session on a case-sensitive filesystem — which the existence check then
+/// reports as the missing session it is, rather than as a malformed id.
+pub fn is_valid_id(s: &str) -> bool {
+    // Byte-wise, not char-wise: every legal character is ASCII, so a
+    // 26-byte string of legal bytes is exactly a 26-character id, and a
+    // multi-byte character fails `is_crockford_byte` on its first byte.
+    s.len() == ID_LEN && s.bytes().all(is_crockford_byte)
+}
+
+/// One Crockford base32 character. See [`is_valid_id`].
+fn is_crockford_byte(b: u8) -> bool {
+    match b {
+        b'0'..=b'9' => true,
+        b'A'..=b'Z' | b'a'..=b'z' => !matches!(b.to_ascii_uppercase(), b'I' | b'L' | b'O' | b'U'),
+        _ => false,
+    }
 }
 
 /// The filename-safe half of a cassette file name, derived from its topic at
@@ -81,6 +116,43 @@ mod tests {
             "no separators in a ULID: {a}"
         );
         assert_ne!(a, b, "two mints must differ");
+    }
+
+    #[test]
+    fn a_minted_id_is_well_formed() {
+        assert!(is_valid_id(&new_id()));
+    }
+
+    #[test]
+    fn traversal_and_path_separators_are_not_ids() {
+        // The whole point of the check: `--session` is joined onto the store
+        // root, so anything that could climb out of it or name a nested path
+        // must be rejected on shape alone, before any I/O.
+        for bad in ["..", "../../escaped", "a/b", "/etc", "..\\x", "."] {
+            assert!(!is_valid_id(bad), "must be rejected: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn ids_are_exactly_twenty_six_characters() {
+        assert!(!is_valid_id(""), "empty");
+        assert!(!is_valid_id(&"A".repeat(ID_LEN - 1)), "25 chars");
+        assert!(!is_valid_id(&"A".repeat(ID_LEN + 1)), "27 chars");
+        assert!(is_valid_id(&"A".repeat(ID_LEN)), "26 chars");
+    }
+
+    #[test]
+    fn crockford_excludes_i_l_o_and_u_in_either_case() {
+        for excluded in ['I', 'L', 'O', 'U', 'i', 'l', 'o', 'u'] {
+            let id = format!("{excluded}{}", "A".repeat(ID_LEN - 1));
+            assert!(!is_valid_id(&id), "not Crockford base32: {id}");
+        }
+        // Lowercase is otherwise fine — Crockford's alphabet is
+        // case-insensitive; naming no session is the existence check's
+        // business, not this one's.
+        assert!(is_valid_id(&"a".repeat(ID_LEN)));
+        // And a multi-byte character never sneaks through on byte length.
+        assert!(!is_valid_id(&format!("é{}", "A".repeat(ID_LEN - 2))));
     }
 
     #[test]

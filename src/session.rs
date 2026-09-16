@@ -82,7 +82,14 @@ pub fn list(store: &Store, all: bool) -> Result<String, String> {
 /// Set `id`'s display alias. An unknown session id is a usage error (exit
 /// 2) — the caller named something that does not exist — distinct from an
 /// I/O failure reading or writing an existing one (exit 1).
+///
+/// The id goes through `Store::require_session`, the same gate every `queue`
+/// command passes (see `queue::require_session`), so the two code paths
+/// cannot drift on what a session id is: `alias` is the other command that
+/// takes an id a human typed, and it joins it onto the store root just the
+/// same.
 pub fn set_alias(store: &Store, id: &str, alias: &str) -> Result<String, SessionError> {
+    store.require_session(id).map_err(SessionError::Usage)?;
     match store.set_session_alias(id, alias) {
         Ok(()) => Ok(format!("{id}  {alias}")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {

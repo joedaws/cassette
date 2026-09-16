@@ -157,6 +157,22 @@ fn main() -> io::Result<()> {
 
     if let Some(cmd) = &args.queue_cmd {
         let store = store::Store::new(store_root());
+        // Before any command touches the store: `--session` must be a
+        // well-formed ULID naming a session that exists. Done here, once,
+        // against `QueueCmd::session()` rather than inside each command —
+        // see `queue::require_session`. Unvalidated, the id is joined
+        // straight onto the store root by `Store::session_dir`, and the
+        // permissive reads below (`scan_session` treats a missing directory
+        // as an empty session) would otherwise report a typo as an empty
+        // queue.
+        match queue::require_session(&store, cmd.session()) {
+            Ok(()) => {}
+            Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+            // `require_session` produces nothing else. Matched anyway so a
+            // later change fails loudly instead of letting a command run on
+            // an unchecked session id.
+            Err(other) => die_with(1, &format!("{other:?}")),
+        }
         match cmd {
             // The only command that creates a cassette, so — like `write` —
             // it needs a writer identity to attribute the creation to.

@@ -23,7 +23,30 @@ pub mod write;
 pub use edit::Placement;
 pub use write::write;
 
-use crate::store::writers;
+use crate::store::{writers, Store};
+
+/// The gate every `queue` command passes through before it touches the
+/// store: `--session` names a well-formed ULID, and that session exists.
+///
+/// One helper rather than a check per command, and called from `main.rs`
+/// against `cli::QueueCmd::session()` rather than from inside each command,
+/// so the ninth queue command cannot forget it — `session()`'s match is
+/// exhaustive, so a new variant fails to compile until it says where its
+/// session id lives.
+///
+/// Both failures are `Usage` (exit 2), which is the spec's exit table:
+/// "unknown session" is listed there as 2, raised by any command. It has to
+/// be checked up front, because the store reads the argument permissively —
+/// `scan_session` maps a missing directory to an empty scan, so without this
+/// `queue list --session <typo>` would print `no cassettes` and exit 0, and
+/// `queue next` would exit 5, telling an agent loop "idle or enqueue work"
+/// when the truth is a typo.
+///
+/// `session alias` calls `Store::require_session` too, so the two paths
+/// cannot drift apart on what a session id is.
+pub fn require_session(store: &Store, session: &str) -> Result<(), QueueError> {
+    store.require_session(session).map_err(QueueError::Usage)
+}
 
 /// Where a writer name came from. The distinction is load-bearing: an
 /// unknown `$USER` is bootstrapped on first run, which the spec blesses,

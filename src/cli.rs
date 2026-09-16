@@ -70,6 +70,29 @@ pub enum QueueCmd {
     },
 }
 
+impl QueueCmd {
+    /// The `--session` this command was given. Every variant carries one —
+    /// there is no active session to fall back to — and `main()` validates
+    /// it through this accessor once, before dispatching, so no command can
+    /// reach the store with an unchecked session id.
+    ///
+    /// The exhaustive match is the enforcement: a ninth queue command does
+    /// not compile until it says where its session id lives, which is
+    /// stronger than a rule saying each command must remember to validate.
+    pub fn session(&self) -> &str {
+        match self {
+            QueueCmd::New { session, .. }
+            | QueueCmd::Write { session, .. }
+            | QueueCmd::List { session, .. }
+            | QueueCmd::Show { session, .. }
+            | QueueCmd::Next { session }
+            | QueueCmd::Close { session, .. }
+            | QueueCmd::Reopen { session, .. }
+            | QueueCmd::Move { session, .. } => session,
+        }
+    }
+}
+
 /// `writer …` as `main()` consumes it.
 #[derive(Debug, PartialEq)]
 pub enum WriterCmd {

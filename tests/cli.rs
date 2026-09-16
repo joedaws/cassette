@@ -147,16 +147,29 @@ fn queue_write_appears_in_help() {
 #[test]
 fn a_writer_name_is_required_when_user_is_unset() {
     // No shared "unknown" identity: attribution is the point of the system.
+    //
+    // Runs against a real session: `--session` is validated before any
+    // command resolves a writer, so a made-up session id would fail first
+    // and this test would pass for the wrong reason.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
     let out = Command::new(bin())
         .args([
             "queue",
             "write",
             "01K5GR7T2M9WPD0000000000AB",
             "--session",
-            "01K5GQ2R8V3XQZ0000000000AB",
+            &sid,
         ])
         .env_remove("USER")
-        .env("CASSETTE_DATA_DIR", "/nonexistent-store")
+        .env("CASSETTE_DATA_DIR", &root)
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn");
@@ -550,13 +563,131 @@ fn queue_list_and_show_need_no_writer_identity() {
     // because $USER is unset and no --writer was passed — unlike `queue
     // write`, see `a_writer_name_is_required_when_user_is_unset`.
     let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    // A real session: an unknown one is exit 2 for every queue command, so
+    // listing a made-up id would no longer test writer identity at all.
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
     let out = Command::new(bin())
-        .args(["queue", "list", "--session", "01K5GQ2R8V3XQZ0000000000AB"])
-        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
         .env_remove("USER")
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+#[test]
+fn a_traversal_session_id_exits_two_and_writes_nothing_outside_the_store() {
+    // `--session` is joined straight onto the store root, so an unvalidated
+    // `../../escaped` used to exit 0 and write the cassette outside the
+    // store entirely. Shape is checked before any command touches disk.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let out = Command::new(bin())
+        .args(["queue", "new", "oops", "--session", "../../escaped"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("malformed session id"),
+        "must say the id is malformed, not that the session is missing: {}",
+        stderr(&out)
+    );
+    // Nothing anywhere: not in the store, not beside it, not above it.
+    assert!(!root.join("escaped").exists());
+    assert!(!dir.path().join("escaped").exists());
+    assert!(!dir.path().parent().unwrap().join("escaped").exists());
+}
+
+#[test]
+fn a_well_formed_but_unknown_session_exits_two_and_creates_nothing() {
+    // The phantom-session case: a well-formed id nobody created used to
+    // exit 0, minting a session directory with no session.toml — so the
+    // cassette it wrote could never appear in `session list` again. Only
+    // `session new` creates sessions.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    const GHOST: &str = "01M2N4PCZZQC4J9B0DVAK40GJM";
+    let out = Command::new(bin())
+        .args(["queue", "new", "ghost", "--session", GHOST])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no session"),
+        "must distinguish a missing session from a malformed id: {}",
+        stderr(&out)
+    );
+    assert!(
+        !root.join("sessions").join(GHOST).exists(),
+        "an unknown session must never be created by side effect"
+    );
+}
+
+#[test]
+fn every_queue_command_rejects_an_unknown_session_with_exit_two() {
+    // The spec's exit table: unknown session is 2, raised by any command.
+    // Before the shared gate, `list` exited 0 with "no cassettes" and `next`
+    // exited 5 — telling an agent loop to idle when the truth was a typo.
+    // One case per `QueueCmd` variant, so a ninth command has a row to add.
+    const GHOST: &str = "01M2N4PCZZQC4J9B0DVAK40GJM";
+    const CID: &str = "01K5GR7T2M9WPD0000000000AB";
+    let commands: [&[&str]; 8] = [
+        &["queue", "list", "--session", GHOST],
+        &["queue", "next", "--session", GHOST],
+        &["queue", "new", "a topic", "--session", GHOST],
+        &["queue", "show", CID, "--session", GHOST],
+        &["queue", "close", CID, "--session", GHOST],
+        &["queue", "reopen", CID, "--session", GHOST],
+        &["queue", "move", CID, "--session", GHOST, "--before", CID],
+        &["queue", "write", CID, "--session", GHOST],
+    ];
+    for args in commands {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = Command::new(bin())
+            .args(args)
+            .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} must exit 2 on an unknown session: {}",
+            stderr(&out)
+        );
+        assert!(
+            stderr(&out).contains("no session"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn session_alias_rejects_a_malformed_id_through_the_same_gate() {
+    // `session alias` is the other command that takes a typed session id,
+    // and it shares `Store::require_session` so the two cannot drift.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["session", "alias", "../../escaped", "x"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("malformed session id"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]

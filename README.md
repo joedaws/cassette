@@ -265,6 +265,13 @@ you've lost track of one, `cassette session list` prints every session's id
 shown next to the id in `session list` — it is never accepted in place of an id
 anywhere, including `--session` itself; sessions are named by id only.
 
+Every command that takes a session id (`queue …`, `session alias`) checks it
+before touching the store: it must be a well-formed 26-character ULID naming a
+session that already exists. A malformed id and an id for a session nobody
+created are both usage errors (exit 2), reported differently so you can tell a
+typo from a stale id. Only `session new` ever creates a session — no command
+brings one into being as a side effect of being handed an unfamiliar id.
+
 The store lives under `~/.local/share/cassette/`, or wherever
 `$CASSETTE_DATA_DIR` points:
 
