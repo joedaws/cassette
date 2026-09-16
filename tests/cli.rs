@@ -970,3 +970,115 @@ fn queue_reopen_exits_six_once_the_open_cap_is_reached() {
         .expect("spawn");
     assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
 }
+
+#[test]
+fn queue_move_reorders_cassettes_and_persists_the_new_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let mut ids = Vec::new();
+    for topic in ["first", "second", "third"] {
+        let out = Command::new(bin())
+            .args(["queue", "new", topic, "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        ids.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    let first = &ids[0];
+    let third = &ids[2];
+
+    let moved = Command::new(bin())
+        .args(["queue", "move", third, "--session", &sid, "--before", first])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(moved.status.code(), Some(0), "{}", stderr(&moved));
+
+    let listed = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let out = String::from_utf8_lossy(&listed.stdout).to_string();
+    // Assert on relative order only, never exact formatting.
+    let pos_third = out.find(third.as_str()).expect("third listed");
+    let pos_first = out.find(first.as_str()).expect("first listed");
+    assert!(
+        pos_third < pos_first,
+        "the moved cassette must now sort before its anchor: {out}"
+    );
+}
+
+#[test]
+fn queue_move_rejects_moving_relative_to_itself() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let created = Command::new(bin())
+        .args(["queue", "new", "solo", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    let id = String::from_utf8_lossy(&created.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "move", &id, "--session", &sid, "--before", &id])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_move_requires_exactly_one_of_before_or_after() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let neither = Command::new(bin())
+        .args(["queue", "move", "someid", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(neither.status.code(), Some(2), "{}", stderr(&neither));
+
+    let both = Command::new(bin())
+        .args([
+            "queue",
+            "move",
+            "someid",
+            "--session",
+            &sid,
+            "--before",
+            "a",
+            "--after",
+            "b",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
+}

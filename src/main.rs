@@ -278,6 +278,35 @@ fn main() -> io::Result<()> {
                     Err(queue::QueueError::Io(m)) => die_with(1, &m),
                 }
             }
+            // `move` reprioritizes an existing cassette, so — like `close`
+            // and `reopen` — it needs a writer identity to attribute the
+            // change to.
+            cli::QueueCmd::Move {
+                id,
+                session,
+                anchor,
+            } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                match queue::edit::move_cassette(
+                    &store,
+                    session,
+                    id,
+                    anchor.clone(),
+                    &who_name,
+                    writer_source,
+                ) {
+                    Ok(()) => std::process::exit(0),
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
+            }
         }
     }
 

@@ -1,12 +1,12 @@
 //! `cassette queue new`: create a cassette in a session, plus the shared
-//! open-cassette cap and the renumbering helper `queue move` (a later task)
-//! will also need.
+//! open-cassette cap and the renumbering helper `queue move` also needs.
 //!
 //! Alongside `write.rs`, this is the other place in `queue` that writes a
 //! cassette file — `new` calls `Store::add_cassette`, which routes through
 //! `LockGuard::write` like every other write in the crate, and
 //! `renumber_all` writes through guards it takes itself via
-//! `Store::lock_many`.
+//! `Store::lock_many`. `move_cassette` locks only the one cassette it
+//! ultimately writes; see its doc comment for why that is the whole design.
 
 use super::{require_error_to_queue_error, resolve_error_to_queue_error, QueueError, WriterSource};
 use crate::store::lock::{Attribution, LockError};
@@ -395,6 +395,242 @@ pub fn renumber_all(store: &Store, session: &str, who: &Attribution) -> Result<(
     }
 
     Ok(())
+}
+
+/// The CLI's chosen anchor for `queue move`: which existing cassette `id`
+/// should land next to, and on which side. Carries the anchor's id, unlike
+/// `MoveSide` below, which is the same choice stripped of the id so the
+/// placement arithmetic in `target_priority` is unit-testable without a
+/// store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveAnchor {
+    Before(String),
+    After(String),
+}
+
+impl MoveAnchor {
+    /// The anchor cassette's id, regardless of side.
+    pub fn id(&self) -> &str {
+        match self {
+            MoveAnchor::Before(id) | MoveAnchor::After(id) => id,
+        }
+    }
+
+    /// The side alone, with the id stripped off. See `MoveAnchor`.
+    pub fn side(&self) -> MoveSide {
+        match self {
+            MoveAnchor::Before(_) => MoveSide::Before,
+            MoveAnchor::After(_) => MoveSide::After,
+        }
+    }
+}
+
+/// Which side of the anchor the moved cassette should land on. The
+/// id-free half of `MoveAnchor`, so `target_priority` below can be tested
+/// with bare priorities instead of a store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveSide {
+    Before,
+    After,
+}
+
+/// Pure placement arithmetic for `queue move`: the new priority for a
+/// cassette landing on `side` of `anchor_priority`, among a session's open
+/// cassette priorities (`sorted_open`, any order — this scans for the
+/// anchor's position rather than assuming it, so the caller need not
+/// pre-sort beyond what `Vec::sort_unstable` gives it).
+///
+/// `sorted_open` should include the anchor's own priority (this is how its
+/// neighbour is found) and may also include the moving cassette's own
+/// current priority without changing the result: only the value or values
+/// immediately adjacent to the anchor are ever consulted, and a moving
+/// cassette that already sits there yields a still-correct (if sometimes
+/// redundant) midpoint.
+///
+/// `None` means there is no integer gap left on that side — the caller's
+/// signal to renumber the run and retry (see `move_cassette`). Also `None`
+/// when `anchor_priority` is not present in `sorted_open` at all, which a
+/// correct caller never triggers since it reads the anchor's priority from
+/// the same scan that built the list.
+///
+/// When the anchor has no neighbour on the requested side (it is already
+/// the head or the tail of the open run), the new priority is derived from
+/// the anchor alone, mirroring `priority::first`/`priority::last`: a step
+/// below/above the anchor, or half the anchor when a full step would reach
+/// zero or below.
+pub fn target_priority(sorted_open: &[i64], anchor_priority: i64, side: MoveSide) -> Option<i64> {
+    let pos = sorted_open.iter().position(|&p| p == anchor_priority)?;
+    match side {
+        MoveSide::Before => match pos.checked_sub(1).and_then(|i| sorted_open.get(i)) {
+            Some(&lower) => priority::between(lower, anchor_priority),
+            None => {
+                // No lower neighbour: `first`-style placement derived from
+                // the anchor alone, checked before comparing for the same
+                // underflow reason `priority::first` checks first.
+                if let Some(below) = anchor_priority.checked_sub(priority::STEP) {
+                    if below > 0 {
+                        return Some(below);
+                    }
+                }
+                let halved = anchor_priority / 2;
+                (halved > 0).then_some(halved)
+            }
+        },
+        MoveSide::After => match sorted_open.get(pos + 1) {
+            Some(&upper) => priority::between(anchor_priority, upper),
+            // No upper neighbour: `last`-style placement, a step past the
+            // anchor.
+            None => anchor_priority.checked_add(priority::STEP),
+        },
+    }
+}
+
+/// Scan `session` holding no locks and compute `id`'s new priority relative
+/// to `anchor`, among the session's open cassettes. Shared by
+/// `move_cassette`'s first attempt and its single post-renumber retry.
+///
+/// Restricted to `Status::Open` on both ends deliberately: `priority::queue_order`
+/// always sorts closed cassettes after every open one regardless of
+/// priority, so reordering relative to (or of) a closed cassette would
+/// change a priority number without changing anything anyone can see —
+/// `queue move` only makes sense between two cassettes that are actually in
+/// the visible, active queue.
+fn compute_move_target(
+    store: &Store,
+    session: &str,
+    id: &str,
+    anchor: &MoveAnchor,
+) -> Result<Option<i64>, QueueError> {
+    let scan = store
+        .scan_session(session)
+        .map_err(|e| QueueError::Io(format!("cannot scan session '{session}': {e}")))?;
+
+    let moving = scan
+        .cassettes
+        .iter()
+        .find(|c| c.meta.id == id)
+        .ok_or_else(|| QueueError::Usage(format!("no cassette '{id}' in session '{session}'")))?;
+    if moving.meta.status != Status::Open {
+        return Err(QueueError::Usage(format!(
+            "'{id}' is not open — only open cassettes can be moved"
+        )));
+    }
+
+    let anchor_id = anchor.id();
+    let anchor_meta = scan
+        .cassettes
+        .iter()
+        .find(|c| c.meta.id == anchor_id)
+        .ok_or_else(|| {
+            QueueError::Usage(format!("no cassette '{anchor_id}' in session '{session}'"))
+        })?;
+    if anchor_meta.meta.status != Status::Open {
+        return Err(QueueError::Usage(format!(
+            "'{anchor_id}' is not open — can only move relative to an open cassette"
+        )));
+    }
+
+    let mut sorted_open: Vec<i64> = scan
+        .cassettes
+        .iter()
+        .filter(|c| c.meta.status == Status::Open)
+        .map(|c| c.meta.priority)
+        .collect();
+    sorted_open.sort_unstable();
+
+    Ok(target_priority(
+        &sorted_open,
+        anchor_meta.meta.priority,
+        anchor.side(),
+    ))
+}
+
+/// `cassette queue move <ID> --session <ID> (--before <ID> | --after <ID>)`:
+/// reorder an open cassette relative to another open cassette.
+///
+/// **The ordering below is the whole design, not an optimization.** The
+/// obvious implementation locks `id` first, discovers there is no priority
+/// gap, and calls `renumber_all` — which tries to lock every cassette in the
+/// session *including the one this call already holds*. flock is
+/// per-open-file-description: a second open-and-lock of a file this same
+/// process already holds through another descriptor does not recognise its
+/// own owner, so that second acquisition reports `Busy` and the command
+/// deadlocks against itself, blaming a phantom other writer. Avoiding that
+/// is why every step below holds at most one lock, and why `renumber_all`
+/// only ever runs while holding none:
+///
+/// 1. Compute the target priority (`compute_move_target`) **holding no
+///    locks at all**.
+/// 2. If that is `None` (no gap), call `renumber_all` — which takes and
+///    releases every lock itself — then recompute exactly once. A second
+///    `None` is `QueueError::Io`: unrepresentable even freshly renumbered.
+/// 3. Lock only `id`, re-read it through the guard, set the new priority
+///    plus `last_writer`/`updated_at`, and write. **One lock, held only for
+///    this step.**
+///
+/// The scans in steps 1 and 2 are unlocked on purpose, not an oversight: a
+/// concurrent writer may change a priority between the read and the write in
+/// step 3, landing `id` in a slightly wrong position. That is a
+/// display-order inaccuracy, not corruption — the next move self-corrects it
+/// — and is the price of never blocking on a lock a human might be holding;
+/// taking every lock to make the read atomic would mean one busy cassette
+/// blocks all reordering.
+pub fn move_cassette(
+    store: &Store,
+    session: &str,
+    id: &str,
+    anchor: MoveAnchor,
+    who_name: &str,
+    source: WriterSource,
+) -> Result<(), QueueError> {
+    // Cheap and no I/O, so it fails before the writer is even resolved.
+    if anchor.id() == id {
+        return Err(QueueError::Usage(format!(
+            "cannot move '{id}' relative to itself"
+        )));
+    }
+
+    let (writer, _kind) = match source {
+        WriterSource::Env => store
+            .resolve_writer(who_name)
+            .map_err(resolve_error_to_queue_error)?,
+        WriterSource::Flag => store
+            .require_writer(who_name)
+            .map_err(require_error_to_queue_error)?,
+    };
+
+    // Step 1: no locks held.
+    let priority = match compute_move_target(store, session, id, &anchor)? {
+        Some(p) => p,
+        None => {
+            // Step 2: `renumber_all` takes and releases every lock itself;
+            // no lock is held here across that call.
+            let who = Attribution::for_now(&writer, who_name);
+            renumber_all(store, session, &who)?;
+            compute_move_target(store, session, id, &anchor)?.ok_or_else(|| {
+                QueueError::Io(format!(
+                    "session '{session}' cannot place '{id}' even after renumbering"
+                ))
+            })?
+        }
+    };
+
+    // Step 3: exactly one lock, `id`'s own, held only for this
+    // read-modify-write.
+    let who = Attribution::for_now(&writer, who_name);
+    let guard = store
+        .lock(session, id, &who)
+        .map_err(|e| lock_error_to_queue_error(id, session, e))?;
+    let current = guard
+        .read()
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+    let mut m = current.meta;
+    m.priority = priority;
+    m.last_writer = writer;
+    m.updated_at = crate::store::meta::now_utc();
+    guard
+        .write(&m, &current.body)
+        .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
 }
 
 #[cfg(test)]
@@ -845,5 +1081,274 @@ mod tests {
             36,
         )
         .expect("an agent may reopen a sticky-locked cassette");
+    }
+
+    #[test]
+    fn moving_before_the_head_takes_a_priority_above_zero() {
+        // `first`-style placement: there is no lower neighbour, so the new
+        // priority is derived from the head alone and must stay positive.
+        let existing = [10i64, 20, 30];
+        let p = target_priority(&existing, /* anchor */ 10, MoveSide::Before)
+            .expect("a gap exists below 10");
+        assert!(p > 0, "priorities are positive: got {p}");
+        assert!(p < 10, "before the head means below it: got {p}");
+    }
+
+    #[test]
+    fn adjacent_neighbours_report_no_gap_so_the_caller_renumbers() {
+        // 10 and 11 have no integer between them. `None` is the signal to
+        // renumber, not an error.
+        assert!(target_priority(&[10, 11], 11, MoveSide::Before).is_none());
+    }
+
+    #[test]
+    fn moving_after_the_tail_takes_a_priority_a_step_past_it() {
+        // `last`-style placement: no upper neighbour, so the new priority is
+        // derived from the tail alone.
+        let existing = [10i64, 20, 30];
+        assert_eq!(
+            target_priority(&existing, 30, MoveSide::After),
+            Some(40),
+            "after the tail means one step above it"
+        );
+    }
+
+    #[test]
+    fn moving_between_two_neighbours_takes_their_midpoint() {
+        let existing = [10i64, 20, 30];
+        assert_eq!(target_priority(&existing, 20, MoveSide::Before), Some(15));
+        assert_eq!(target_priority(&existing, 20, MoveSide::After), Some(25));
+    }
+
+    #[test]
+    fn move_anchor_side_strips_the_id() {
+        assert_eq!(MoveAnchor::Before("x".to_string()).side(), MoveSide::Before);
+        assert_eq!(MoveAnchor::After("x".to_string()).side(), MoveSide::After);
+        assert_eq!(MoveAnchor::Before("x".to_string()).id(), "x");
+    }
+
+    #[test]
+    fn move_cassette_refuses_to_move_relative_to_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        match move_cassette(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            MoveAnchor::Before("aaa00000000000000000000000".to_string()),
+            "tester",
+            WriterSource::Env,
+        ) {
+            Err(QueueError::Usage(m)) => assert!(m.contains("itself"), "{m}"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn move_cassette_reorders_the_tail_before_the_head() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("bbb00000000000000000000000", 20, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("ccc00000000000000000000000", 30, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        move_cassette(
+            &store,
+            &sid,
+            "ccc00000000000000000000000",
+            MoveAnchor::Before("aaa00000000000000000000000".to_string()),
+            "tester",
+            WriterSource::Env,
+        )
+        .expect("move");
+
+        let scan = store.scan_session(&sid).expect("scan");
+        let order: Vec<&str> = scan.cassettes.iter().map(|c| c.meta.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "ccc00000000000000000000000",
+                "aaa00000000000000000000000",
+                "bbb00000000000000000000000",
+            ],
+            "the moved cassette now sorts first: {order:?}"
+        );
+    }
+
+    #[test]
+    fn move_cassette_renumbers_once_when_the_gap_is_exhausted_then_places() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        // Adjacent priorities: no integer gap between 10 and 11.
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("bbb00000000000000000000000", 11, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("ccc00000000000000000000000", 30, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        // Move ccc before bbb: 10 and 11 leave no gap, forcing a renumber.
+        move_cassette(
+            &store,
+            &sid,
+            "ccc00000000000000000000000",
+            MoveAnchor::Before("bbb00000000000000000000000".to_string()),
+            "tester",
+            WriterSource::Env,
+        )
+        .expect("move after a forced renumber");
+
+        let scan = store.scan_session(&sid).expect("scan");
+        let order: Vec<&str> = scan.cassettes.iter().map(|c| c.meta.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "aaa00000000000000000000000",
+                "ccc00000000000000000000000",
+                "bbb00000000000000000000000",
+            ],
+            "ccc now sorts directly before bbb: {order:?}"
+        );
+    }
+
+    #[test]
+    fn move_cassette_rejects_an_unknown_anchor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        match move_cassette(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            MoveAnchor::Before("zzz00000000000000000000000".to_string()),
+            "tester",
+            WriterSource::Env,
+        ) {
+            Err(QueueError::Usage(m)) => assert!(m.contains("zzz00000000000000000000000"), "{m}"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn move_cassette_rejects_a_closed_anchor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("bbb00000000000000000000000", 20, Status::Closed),
+                "",
+            )
+            .expect("add");
+
+        match move_cassette(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            MoveAnchor::Before("bbb00000000000000000000000".to_string()),
+            "tester",
+            WriterSource::Env,
+        ) {
+            Err(QueueError::Usage(m)) => assert!(m.contains("not open"), "{m}"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn move_cassette_busy_when_the_moved_cassette_is_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("bbb00000000000000000000000", 20, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        let holder = Attribution::for_now("writer-1", "joseph");
+        let _held = store
+            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .expect("hold it");
+
+        match move_cassette(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            MoveAnchor::Before("bbb00000000000000000000000".to_string()),
+            "tester",
+            WriterSource::Env,
+        ) {
+            Err(QueueError::Busy(_)) => {}
+            other => panic!("expected Busy, got {other:?}"),
+        }
     }
 }

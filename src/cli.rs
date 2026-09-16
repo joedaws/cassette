@@ -63,6 +63,11 @@ pub enum QueueCmd {
         id: String,
         session: String,
     },
+    Move {
+        id: String,
+        session: String,
+        anchor: crate::queue::edit::MoveAnchor,
+    },
 }
 
 /// `writer …` as `main()` consumes it.
@@ -248,6 +253,21 @@ enum QueueAction {
         #[arg(long, value_name = "ID")]
         session: String,
     },
+    /// move a cassette to a new position in the queue
+    #[command(group(clap::ArgGroup::new("anchor").required(true).args(["before", "after"])))]
+    Move {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// place immediately before this cassette
+        #[arg(long, value_name = "ID")]
+        before: Option<String>,
+        /// place immediately after this cassette
+        #[arg(long, value_name = "ID")]
+        after: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -398,6 +418,29 @@ impl Cli {
                         message,
                     },
                     QueueAction::Reopen { id, session } => QueueCmd::Reopen { id, session },
+                    QueueAction::Move {
+                        id,
+                        session,
+                        before,
+                        after,
+                    } => {
+                        // The `anchor` ArgGroup (`required(true)`, `multiple`
+                        // defaulted to `false`) already guarantees exactly
+                        // one of `before`/`after` is `Some` by the time clap
+                        // hands this back.
+                        let anchor = match (before, after) {
+                            (Some(b), None) => crate::queue::edit::MoveAnchor::Before(b),
+                            (None, Some(a)) => crate::queue::edit::MoveAnchor::After(a),
+                            _ => unreachable!(
+                                "the 'anchor' ArgGroup enforces exactly one of before/after"
+                            ),
+                        };
+                        QueueCmd::Move {
+                            id,
+                            session,
+                            anchor,
+                        }
+                    }
                 });
             }
             Some(Command::Writer { action }) => {
