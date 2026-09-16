@@ -28,6 +28,9 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub templates: HashMap<String, Vec<String>>,
+    /// Most open cassettes one session may hold; defaults to
+    /// `store::MAX_OPEN` (36).
+    pub max_open: Option<usize>,
 }
 
 /// XDG-style config path on every platform: `$XDG_CONFIG_HOME/cassette/config.toml`,

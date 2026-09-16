@@ -14,6 +14,11 @@ fn bin() -> &'static str {
 
 const SESSION: &str = "01K5GQ2R8V3XQZ0000000000AB";
 const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+/// A second open cassette, lower priority (higher number, so it sorts after
+/// `ID` in queue order — see `store::priority::queue_order`) — used by the
+/// `queue next` skip test below, which needs somewhere for `next` to fall
+/// through to once `ID` is held.
+const SECOND_ID: &str = "01K5GR7T2M9WPD0000000000CD";
 
 /// Build the store layout directly. Deliberately not through the CLI: the
 /// commands that would do it arrive in Phase 4, and a hand-built fixture keeps
@@ -29,7 +34,6 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         "created = \"2026-09-14T09:25:57Z\"\n",
     )
     .expect("session.toml");
-    std::fs::write(root.join("active"), format!("{SESSION}\n")).expect("active");
     std::fs::write(
         cassettes.join(format!("gratitude-{ID}.md")),
         format!(
@@ -39,6 +43,15 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         ),
     )
     .expect("cassette");
+    std::fs::write(
+        cassettes.join(format!("priorities-{SECOND_ID}.md")),
+        format!(
+            "---\nid: {SECOND_ID}\ntopic: priorities\npriority: 20\nstatus: open\nlocked_by:\n\
+             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             ## Side A\n\nsecond\n"
+        ),
+    )
+    .expect("second cassette");
     (dir, root)
 }
 
@@ -52,7 +65,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 /// independently. Any other write error still propagates.
 fn spawn_write(root: &std::path::Path, id: &str, user: &str) -> Child {
     let mut child = Command::new(bin())
-        .args(["queue", "write", id])
+        .args(["queue", "write", id, "--session", SESSION])
         .env("CASSETTE_DATA_DIR", root)
         .env("USER", user)
         .stdin(Stdio::piped())
@@ -70,7 +83,7 @@ fn spawn_write(root: &std::path::Path, id: &str, user: &str) -> Child {
 
 fn try_write(root: &std::path::Path, body: &str) -> std::process::Output {
     let mut child = Command::new(bin())
-        .args(["queue", "write", ID])
+        .args(["queue", "write", ID, "--session", SESSION])
         .env("CASSETTE_DATA_DIR", root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -234,7 +247,7 @@ fn the_registry_lock_waits_rather_than_failing() {
     anchor.lock().expect("hold the registry");
 
     let mut child = Command::new(bin())
-        .args(["queue", "write", ID])
+        .args(["queue", "write", ID, "--session", SESSION])
         .env("CASSETTE_DATA_DIR", &root)
         .env("USER", "someone-new")
         .stdin(Stdio::piped())
@@ -287,7 +300,7 @@ fn registering_writers_concurrently_keeps_both() {
     let (_d, root) = fixture();
     let spawn = |user: &str| {
         Command::new(bin())
-            .args(["queue", "write", ID])
+            .args(["queue", "write", ID, "--session", SESSION])
             .env("CASSETTE_DATA_DIR", &root)
             .env("USER", user)
             .stdin(Stdio::piped())
@@ -316,4 +329,84 @@ fn registering_writers_concurrently_keeps_both() {
     let registry = std::fs::read_to_string(root.join("writers.toml")).expect("read");
     assert!(registry.contains("joseph"), "{registry}");
     assert!(registry.contains("agent"), "{registry}");
+}
+
+#[test]
+fn queue_next_skips_a_cassette_a_live_holder_is_in() {
+    // Reuses `contend` rather than a bare `spawn_write`: a single spawned
+    // writer's own successful start proves nothing about whether it has
+    // reached `store.lock` yet, and this suite does not sleep or poll to
+    // find out. Racing it against a second writer for the SAME cassette
+    // sidesteps the question — `contend` returns only once one of the two
+    // has definitively lost (`Busy`, observed via its own exit), which is
+    // possible only if the other has, by that same instant, already
+    // acquired the lock and continues to hold it until we release its
+    // stdin. That is a fact about the flock, not a guess about timing.
+    let (_d, root) = fixture();
+    let (loser_out, mut winner) = contend(&root, ID);
+    assert_eq!(
+        loser_out.status.code(),
+        Some(3),
+        "exactly one racing writer must lose, which proves the other now \
+         holds '{ID}': {:?}",
+        loser_out
+    );
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", SESSION])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn next");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        SECOND_ID,
+        "next must skip the cassette the live holder is in and report the \
+         other open one"
+    );
+
+    // Release the holder the same way every other test here does: close its
+    // stdin, which hands it EOF, lets it finish its write, and exit clean.
+    drop(winner.stdin.take());
+    let done = winner.wait().expect("wait winner");
+    assert!(done.success(), "{:?}", done);
+}
+
+#[test]
+fn queue_close_on_a_held_cassette_exits_three_and_names_the_holder() {
+    // Same technique as the test above: `contend` proves — by elimination,
+    // not by assumption — that the winner is currently holding `ID`'s lock
+    // before `queue close` is ever run against it.
+    let (_d, root) = fixture();
+    let (loser_out, mut winner) = contend(&root, ID);
+    assert_eq!(
+        loser_out.status.code(),
+        Some(3),
+        "exactly one racing writer must lose, which proves the other now \
+         holds '{ID}': {:?}",
+        loser_out
+    );
+
+    let out = Command::new(bin())
+        .args(["queue", "close", ID, "--session", SESSION])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "closer")
+        .output()
+        .expect("spawn close");
+    assert_eq!(out.status.code(), Some(3), "{:?}", out);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("is open by"), "{err}");
+    assert!(
+        err.contains("contender-"),
+        "stderr should name the live holder: {err}"
+    );
+
+    drop(winner.stdin.take());
+    let done = winner.wait().expect("wait winner");
+    assert!(done.success(), "{:?}", done);
 }

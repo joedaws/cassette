@@ -1,44 +1,12 @@
-//! The `cassette queue` commands. Only `write` exists in 4a; 4b adds `list`,
-//! `next`, `new`, `show`, `close`, `reopen`, `move`.
+//! `cassette queue write`: the one command that mutates a cassette body.
+//!
+//! Everything shared with the read-only commands in `view.rs` — `QueueError`,
+//! `WriterSource`, `StatusFilter`, and the writer-error mappers — lives in
+//! `queue/mod.rs` instead, so this module can stay the only place a lock is
+//! ever acquired for writing.
 
+use super::{require_error_to_queue_error, resolve_error_to_queue_error, QueueError, WriterSource};
 use crate::store;
-use crate::store::writers::WriterError;
-
-/// Where a writer name came from. The distinction is load-bearing: an
-/// unknown `$USER` is bootstrapped on first run, which the spec blesses,
-/// while an unknown `--writer` is a typo and must fail loudly rather than
-/// silently spawning a second identity — one auto-created as human, the
-/// *privileged* kind, would fail open on exactly that typo.
-///
-/// Every queue command that resolves a writer takes this alongside the name,
-/// so the seven commands 4b adds all pick the same way `write` does here
-/// rather than each re-deriving it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriterSource {
-    /// Explicit `--writer`. An unknown name here is a usage error.
-    Flag,
-    /// Derived from `$USER`. An unknown name here is a first run.
-    Env,
-}
-
-/// Why a queue command failed, in the shape `main.rs` maps to an exit code.
-#[derive(Debug)]
-pub enum QueueError {
-    /// Bad invocation, unknown session, unknown cassette, unregistered
-    /// writer, or a kind mismatch. Exit 2.
-    Usage(String),
-    /// Another writer holds the cassette. Exit 3. Carries the rendered
-    /// message rather than `{ id, holder }`, unlike `LockError::Busy` and
-    /// `WriterError::KindMismatch` — a deliberate divergence, not an
-    /// oversight: the sole caller needs only the text, and the holder
-    /// formatting belongs beside the code that produces it. A `queue move`
-    /// in 4b can render its own message while it still has the id. 4c's
-    /// `--json` is what will likely need the fields back, since it emits
-    /// `id` and `holder` raw rather than prose.
-    Busy(String),
-    /// Anything else. Exit 1.
-    Io(String),
-}
 
 /// `cassette queue write <ID>`: acquire the cassette's lock, THEN read the body
 /// from stdin, write, and release.
@@ -49,27 +17,10 @@ pub enum QueueError {
 pub fn write(
     store: &store::Store,
     id: &str,
-    session: Option<&str>,
+    session: &str,
     who_name: &str,
     source: WriterSource,
 ) -> Result<(), QueueError> {
-    let session = match session
-        .map(str::to_string)
-        .map_or_else(|| store.active_session(), |s| Ok(Some(s)))
-    {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return Err(QueueError::Usage(
-                "no active session; pass --session".into(),
-            ))
-        }
-        Err(e) => {
-            return Err(QueueError::Io(format!(
-                "cannot read the active session: {e}"
-            )))
-        }
-    };
-
     // Registration/lookup happens BEFORE acquisition, even though failing
     // fast on a bad lock looks more logical: two writers racing for the same
     // cassette must both land in writers.toml (or both fail cleanly) even
@@ -90,13 +41,16 @@ pub fn write(
     // refuses to close a cassette whose `locked_by` is set; a human may), so
     // this is where that lookup will plug in rather than a second lookup.
     let (writer, _kind) = match source {
-        WriterSource::Env => store.resolve_writer(who_name),
-        WriterSource::Flag => store.require_writer(who_name),
-    }
-    .map_err(writer_error_to_queue_error)?;
+        WriterSource::Env => store
+            .resolve_writer(who_name)
+            .map_err(resolve_error_to_queue_error)?,
+        WriterSource::Flag => store
+            .require_writer(who_name)
+            .map_err(require_error_to_queue_error)?,
+    };
     let who = store::lock::Attribution::for_now(&writer, who_name);
 
-    let guard = match store.lock(&session, id, &who) {
+    let guard = match store.lock(session, id, &who) {
         Ok(g) => g,
         Err(store::lock::LockError::Busy { holder, .. }) => {
             let who = holder
@@ -136,20 +90,4 @@ pub fn write(
         return Err(QueueError::Io(format!("cannot write '{id}': {e}")));
     }
     Ok(())
-}
-
-/// Render a writer-resolution failure as the exit code it deserves.
-/// `EmptyName` and `Unregistered` are usage errors (2): both are about what
-/// the caller asked for, not a system failure. `KindMismatch` cannot actually
-/// reach here — neither `resolve_writer` nor `require_writer` declares a
-/// kind — but the arm stays so this match stays exhaustive as `WriterError`
-/// grows, rather than by a wildcard that would silently swallow a real new
-/// variant into `Io`.
-fn writer_error_to_queue_error(e: WriterError) -> QueueError {
-    match e {
-        WriterError::EmptyName => QueueError::Usage(e.to_string()),
-        WriterError::Unregistered(_) => QueueError::Usage(e.to_string()),
-        WriterError::KindMismatch { .. } => QueueError::Usage(e.to_string()),
-        WriterError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
-    }
 }

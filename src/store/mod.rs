@@ -11,7 +11,6 @@
 //! ```text
 //! ~/.local/share/cassette/
 //!   writers.toml
-//!   active                       # single line: active session id
 //!   .locks/
 //!     writers                    # flock anchor for the writer registry
 //!   sessions/
@@ -31,10 +30,10 @@
 //! **`Store` owns the data-dir root.** The `session` and `writers` modules hold
 //! the file formats, but their entry points are `pub(crate)` and everything
 //! outside this module goes through a `Store` method. That is deliberate: when
-//! `writers` and the active pointer took a bare root path of their own, they
-//! created the store root through `atomic_write` at the process umask, leaving
-//! a freewriting journal world-readable until some later call happened to
-//! tighten it. One owner, one place that creates the root.
+//! `writers` took a bare root path of its own, it created the store root
+//! through `atomic_write` at the process umask, leaving a freewriting journal
+//! world-readable until some later call happened to tighten it. One owner,
+//! one place that creates the root.
 
 pub mod ids;
 pub mod lock;
@@ -55,6 +54,15 @@ pub const SESSIONS_DIR: &str = "sessions";
 pub const CASSETTES_DIR: &str = "cassettes";
 /// Per-session directory of flock anchors — see `lock`.
 pub const LOCKS_DIR: &str = ".locks";
+
+/// The most open cassettes one session may hold, overridable by the
+/// `max_open` config key.
+///
+/// Defined here and NOT taken from `app::MAX_CASSETTES`, which happens to be
+/// the same number: that one is a TUI display concern (how many cassettes the
+/// stack can show and select), and binding the store's cap to it would assert
+/// a relationship the code does not have.
+pub const MAX_OPEN: usize = 36;
 
 /// Write via a temp file in the same directory, then `rename()` over the
 /// target. Spec invariant 4: a reader either sees the old file whole or the
@@ -86,9 +94,9 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
 /// than chmod'd afterwards, so the directory is never briefly world-readable;
 /// parents keep their own permissions.
 ///
-/// Free-standing rather than a `Store` method because `writers` and the active
-/// pointer take a bare root path and would otherwise create the store root
-/// through `atomic_write` at the process umask.
+/// Free-standing rather than a `Store` method because `writers` takes a bare
+/// root path and would otherwise create the store root through `atomic_write`
+/// at the process umask.
 pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -110,6 +118,16 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(not(unix))]
     std::fs::create_dir_all(dir)?;
     Ok(())
+}
+
+/// The result of reading a session's cassettes, including how many files
+/// could not be read or parsed. The count is carried rather than logged: a
+/// damaged cassette that vanishes from `queue list` is invisible work, and
+/// the operator has no other view of the store.
+#[derive(Debug, Default)]
+pub struct SessionScan {
+    pub cassettes: Vec<StoredCassette>,
+    pub unreadable: usize,
 }
 
 /// One cassette as it exists on disk.
@@ -216,6 +234,42 @@ impl Store {
         Ok(path)
     }
 
+    /// Resolve a caller-supplied session id to a session that actually
+    /// exists, on the two axes a `--session` argument can be wrong on.
+    ///
+    /// **Shape.** The id is joined straight onto the store root by
+    /// `session_dir`, so `ids::is_valid_id` is what stands between a
+    /// `--session ../../escaped` and a cassette written outside the store.
+    /// The spec's "sessions are named by ULID only" is asserted in half a
+    /// dozen doc comments; this is where it is enforced.
+    ///
+    /// **Existence.** A well-formed id for a session nobody created is a
+    /// typo, never an implicit create: `create_session` is the only code
+    /// that builds a session directory, and letting a command materialize
+    /// one by side effect produced cassettes in a directory `session list`
+    /// could never show, since it has no `session.toml` to list. So the
+    /// session directory must be there *and* carry a readable
+    /// `session.toml`; anything else is reported as the missing session it
+    /// is.
+    ///
+    /// Returns the message rather than an error enum: both axes are usage
+    /// errors (exit 2) at every call site, so the only thing a caller needs
+    /// from a failure is prose that says which of the two it was.
+    pub fn require_session(&self, session: &str) -> Result<(), String> {
+        if !ids::is_valid_id(session) {
+            return Err(format!(
+                "malformed session id '{session}': expected a {}-character ULID",
+                ids::ID_LEN
+            ));
+        }
+        match self.session_meta(session) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(format!(
+                "no session '{session}' — `cassette session list` shows what exists"
+            )),
+        }
+    }
+
     /// The session's own metadata (`session.toml`).
     pub fn session_meta(&self, session: &str) -> io::Result<SessionMeta> {
         session::read(&self.session_dir(session).join("session.toml"))
@@ -225,11 +279,6 @@ impl Store {
     /// one; any other read failure propagates.
     pub fn writers(&self) -> io::Result<writers::Writers> {
         writers::read(&self.root)
-    }
-
-    /// Replace the writer registry wholesale.
-    pub fn write_writers(&self, w: &writers::Writers) -> io::Result<()> {
-        writers::write(&self.root, w)
     }
 
     /// Anchors for store-wide locks, as opposed to a session's per-cassette
@@ -273,7 +322,7 @@ impl Store {
         &self,
         name: &str,
         kind: writers::Kind,
-    ) -> Result<String, writers::WriterError> {
+    ) -> Result<String, writers::EnsureError> {
         // `_registry`, NOT `_`: a bare underscore drops the guard immediately
         // and silently reopens the lost-update race this whole function exists
         // to close. No test catches the difference — the critical section is
@@ -289,7 +338,7 @@ impl Store {
     pub fn resolve_writer(
         &self,
         name: &str,
-    ) -> Result<(String, writers::Kind), writers::WriterError> {
+    ) -> Result<(String, writers::Kind), writers::ResolveError> {
         // `_registry`, NOT `_`: see `ensure_writer`. Same read-modify-write,
         // same race if the guard drops early.
         let _registry = self.lock_registry()?;
@@ -307,18 +356,8 @@ impl Store {
     pub fn require_writer(
         &self,
         name: &str,
-    ) -> Result<(String, writers::Kind), writers::WriterError> {
+    ) -> Result<(String, writers::Kind), writers::RequireError> {
         writers::require_registered(&self.root, name)
-    }
-
-    /// The active session id, or `None` when no session is active.
-    pub fn active_session(&self) -> io::Result<Option<String>> {
-        session::read_active(&self.root)
-    }
-
-    /// Point `active` at `session`.
-    pub fn set_active_session(&self, session: &str) -> io::Result<()> {
-        session::write_active(&self.root, session)
     }
 
     /// The file backing a cassette id, found by its `-<id>.md` suffix. The
@@ -367,6 +406,15 @@ impl Store {
         lock::acquire(id, path, &anchor_path, as_writer, lock::Blocking::No)
     }
 
+    /// Whether `id`'s lock is free right now. A snapshot, not a claim: the
+    /// lock may be taken the instant after this returns, and a caller that
+    /// needs to act on the answer (`queue write`) still has to race for it
+    /// with a real `lock`. Never stamps or creates the anchor — see
+    /// `lock::probe`.
+    pub fn is_free(&self, session: &str, id: &str) -> io::Result<bool> {
+        lock::probe(&self.locks_dir(session).join(id))
+    }
+
     /// Acquire several cassette locks at once, all or nothing.
     ///
     /// Locks are always taken in **ascending id order**, regardless of the
@@ -411,27 +459,33 @@ impl Store {
         Ok(guards)
     }
 
-    /// Every cassette in a session, in queue order. A missing session, files
-    /// that are not `.md`, and `.md` files without parseable frontmatter are
-    /// all skipped rather than erroring — the store shares a directory with
-    /// editors and their swap files.
-    pub fn scan_session(&self, session: &str) -> io::Result<Vec<StoredCassette>> {
+    /// Every cassette in a session, in queue order, plus a count of files
+    /// that could not be read or parsed. A missing session directory scans as
+    /// empty; a file that is not `.md`, or a `.md` file without parseable
+    /// frontmatter, increments `unreadable` rather than erroring outright —
+    /// the store shares a directory with editors and their swap files, but a
+    /// cassette that once had valid frontmatter and lost it is exactly the
+    /// kind of damage `queue list` exists to surface (see `SessionScan`).
+    pub fn scan_session(&self, session: &str) -> io::Result<SessionScan> {
         let dir = self.cassettes_dir(session);
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(SessionScan::default()),
             Err(e) => return Err(e),
         };
         let mut found = Vec::new();
+        let mut unreadable = 0usize;
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&path) else {
+                unreadable += 1;
                 continue;
             };
             let (Some(meta), body) = meta::split(&content) else {
+                unreadable += 1;
                 continue;
             };
             found.push(StoredCassette {
@@ -449,7 +503,50 @@ impl Store {
                 .position(|id| *id == c.meta.id)
                 .unwrap_or(usize::MAX)
         });
+        Ok(SessionScan {
+            cassettes: found,
+            unreadable,
+        })
+    }
+
+    /// Every session, newest first by `created` (ties broken by id,
+    /// descending, so the order is total and deterministic). A session
+    /// directory whose `session.toml` is missing or unparseable is skipped:
+    /// `session list` is a listing, not a repair tool, and one damaged
+    /// session must not hide the rest.
+    pub fn list_sessions(&self) -> io::Result<Vec<(String, session::SessionMeta)>> {
+        let dir = self.sessions_dir();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut found = Vec::new();
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(meta) = session::read(&path.join("session.toml")) else {
+                continue;
+            };
+            found.push((id.to_string(), meta));
+        }
+        found
+            .sort_by(|(id_a, a), (id_b, b)| b.created.cmp(&a.created).then_with(|| id_b.cmp(id_a)));
         Ok(found)
+    }
+
+    /// Set a session's display alias. The alias never resolves — it is shown
+    /// in `session list` and nowhere else — so no uniqueness check applies.
+    pub fn set_session_alias(&self, session: &str, alias: &str) -> io::Result<()> {
+        let path = self.session_dir(session).join("session.toml");
+        let mut meta = session::read(&path)?;
+        meta.alias = Some(alias.to_string());
+        session::write(&path, &meta)
     }
 }
 
@@ -538,6 +635,107 @@ mod tests {
     }
 
     #[test]
+    fn list_sessions_is_newest_first() {
+        let (_dir, s) = store();
+        let older = s
+            .create_session(&SessionMeta {
+                created: "2026-09-14T09:00:00Z".to_string(),
+                ..session_meta()
+            })
+            .expect("create");
+        let newer = s
+            .create_session(&SessionMeta {
+                created: "2026-09-15T09:00:00Z".to_string(),
+                ..session_meta()
+            })
+            .expect("create");
+        let rows = s.list_sessions().expect("list");
+        let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec![newer.as_str(), older.as_str()]);
+    }
+
+    #[test]
+    fn listing_sessions_with_none_yet_is_empty_not_an_error() {
+        let (_dir, s) = store();
+        assert!(s.list_sessions().expect("list").is_empty());
+    }
+
+    #[test]
+    fn a_session_with_unparseable_metadata_is_skipped_not_fatal() {
+        let (_dir, s) = store();
+        let good = s.create_session(&session_meta()).expect("create");
+        std::fs::create_dir_all(s.session_dir("broken")).expect("mkdir");
+        std::fs::write(s.session_dir("broken").join("session.toml"), "not toml").expect("write");
+        let rows = s.list_sessions().expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, good);
+    }
+
+    #[test]
+    fn require_session_accepts_a_session_that_exists() {
+        let (_dir, s) = store();
+        let id = s.create_session(&session_meta()).expect("create");
+        assert!(s.require_session(&id).is_ok());
+    }
+
+    #[test]
+    fn require_session_rejects_a_traversal_without_touching_the_disk() {
+        let (dir, s) = store();
+        for bad in ["..", "../../escaped", "a/b", "", "nope"] {
+            let msg = s.require_session(bad).expect_err("must be rejected");
+            assert!(
+                msg.contains("malformed session id"),
+                "shape failure must say so, not 'no session': {msg}"
+            );
+        }
+        // Nothing was created anywhere on the way out — in particular not
+        // the `escaped/` directory the unvalidated path join produced.
+        assert!(!dir.path().join("escaped").exists());
+        assert!(!dir.path().parent().unwrap().join("escaped").exists());
+    }
+
+    #[test]
+    fn require_session_rejects_a_well_formed_id_that_names_no_session() {
+        // The phantom-session case: shape alone cannot be the whole check,
+        // or a typo'd but well-formed id creates an unreachable session.
+        let (_dir, s) = store();
+        let ghost = ids::new_id();
+        let msg = s.require_session(&ghost).expect_err("must be rejected");
+        assert!(msg.contains("no session"), "{msg}");
+        assert!(msg.contains(&ghost), "{msg}");
+        assert!(!s.session_dir(&ghost).exists(), "must not create it");
+    }
+
+    #[test]
+    fn require_session_rejects_a_directory_with_no_session_toml() {
+        // A bare directory under `sessions/` — what an unvalidated
+        // `--session <fresh ulid>` used to leave behind — is not a session:
+        // `session list` skips it, so accepting it would hand cassettes to a
+        // place nothing can ever list.
+        let (_dir, s) = store();
+        let ghost = ids::new_id();
+        std::fs::create_dir_all(s.cassettes_dir(&ghost)).expect("mkdir");
+        let msg = s.require_session(&ghost).expect_err("must be rejected");
+        assert!(msg.contains("no session"), "{msg}");
+    }
+
+    #[test]
+    fn set_session_alias_updates_it_in_place() {
+        let (_dir, s) = store();
+        let id = s.create_session(&session_meta()).expect("create");
+        s.set_session_alias(&id, "monday").expect("set alias");
+        let read_back = s.session_meta(&id).expect("read");
+        assert_eq!(read_back.alias.as_deref(), Some("monday"));
+    }
+
+    #[test]
+    fn set_session_alias_on_an_unknown_id_is_not_found() {
+        let (_dir, s) = store();
+        let err = s.set_session_alias("nope", "x").expect_err("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
     fn add_cassette_names_the_file_by_slug_and_id() {
         let (_dir, s) = store();
         let sid = s.create_session(&session_meta()).expect("create");
@@ -560,9 +758,12 @@ mod tests {
         s.add_cassette(&sid, &m, body).expect("add");
 
         let found = s.scan_session(&sid).expect("scan");
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].meta, m);
-        assert_eq!(found[0].body, body, "body must survive byte-for-byte");
+        assert_eq!(found.cassettes.len(), 1);
+        assert_eq!(found.cassettes[0].meta, m);
+        assert_eq!(
+            found.cassettes[0].body, body,
+            "body must survive byte-for-byte"
+        );
     }
 
     #[test]
@@ -580,6 +781,7 @@ mod tests {
         let ids: Vec<String> = s
             .scan_session(&sid)
             .expect("scan")
+            .cassettes
             .into_iter()
             .map(|c| c.meta.id)
             .collect();
@@ -603,13 +805,13 @@ mod tests {
         // An editor swap file and a file with no frontmatter must not appear.
         std::fs::write(s.cassettes_dir(&sid).join("notes.txt"), "stray").expect("write");
         std::fs::write(s.cassettes_dir(&sid).join("broken.md"), "no frontmatter\n").expect("write");
-        assert_eq!(s.scan_session(&sid).expect("scan").len(), 1);
+        assert_eq!(s.scan_session(&sid).expect("scan").cassettes.len(), 1);
     }
 
     #[test]
     fn scanning_a_missing_session_is_empty_not_an_error() {
         let (_dir, s) = store();
-        assert!(s.scan_session("nope").expect("scan").is_empty());
+        assert!(s.scan_session("nope").expect("scan").cassettes.is_empty());
     }
 
     #[test]
@@ -660,11 +862,18 @@ mod tests {
 
         assert!(path.is_file(), "the file must not have been renamed");
         let found = s.scan_session(&sid).expect("scan");
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].meta.topic.as_deref(), Some("completely different"));
-        assert_eq!(found[0].body, "new\n");
+        assert_eq!(found.cassettes.len(), 1);
         assert_eq!(
-            found[0].path.file_name().unwrap().to_string_lossy(),
+            found.cassettes[0].meta.topic.as_deref(),
+            Some("completely different")
+        );
+        assert_eq!(found.cassettes[0].body, "new\n");
+        assert_eq!(
+            found.cassettes[0]
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
             "gratitude-01K5GR7T2M9WPD0000000000AB.md",
             "the slug stays as minted"
         );
@@ -726,32 +935,6 @@ mod tests {
         assert_eq!(all.writers[&id].name, "joseph");
     }
 
-    #[test]
-    fn the_active_session_round_trips_through_the_store() {
-        let (_dir, s) = store();
-        assert_eq!(s.active_session().expect("read"), None, "none to start");
-        let id = s.create_session(&session_meta()).expect("create");
-        s.set_active_session(&id).expect("set");
-        assert_eq!(
-            s.active_session().expect("read").as_deref(),
-            Some(id.as_str())
-        );
-    }
-
-    #[test]
-    fn an_unreadable_active_pointer_errors_rather_than_reading_as_absent() {
-        // Moving the pointer onto Store was the moment to stop collapsing
-        // "no active session" into "could not read it" — the same conflation
-        // that made writers::read a data-loss path.
-        let (dir, s) = store();
-        s.create_session(&session_meta()).expect("create");
-        std::fs::create_dir(dir.path().join(session::ACTIVE_FILE)).expect("mkdir");
-        assert!(
-            s.active_session().is_err(),
-            "an unreadable pointer must not read as 'no active session'"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn registering_a_writer_creates_a_private_root() {
@@ -768,23 +951,6 @@ mod tests {
             mode & 0o777,
             0o700,
             "writer registration must create a private root"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn setting_the_active_session_creates_a_private_root() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().join("store");
-        Store::new(root.clone())
-            .set_active_session("01K5GQ2R8V3XQZ0000000000AB")
-            .expect("write");
-        let mode = std::fs::metadata(&root).unwrap().permissions().mode();
-        assert_eq!(
-            mode & 0o777,
-            0o700,
-            "the active pointer must not create a loose root"
         );
     }
 

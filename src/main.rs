@@ -20,6 +20,7 @@ mod config;
 mod find;
 mod output;
 mod queue;
+mod session;
 mod stats;
 mod store;
 mod theme;
@@ -154,22 +155,183 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    if let Some((id, session)) = &args.queue_write {
+    if let Some(cmd) = &args.queue_cmd {
         let store = store::Store::new(store_root());
-        let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
-            Ok(w) => w,
-            Err(msg) => die_with(2, &msg),
-        };
-        match queue::write(&store, id, session.as_deref(), &who_name, writer_source) {
-            Ok(()) => std::process::exit(0),
+        // Before any command touches the store: `--session` must be a
+        // well-formed ULID naming a session that exists. Done here, once,
+        // against `QueueCmd::session()` rather than inside each command —
+        // see `queue::require_session`. Unvalidated, the id is joined
+        // straight onto the store root by `Store::session_dir`, and the
+        // permissive reads below (`scan_session` treats a missing directory
+        // as an empty session) would otherwise report a typo as an empty
+        // queue.
+        match queue::require_session(&store, cmd.session()) {
+            Ok(()) => {}
             Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-            Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-            Err(queue::QueueError::Io(m)) => die_with(1, &m),
+            // `require_session` produces nothing else. Matched anyway so a
+            // later change fails loudly instead of letting a command run on
+            // an unchecked session id.
+            Err(other) => die_with(1, &format!("{other:?}")),
+        }
+        match cmd {
+            // The only command that creates a cassette, so — like `write` —
+            // it needs a writer identity to attribute the creation to.
+            cli::QueueCmd::New {
+                topic,
+                session,
+                placement,
+            } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
+                match queue::edit::new(
+                    &store,
+                    session,
+                    topic,
+                    *placement,
+                    &who_name,
+                    writer_source,
+                    max_open,
+                ) {
+                    Ok(id) => {
+                        println!("{id}");
+                        std::process::exit(0)
+                    }
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
+            }
+            // The only queue command that writes an existing cassette, so
+            // it's the only one that needs a writer identity to attribute the
+            // write to.
+            cli::QueueCmd::Write { id, session } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                match queue::write(&store, id, session, &who_name, writer_source) {
+                    Ok(()) => std::process::exit(0),
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
+            }
+            // `list` and `show` attribute nothing, so unlike `write` they
+            // never resolve a writer — a viewer with no $USER and no
+            // registered identity can still read the queue.
+            cli::QueueCmd::List {
+                session,
+                status,
+                since,
+            } => exit_on_queue_result(queue::view::list(
+                &store,
+                session,
+                *status,
+                since.as_deref(),
+            )),
+            cli::QueueCmd::Show { id, session } => {
+                exit_on_queue_result(queue::view::show(&store, session, id))
+            }
+            // No writer identity: `next` reports an id, it attributes
+            // nothing.
+            cli::QueueCmd::Next { session } => {
+                exit_on_queue_result(queue::view::next(&store, session))
+            }
+            // `close` attributes the closure and, when the acting writer is
+            // an agent, needs its `Kind` to enforce the sticky-lock
+            // boundary — see `queue::edit::close_permitted`.
+            cli::QueueCmd::Close {
+                id,
+                session,
+                message,
+            } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                match queue::edit::close(
+                    &store,
+                    session,
+                    id,
+                    message.as_deref(),
+                    &who_name,
+                    writer_source,
+                ) {
+                    Ok(()) => std::process::exit(0),
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
+            }
+            // `reopen` raises the session's open count, so — like `new` — it
+            // needs a writer identity to attribute the change to and the
+            // configured `max_open` cap.
+            cli::QueueCmd::Reopen { id, session } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
+                match queue::edit::reopen(&store, session, id, &who_name, writer_source, max_open) {
+                    Ok(()) => std::process::exit(0),
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
+            }
+            // `move` reprioritizes an existing cassette, so — like `close`
+            // and `reopen` — it needs a writer identity to attribute the
+            // change to.
+            cli::QueueCmd::Move {
+                id,
+                session,
+                anchor,
+            } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                match queue::edit::move_cassette(
+                    &store,
+                    session,
+                    id,
+                    anchor.clone(),
+                    &who_name,
+                    writer_source,
+                ) {
+                    Ok(()) => std::process::exit(0),
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
+            }
         }
     }
 
     if let Some(cmd) = &args.writer_cmd {
         run_writer_cmd(cmd, args.writer.as_deref());
+    }
+
+    if let Some(cmd) = &args.session_cmd {
+        run_session_cmd(cmd);
     }
 
     // Resolve the theme and topic template before touching the terminal so
@@ -900,7 +1062,7 @@ fn die(msg: &str) -> ! {
 /// pure functions over `&Store`; this is the one place that turns their
 /// results into exit codes.
 ///
-/// `register` is the only command that can fail with `WriterError`: `list`
+/// `register` is the only command that can fail with `EnsureError`: `list`
 /// and `whoami` only ever see an I/O error reading the registry (exit 1). A
 /// `KindMismatch` or `EmptyName` from `register` is a usage error (exit 2) —
 /// the caller asked for something the registry cannot honor, not a system
@@ -913,16 +1075,11 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
                 println!("{msg}");
                 std::process::exit(0)
             }
-            Err(e @ store::writers::WriterError::KindMismatch { .. }) => {
+            Err(e @ store::writers::EnsureError::KindMismatch { .. }) => {
                 die_with(2, &e.to_string())
             }
-            Err(e @ store::writers::WriterError::EmptyName) => die_with(2, &e.to_string()),
-            Err(e @ store::writers::WriterError::Io(_)) => die_with(1, &e.to_string()),
-            // `ensure_writer` never looks up without creating, so this never
-            // fires; kept only so the match stays exhaustive as `WriterError`
-            // grows rather than by a wildcard that could later hide a real
-            // new variant.
-            Err(e @ store::writers::WriterError::Unregistered(_)) => die_with(1, &e.to_string()),
+            Err(e @ store::writers::EnsureError::EmptyName) => die_with(2, &e.to_string()),
+            Err(e @ store::writers::EnsureError::Io(_)) => die_with(1, &e.to_string()),
         },
         cli::WriterCmd::List => match writer::list(&store) {
             Ok(msg) => {
@@ -948,15 +1105,56 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
     }
 }
 
+/// `cassette session new|list|alias`. Rendering lives in `session.rs` as pure
+/// functions over `&Store`; this is the one place that turns their results
+/// into exit codes.
+///
+/// `new` and `list` fail only on I/O (exit 1) — `session.rs`'s `Result<_,
+/// String>` already collapses that to one case. `alias` can also fail on an
+/// unknown session id, which is a usage error (exit 2): `session::set_alias`
+/// returns `SessionError` so this match can tell the two apart.
+fn run_session_cmd(cmd: &cli::SessionCmd) -> ! {
+    let store = store::Store::new(store_root());
+    match cmd {
+        cli::SessionCmd::New { alias } => match session::new_session(&store, alias.as_deref()) {
+            Ok(id) => {
+                println!("{id}");
+                std::process::exit(0)
+            }
+            Err(e) => die_with(1, &e),
+        },
+        cli::SessionCmd::List { all } => match session::list(&store, *all) {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0)
+            }
+            Err(e) => die_with(1, &e),
+        },
+        cli::SessionCmd::Alias { id, alias } => match session::set_alias(&store, id, alias) {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0)
+            }
+            Err(e @ session::SessionError::Usage(_)) => die_with(2, &e.to_string()),
+            Err(e @ session::SessionError::Io(_)) => die_with(1, &e.to_string()),
+        },
+    }
+}
+
 /// The writer to act as, and where that name came from: `--writer`, else
-/// `$USER`. There is deliberately no fallback — a shared `"unknown"` identity
-/// would silently attribute every agent's work to the same writer, in a
-/// system whose entire purpose is knowing who wrote what.
+/// `$CASSETTE_WRITER`, else `$USER`. There is deliberately no further
+/// fallback — a shared `"unknown"` identity would silently attribute every
+/// agent's work to the same writer, in a system whose entire purpose is
+/// knowing who wrote what.
 ///
 /// The source travels with the name rather than being flattened away: a
-/// command that resolves a writer (`queue write` today; six more in 4b) must
-/// treat an unregistered `--writer` as a usage error while still bootstrapping
-/// an unregistered `$USER` as a new human writer — see `queue::WriterSource`.
+/// command that resolves a writer to act as (`queue write`, `queue new`, and
+/// the rest of 4b's mutating commands) must treat an unregistered `--writer`
+/// or `$CASSETTE_WRITER` as a usage error — naming a writer explicitly is a
+/// claim about identity, so a typo must fail loudly rather than silently
+/// spawn a second identity as `human`, the privileged kind — while still
+/// bootstrapping an unregistered `$USER` as a new human writer. See
+/// `queue::WriterSource`.
 fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource), String> {
     if let Some(name) = cli {
         let name = name.trim();
@@ -965,11 +1163,20 @@ fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource
         }
         return Ok((name.to_string(), queue::WriterSource::Flag));
     }
+    if let Ok(env_writer) = std::env::var("CASSETTE_WRITER") {
+        let env_writer = env_writer.trim();
+        if !env_writer.is_empty() {
+            return Ok((env_writer.to_string(), queue::WriterSource::Flag));
+        }
+    }
     match std::env::var("USER") {
         Ok(user) if !user.trim().is_empty() => {
             Ok((user.trim().to_string(), queue::WriterSource::Env))
         }
-        _ => Err("no writer: $USER is empty or unset, so pass --writer <NAME>".to_string()),
+        _ => Err(
+            "no writer: $USER is empty or unset, so pass --writer <NAME> or set $CASSETTE_WRITER"
+                .to_string(),
+        ),
     }
 }
 
@@ -981,6 +1188,24 @@ fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource
 fn die_with(code: i32, msg: &str) -> ! {
     eprintln!("cassette: {msg}");
     std::process::exit(code);
+}
+
+/// Print and exit for `queue list`/`queue show`/`queue next`, which all
+/// succeed with a message to print rather than nothing — unlike `queue
+/// write`, handled separately since `Ok(())` has nothing to print.
+fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
+    match result {
+        Ok(msg) => {
+            println!("{msg}");
+            std::process::exit(0)
+        }
+        Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+        Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+        Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+        Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+        Err(queue::QueueError::Full(m)) => die_with(6, &m),
+        Err(queue::QueueError::Io(m)) => die_with(1, &m),
+    }
 }
 
 /// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.

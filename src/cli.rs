@@ -19,12 +19,78 @@ pub struct Args {
     /// `resume` with an optional note name: `Some(None)` resumes the most
     /// recently modified note.
     pub resume: Option<Option<String>>,
-    /// `queue write`: the cassette id and the session it lives in.
-    pub queue_write: Option<(String, Option<String>)>,
-    /// registered writer to act as (default: $USER, registered on first use)
+    /// `queue …`, if that's what was invoked.
+    pub queue_cmd: Option<QueueCmd>,
+    /// registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
     pub writer: Option<String>,
     /// `writer register|list|whoami`, if that's what was invoked.
     pub writer_cmd: Option<WriterCmd>,
+    /// `session new|list|alias`, if that's what was invoked.
+    pub session_cmd: Option<SessionCmd>,
+}
+
+/// `queue …` as `main()` consumes it. Every variant carries `session`:
+/// there is no active session to fall back to.
+#[derive(Debug, PartialEq)]
+pub enum QueueCmd {
+    New {
+        topic: String,
+        session: String,
+        placement: crate::queue::Placement,
+    },
+    Write {
+        id: String,
+        session: String,
+    },
+    List {
+        session: String,
+        status: crate::queue::StatusFilter,
+        since: Option<String>,
+    },
+    Show {
+        id: String,
+        session: String,
+    },
+    Next {
+        session: String,
+    },
+    Close {
+        id: String,
+        session: String,
+        message: Option<String>,
+    },
+    Reopen {
+        id: String,
+        session: String,
+    },
+    Move {
+        id: String,
+        session: String,
+        anchor: crate::queue::edit::MoveAnchor,
+    },
+}
+
+impl QueueCmd {
+    /// The `--session` this command was given. Every variant carries one —
+    /// there is no active session to fall back to — and `main()` validates
+    /// it through this accessor once, before dispatching, so no command can
+    /// reach the store with an unchecked session id.
+    ///
+    /// The exhaustive match is the enforcement: a ninth queue command does
+    /// not compile until it says where its session id lives, which is
+    /// stronger than a rule saying each command must remember to validate.
+    pub fn session(&self) -> &str {
+        match self {
+            QueueCmd::New { session, .. }
+            | QueueCmd::Write { session, .. }
+            | QueueCmd::List { session, .. }
+            | QueueCmd::Show { session, .. }
+            | QueueCmd::Next { session }
+            | QueueCmd::Close { session, .. }
+            | QueueCmd::Reopen { session, .. }
+            | QueueCmd::Move { session, .. } => session,
+        }
+    }
 }
 
 /// `writer …` as `main()` consumes it.
@@ -36,6 +102,14 @@ pub enum WriterCmd {
     },
     List,
     Whoami,
+}
+
+/// `session …` as `main()` consumes it.
+#[derive(Debug, PartialEq)]
+pub enum SessionCmd {
+    New { alias: Option<String> },
+    List { all: bool },
+    Alias { id: String, alias: String },
 }
 
 #[derive(Parser, Debug)]
@@ -82,7 +156,7 @@ struct Cli {
     #[arg(short = 'o', long = "output", global = true)]
     print_stdout: bool,
 
-    /// registered writer to act as (default: $USER, registered on first use)
+    /// registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
     #[arg(long, value_name = "NAME", global = true)]
     writer: Option<String>,
 }
@@ -122,17 +196,100 @@ enum Command {
         #[command(subcommand)]
         action: WriterAction,
     },
+    /// create and inspect sessions
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum QueueAction {
+    /// create a cassette and print its id
+    New {
+        #[arg(value_name = "TOPIC")]
+        topic: String,
+        /// session to add the cassette to
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// place at the head of the queue
+        #[arg(long, conflicts_with_all = ["last", "priority"])]
+        first: bool,
+        /// place at the tail of the queue (default)
+        #[arg(long, conflicts_with_all = ["first", "priority"])]
+        last: bool,
+        /// place at an exact, positive sparse priority
+        #[arg(long, value_name = "N", conflicts_with_all = ["first", "last"],
+              value_parser = clap::value_parser!(i64).range(1..))]
+        priority: Option<i64>,
+    },
     /// replace a cassette's body, read from stdin
     Write {
         #[arg(value_name = "ID")]
         id: String,
-        /// session to write in (default: the active session)
+        /// session the cassette lives in
         #[arg(long, value_name = "ID")]
-        session: Option<String>,
+        session: String,
+    },
+    /// list a session's cassettes in queue order
+    List {
+        /// session to list
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// which cassettes to show
+        #[arg(long, value_enum, default_value = "open")]
+        status: StatusArg,
+        /// only cassettes updated at or after this RFC3339 timestamp
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
+    },
+    /// print one cassette's frontmatter and body
+    Show {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
+    /// print the id of the next open, unlocked cassette in queue order
+    Next {
+        /// session to search
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
+    /// close a cassette
+    Close {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// close-out note, appended to the body as a blockquote
+        #[arg(short = 'm', long, value_name = "TEXT")]
+        message: Option<String>,
+    },
+    /// reopen a closed cassette
+    Reopen {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
+    /// move a cassette to a new position in the queue
+    #[command(group(clap::ArgGroup::new("anchor").required(true).args(["before", "after"])))]
+    Move {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// place immediately before this cassette
+        #[arg(long, value_name = "ID")]
+        before: Option<String>,
+        /// place immediately after this cassette
+        #[arg(long, value_name = "ID")]
+        after: Option<String>,
     },
 }
 
@@ -152,6 +309,29 @@ enum WriterAction {
     Whoami,
 }
 
+#[derive(Subcommand, Debug)]
+enum SessionAction {
+    /// create a session and print its id
+    New {
+        /// display label shown in `session list`; it never resolves
+        #[arg(long, value_name = "NAME")]
+        alias: Option<String>,
+    },
+    /// list sessions, newest first
+    List {
+        /// show every session instead of the 15 most recent
+        #[arg(long)]
+        all: bool,
+    },
+    /// set a session's display label
+    Alias {
+        #[arg(value_name = "ID")]
+        id: String,
+        #[arg(value_name = "ALIAS")]
+        alias: String,
+    },
+}
+
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum WriterKindArg {
     Human,
@@ -163,6 +343,28 @@ impl From<WriterKindArg> for crate::store::writers::Kind {
         match k {
             WriterKindArg::Human => crate::store::writers::Kind::Human,
             WriterKindArg::Agent => crate::store::writers::Kind::Agent,
+        }
+    }
+}
+
+/// `--status`'s clap-facing type. `queue::StatusFilter` is the domain type
+/// and stays clap-free — this mirrors `WriterKindArg` /
+/// `store::writers::Kind` below: the only place the command line is read is
+/// `cli.rs`, so the `ValueEnum` derive lives here, not on the type `queue`
+/// actually works with.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum StatusArg {
+    Open,
+    Closed,
+    All,
+}
+
+impl From<StatusArg> for crate::queue::StatusFilter {
+    fn from(s: StatusArg) -> crate::queue::StatusFilter {
+        match s {
+            StatusArg::Open => crate::queue::StatusFilter::Open,
+            StatusArg::Closed => crate::queue::StatusFilter::Closed,
+            StatusArg::All => crate::queue::StatusFilter::All,
         }
     }
 }
@@ -189,9 +391,81 @@ impl Cli {
             Some(Command::Stats) => args.stats = true,
             Some(Command::Find { query }) => args.find = Some(query),
             Some(Command::Themes) => args.list_themes = true,
-            Some(Command::Queue { action }) => match action {
-                QueueAction::Write { id, session } => args.queue_write = Some((id, session)),
-            },
+            Some(Command::Queue { action }) => {
+                args.queue_cmd = Some(match action {
+                    QueueAction::New {
+                        topic,
+                        session,
+                        first,
+                        last: _,
+                        priority,
+                    } => {
+                        // `--priority`'s clap `range(1..)` already rejects a
+                        // non-positive value before this ever runs; `first`
+                        // wins any (impossible, thanks to `conflicts_with_all`)
+                        // ambiguity, and no flag at all means the default:
+                        // tail placement, so an agent adding work cannot jump
+                        // the human's line.
+                        let placement = if first {
+                            crate::queue::Placement::First
+                        } else if let Some(p) = priority {
+                            crate::queue::Placement::Explicit(p)
+                        } else {
+                            crate::queue::Placement::Last
+                        };
+                        QueueCmd::New {
+                            topic,
+                            session,
+                            placement,
+                        }
+                    }
+                    QueueAction::Write { id, session } => QueueCmd::Write { id, session },
+                    QueueAction::List {
+                        session,
+                        status,
+                        since,
+                    } => QueueCmd::List {
+                        session,
+                        status: status.into(),
+                        since,
+                    },
+                    QueueAction::Show { id, session } => QueueCmd::Show { id, session },
+                    QueueAction::Next { session } => QueueCmd::Next { session },
+                    QueueAction::Close {
+                        id,
+                        session,
+                        message,
+                    } => QueueCmd::Close {
+                        id,
+                        session,
+                        message,
+                    },
+                    QueueAction::Reopen { id, session } => QueueCmd::Reopen { id, session },
+                    QueueAction::Move {
+                        id,
+                        session,
+                        before,
+                        after,
+                    } => {
+                        // The `anchor` ArgGroup (`required(true)`, `multiple`
+                        // defaulted to `false`) already guarantees exactly
+                        // one of `before`/`after` is `Some` by the time clap
+                        // hands this back.
+                        let anchor = match (before, after) {
+                            (Some(b), None) => crate::queue::edit::MoveAnchor::Before(b),
+                            (None, Some(a)) => crate::queue::edit::MoveAnchor::After(a),
+                            _ => unreachable!(
+                                "the 'anchor' ArgGroup enforces exactly one of before/after"
+                            ),
+                        };
+                        QueueCmd::Move {
+                            id,
+                            session,
+                            anchor,
+                        }
+                    }
+                });
+            }
             Some(Command::Writer { action }) => {
                 args.writer_cmd = Some(match action {
                     WriterAction::Register { name, kind } => WriterCmd::Register {
@@ -200,6 +474,13 @@ impl Cli {
                     },
                     WriterAction::List => WriterCmd::List,
                     WriterAction::Whoami => WriterCmd::Whoami,
+                });
+            }
+            Some(Command::Session { action }) => {
+                args.session_cmd = Some(match action {
+                    SessionAction::New { alias } => SessionCmd::New { alias },
+                    SessionAction::List { all } => SessionCmd::List { all },
+                    SessionAction::Alias { id, alias } => SessionCmd::Alias { id, alias },
                 });
             }
         }

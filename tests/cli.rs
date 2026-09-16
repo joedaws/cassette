@@ -147,10 +147,29 @@ fn queue_write_appears_in_help() {
 #[test]
 fn a_writer_name_is_required_when_user_is_unset() {
     // No shared "unknown" identity: attribution is the point of the system.
+    //
+    // Runs against a real session: `--session` is validated before any
+    // command resolves a writer, so a made-up session id would fail first
+    // and this test would pass for the wrong reason.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
     let out = Command::new(bin())
-        .args(["queue", "write", "01K5GR7T2M9WPD0000000000AB"])
+        .args([
+            "queue",
+            "write",
+            "01K5GR7T2M9WPD0000000000AB",
+            "--session",
+            &sid,
+        ])
         .env_remove("USER")
-        .env("CASSETTE_DATA_DIR", "/nonexistent-store")
+        .env("CASSETTE_DATA_DIR", &root)
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn");
@@ -238,7 +257,6 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
         "created = \"2026-09-14T09:25:57Z\"\n",
     )
     .expect("session.toml");
-    std::fs::write(root.join("active"), format!("{SESSION}\n")).expect("active");
     std::fs::write(
         cassettes.join(format!("gratitude-{ID}.md")),
         format!(
@@ -250,7 +268,15 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
     .expect("cassette");
 
     let out = Command::new(bin())
-        .args(["--writer", "nosuchwriter", "queue", "write", ID])
+        .args([
+            "--writer",
+            "nosuchwriter",
+            "queue",
+            "write",
+            ID,
+            "--session",
+            SESSION,
+        ])
         .env("CASSETTE_DATA_DIR", &root)
         .stdin(std::process::Stdio::piped())
         .output()
@@ -264,6 +290,64 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
         !registry.exists(),
         "an unknown --writer must not create anything: {}",
         std::fs::read_to_string(&registry).unwrap_or_default()
+    );
+}
+
+#[test]
+fn queue_write_without_session_exits_two() {
+    // The headline behaviour Phase 4b introduced — every `queue` command
+    // requires `--session` — is otherwise unpinned by any test. clap itself
+    // must refuse a missing required arg before any store I/O happens.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let out = Command::new(bin())
+        .args(["queue", "write", "01K5GR7T2M9WPD0000000000AB"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--session"),
+        "clap's usage error should name the missing flag: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn cassette_writer_env_names_a_writer_but_must_already_be_registered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let out = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // `queue new` resolves a writer to act as, so an unknown name is a typo,
+    // not a first run — exit 2 rather than a second identity created as
+    // `human`, the privileged kind.
+    let out = Command::new(bin())
+        .args(["queue", "new", "a topic", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("CASSETTE_WRITER", "ghost")
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+
+    // ...and it must not have created one.
+    let listed = Command::new(bin())
+        .args(["writer", "list"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains("ghost"),
+        "a typo must not spawn an identity"
     );
 }
 
@@ -289,4 +373,901 @@ fn registering_a_known_name_with_a_different_kind_exits_two() {
         "{}",
         stderr(&second)
     );
+}
+
+#[test]
+fn session_new_then_list_then_alias() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(new.status.code(), Some(0), "{}", stderr(&new));
+    let id = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    assert_eq!(id.len(), 26, "a ULID is printed bare for scripting: {id:?}");
+
+    let aliased = Command::new(bin())
+        .args(["session", "alias", &id, "monday"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(aliased.status.code(), Some(0), "{}", stderr(&aliased));
+
+    let list = Command::new(bin())
+        .args(["session", "list"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let text = String::from_utf8_lossy(&list.stdout).to_string();
+    assert!(text.contains(&id), "{text}");
+    assert!(text.contains("monday"), "{text}");
+}
+
+#[test]
+fn session_alias_on_an_unknown_id_exits_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["session", "alias", "01K5GQ2R8V3XQZ0000000000AB", "x"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+/// Hand-write a cassette file into `session`'s cassettes dir — there is no
+/// CLI command that creates cassettes yet, so tests exercising `queue list`
+/// and `queue show` build the fixture directly, same shape as
+/// `queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one`.
+fn write_fixture_cassette(root: &std::path::Path, session: &str, id: &str, topic: &str) {
+    let cassettes = root.join("sessions").join(session).join("cassettes");
+    std::fs::create_dir_all(&cassettes).expect("mkdir");
+    std::fs::write(
+        cassettes.join(format!("{topic}-{id}.md")),
+        format!(
+            "---\nid: {id}\ntopic: {topic}\npriority: 10\nstatus: open\nlocked_by:\n\
+             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             ## Side A\n\nhello from {topic}\n"
+        ),
+    )
+    .expect("cassette");
+}
+
+#[test]
+fn queue_list_and_show_round_trip_through_a_real_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(new.status.code(), Some(0), "{}", stderr(&new));
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let list = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(list.status.code(), Some(0), "{}", stderr(&list));
+    let text = String::from_utf8_lossy(&list.stdout).to_string();
+    assert!(text.contains(ID), "{text}");
+    assert!(text.contains("gratitude"), "{text}");
+
+    let show = Command::new(bin())
+        .args(["queue", "show", ID, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(show.status.code(), Some(0), "{}", stderr(&show));
+    let shown = String::from_utf8_lossy(&show.stdout).to_string();
+    assert!(shown.contains(&format!("id: {ID}")), "{shown}");
+    assert!(shown.contains("hello from gratitude"), "{shown}");
+}
+
+#[test]
+fn queue_list_says_so_when_a_session_has_no_cassettes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "no cassettes");
+}
+
+#[test]
+fn queue_list_status_filter_excludes_closed_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let cassettes = root.join("sessions").join(&sid).join("cassettes");
+    std::fs::create_dir_all(&cassettes).expect("mkdir");
+    std::fs::write(
+        cassettes.join("closed-01K5GR7T2M9WPD0000000000CD.md"),
+        "---\nid: 01K5GR7T2M9WPD0000000000CD\ntopic: closed\npriority: 10\nstatus: closed\n\
+         locked_by:\ncreated_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+         ## Side A\n\nold\n",
+    )
+    .expect("cassette");
+
+    let default_list = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(
+        String::from_utf8_lossy(&default_list.stdout).trim(),
+        "no cassettes",
+        "closed cassettes are hidden unless asked for"
+    );
+
+    let all_list = Command::new(bin())
+        .args(["queue", "list", "--session", &sid, "--status", "all"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(
+        String::from_utf8_lossy(&all_list.stdout).contains("closed"),
+        "{}",
+        String::from_utf8_lossy(&all_list.stdout)
+    );
+}
+
+#[test]
+fn queue_show_on_an_unknown_id_exits_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "show", "nosuchid", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_list_and_show_need_no_writer_identity() {
+    // Read-only: neither attributes anything, so neither should fail just
+    // because $USER is unset and no --writer was passed — unlike `queue
+    // write`, see `a_writer_name_is_required_when_user_is_unset`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    // A real session: an unknown one is exit 2 for every queue command, so
+    // listing a made-up id would no longer test writer identity at all.
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+#[test]
+fn a_traversal_session_id_exits_two_and_writes_nothing_outside_the_store() {
+    // `--session` is joined straight onto the store root, so an unvalidated
+    // `../../escaped` used to exit 0 and write the cassette outside the
+    // store entirely. Shape is checked before any command touches disk.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let out = Command::new(bin())
+        .args(["queue", "new", "oops", "--session", "../../escaped"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("malformed session id"),
+        "must say the id is malformed, not that the session is missing: {}",
+        stderr(&out)
+    );
+    // Nothing anywhere: not in the store, not beside it, not above it.
+    assert!(!root.join("escaped").exists());
+    assert!(!dir.path().join("escaped").exists());
+    assert!(!dir.path().parent().unwrap().join("escaped").exists());
+}
+
+#[test]
+fn a_well_formed_but_unknown_session_exits_two_and_creates_nothing() {
+    // The phantom-session case: a well-formed id nobody created used to
+    // exit 0, minting a session directory with no session.toml — so the
+    // cassette it wrote could never appear in `session list` again. Only
+    // `session new` creates sessions.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    const GHOST: &str = "01M2N4PCZZQC4J9B0DVAK40GJM";
+    let out = Command::new(bin())
+        .args(["queue", "new", "ghost", "--session", GHOST])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no session"),
+        "must distinguish a missing session from a malformed id: {}",
+        stderr(&out)
+    );
+    assert!(
+        !root.join("sessions").join(GHOST).exists(),
+        "an unknown session must never be created by side effect"
+    );
+}
+
+#[test]
+fn every_queue_command_rejects_an_unknown_session_with_exit_two() {
+    // The spec's exit table: unknown session is 2, raised by any command.
+    // Before the shared gate, `list` exited 0 with "no cassettes" and `next`
+    // exited 5 — telling an agent loop to idle when the truth was a typo.
+    // One case per `QueueCmd` variant, so a ninth command has a row to add.
+    const GHOST: &str = "01M2N4PCZZQC4J9B0DVAK40GJM";
+    const CID: &str = "01K5GR7T2M9WPD0000000000AB";
+    let commands: [&[&str]; 8] = [
+        &["queue", "list", "--session", GHOST],
+        &["queue", "next", "--session", GHOST],
+        &["queue", "new", "a topic", "--session", GHOST],
+        &["queue", "show", CID, "--session", GHOST],
+        &["queue", "close", CID, "--session", GHOST],
+        &["queue", "reopen", CID, "--session", GHOST],
+        &["queue", "move", CID, "--session", GHOST, "--before", CID],
+        &["queue", "write", CID, "--session", GHOST],
+    ];
+    for args in commands {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = Command::new(bin())
+            .args(args)
+            .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?} must exit 2 on an unknown session: {}",
+            stderr(&out)
+        );
+        assert!(
+            stderr(&out).contains("no session"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn session_alias_rejects_a_malformed_id_through_the_same_gate() {
+    // `session alias` is the other command that takes a typed session id,
+    // and it shares `Store::require_session` so the two cannot drift.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["session", "alias", "../../escaped", "x"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("malformed session id"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn queue_next_on_an_empty_session_exits_five() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let id = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", &id])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_next_prints_the_id_of_an_open_unlocked_cassette() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), ID);
+}
+
+#[test]
+fn queue_next_exits_three_when_every_open_cassette_is_locked() {
+    // Every open cassette held is a different empty-handed outcome than no
+    // open cassettes at all (exit 5, see `queue_next_on_an_empty_session_
+    // exits_five`): 3 says wait and retry, 5 says there is nothing to wait
+    // for. Held by flocking the anchor directly in this test process, the
+    // same primitive `queue write`/`queue next` use.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let anchor_path = root.join("sessions").join(&sid).join(".locks").join(ID);
+    let anchor = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(&anchor_path)
+        .expect("open anchor");
+    fs4::FileExt::lock(&anchor).expect("flock the anchor");
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+
+    fs4::FileExt::unlock(&anchor).expect("release");
+}
+
+#[test]
+fn queue_new_rejects_a_non_positive_priority() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args([
+            "queue",
+            "new",
+            "a topic",
+            "--session",
+            &sid,
+            "--priority",
+            "0",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_new_then_next_returns_the_new_cassette() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let made = Command::new(bin())
+        .args(["queue", "new", "gratitude", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(made.status.code(), Some(0), "{}", stderr(&made));
+    let cid = String::from_utf8_lossy(&made.stdout).trim().to_string();
+
+    let next = Command::new(bin())
+        .args(["queue", "next", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(next.status.code(), Some(0), "{}", stderr(&next));
+    assert_eq!(String::from_utf8_lossy(&next.stdout).trim(), cid);
+}
+
+#[test]
+fn queue_new_first_and_last_are_mutually_exclusive() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args([
+            "queue",
+            "new",
+            "a topic",
+            "--session",
+            &sid,
+            "--first",
+            "--last",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_new_exits_six_once_the_open_cap_is_reached() {
+    // The cap arithmetic itself (open-only counting, boundary value) is unit
+    // tested in `src/queue/edit.rs::tests::the_cap_counts_open_cassettes_only`;
+    // this is the end-to-end pin that the CLI actually enforces
+    // `store::MAX_OPEN` (36) and maps a full queue to exit code 6.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    for _ in 0..36 {
+        let out = Command::new(bin())
+            .args(["queue", "new", "filler", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    }
+
+    let out = Command::new(bin())
+        .args(["queue", "new", "one too many", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_close_then_list_shows_it_closed_and_reopen_restores_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let out = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let cid = {
+        let out = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let closed = Command::new(bin())
+        .args([
+            "queue",
+            "close",
+            &cid,
+            "--session",
+            &sid,
+            "-m",
+            "done for now",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(closed.status.code(), Some(0), "{}", stderr(&closed));
+
+    // Closed cassettes are hidden by the default --status open filter.
+    let listed = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains(&cid),
+        "a closed cassette must not show under --status open"
+    );
+
+    let shown = Command::new(bin())
+        .args(["queue", "show", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("\n> done for now\n"),
+        "{}",
+        String::from_utf8_lossy(&shown.stdout)
+    );
+
+    let reopened = Command::new(bin())
+        .args(["queue", "reopen", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(reopened.status.code(), Some(0), "{}", stderr(&reopened));
+
+    let again = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(String::from_utf8_lossy(&again.stdout).contains(&cid));
+}
+
+#[test]
+fn queue_close_rejects_a_message_containing_a_newline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let out = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let cid = {
+        let out = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let out = Command::new(bin())
+        .args([
+            "queue",
+            "close",
+            &cid,
+            "--session",
+            &sid,
+            "-m",
+            "done\n## Side B",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+
+    // Rejected before anything is touched: still open.
+    let listed = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(String::from_utf8_lossy(&listed.stdout).contains(&cid));
+}
+
+#[test]
+fn queue_close_exits_three_when_the_cassette_is_locked() {
+    // A cassette someone is actively writing cannot be closed by anyone,
+    // human or agent — the advisory flock wins regardless of `Kind`. Same
+    // fixture-and-flock technique as `queue_next_exits_three_when_every_
+    // open_cassette_is_locked`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let anchor_path = root.join("sessions").join(&sid).join(".locks").join(ID);
+    let anchor = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(&anchor_path)
+        .expect("open anchor");
+    fs4::FileExt::lock(&anchor).expect("flock the anchor");
+
+    let out = Command::new(bin())
+        .args(["queue", "close", ID, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+
+    fs4::FileExt::unlock(&anchor).expect("release");
+}
+
+#[test]
+fn queue_close_exits_four_for_an_agent_over_a_sticky_lock_but_a_human_may_close_it() {
+    // The permission boundary this whole task adds: nothing in this phase
+    // sets `locked_by` through the CLI (`queue lock` is 4c), so the fixture
+    // hand-writes it, the same way the store-level unit test does.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    let cassettes = root.join("sessions").join(&sid).join("cassettes");
+    std::fs::create_dir_all(&cassettes).expect("mkdir");
+    std::fs::write(
+        cassettes.join(format!("gratitude-{ID}.md")),
+        format!(
+            "---\nid: {ID}\ntopic: gratitude\npriority: 10\nstatus: open\n\
+             locked_by: 01WRITER0000000000000000AB\ncreated_by: w\nlast_writer: w\n\
+             updated_at: 2026-09-14T09:25:57Z\n---\n\n## Side A\n\nhello\n"
+        ),
+    )
+    .expect("cassette");
+
+    let agent = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(agent.status.code(), Some(0), "{}", stderr(&agent));
+    let human = Command::new(bin())
+        .args(["writer", "register", "--name", "joseph", "--kind", "human"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(human.status.code(), Some(0), "{}", stderr(&human));
+
+    let as_agent = Command::new(bin())
+        .args(["--writer", "bot", "queue", "close", ID, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(as_agent.status.code(), Some(4), "{}", stderr(&as_agent));
+
+    let as_human = Command::new(bin())
+        .args([
+            "--writer",
+            "joseph",
+            "queue",
+            "close",
+            ID,
+            "--session",
+            &sid,
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(as_human.status.code(), Some(0), "{}", stderr(&as_human));
+}
+
+#[test]
+fn queue_reopen_exits_six_once_the_open_cap_is_reached() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    for _ in 0..36 {
+        let out = Command::new(bin())
+            .args(["queue", "new", "filler", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    }
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    let cassettes = root.join("sessions").join(&sid).join("cassettes");
+    std::fs::write(
+        cassettes.join(format!("closed-{ID}.md")),
+        format!(
+            "---\nid: {ID}\ntopic: closed\npriority: 9999\nstatus: closed\nlocked_by:\n\
+             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             ## Side A\n\nhello\n"
+        ),
+    )
+    .expect("cassette");
+
+    let out = Command::new(bin())
+        .args(["queue", "reopen", ID, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_move_reorders_cassettes_and_persists_the_new_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let mut ids = Vec::new();
+    for topic in ["first", "second", "third"] {
+        let out = Command::new(bin())
+            .args(["queue", "new", topic, "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        ids.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    let first = &ids[0];
+    let third = &ids[2];
+
+    let moved = Command::new(bin())
+        .args(["queue", "move", third, "--session", &sid, "--before", first])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(moved.status.code(), Some(0), "{}", stderr(&moved));
+
+    let listed = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let out = String::from_utf8_lossy(&listed.stdout).to_string();
+    // Assert on relative order only, never exact formatting.
+    let pos_third = out.find(third.as_str()).expect("third listed");
+    let pos_first = out.find(first.as_str()).expect("first listed");
+    assert!(
+        pos_third < pos_first,
+        "the moved cassette must now sort before its anchor: {out}"
+    );
+}
+
+#[test]
+fn queue_move_rejects_moving_relative_to_itself() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let created = Command::new(bin())
+        .args(["queue", "new", "solo", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    let id = String::from_utf8_lossy(&created.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "move", &id, "--session", &sid, "--before", &id])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_move_requires_exactly_one_of_before_or_after() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let neither = Command::new(bin())
+        .args(["queue", "move", "someid", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(neither.status.code(), Some(2), "{}", stderr(&neither));
+
+    let both = Command::new(bin())
+        .args([
+            "queue",
+            "move",
+            "someid",
+            "--session",
+            &sid,
+            "--before",
+            "a",
+            "--after",
+            "b",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
 }

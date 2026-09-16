@@ -4,17 +4,17 @@
 //! else, so a caller cannot claim a kind per-invocation — that is the property
 //! the spec's permission boundary rests on.
 
-use crate::store::writers::{lookup_by_name, Kind, WriterError, Writers};
+use crate::store::writers::{lookup_by_name, EnsureError, Kind, Writers};
 use crate::store::Store;
 
 /// Register `name`, or return its existing id when it is already registered
-/// with this same kind. A kind mismatch is rejected — see `WriterError`.
+/// with this same kind. A kind mismatch is rejected — see `EnsureError`.
 ///
-/// Returns `Result<_, WriterError>` rather than `Result<_, String>`: unlike
+/// Returns `Result<_, EnsureError>` rather than `Result<_, String>`: unlike
 /// `list`/`whoami` (whose only failure is an I/O error, always exit 1), a
 /// mismatch here is exit 2 and an I/O failure is exit 1 — `main.rs` needs the
 /// variant, not just a rendered message, to pick between them.
-pub fn register(store: &Store, name: &str, kind: Kind) -> Result<String, WriterError> {
+pub fn register(store: &Store, name: &str, kind: Kind) -> Result<String, EnsureError> {
     let id = store.ensure_writer(name, kind)?;
     // Echo the trimmed name, not the caller's: the store trims at its boundary,
     // so `--name " bot "` stores `bot`. Echoing the padded form would show the
@@ -158,7 +158,7 @@ mod tests {
         let store = Store::new(dir.path().to_path_buf());
         register(&store, "bot", Kind::Agent).expect("first registration");
         match register(&store, "bot", Kind::Human) {
-            Err(WriterError::KindMismatch { name, .. }) => assert_eq!(name, "bot"),
+            Err(EnsureError::KindMismatch { name, .. }) => assert_eq!(name, "bot"),
             other => panic!("expected KindMismatch, got {other:?}"),
         }
         assert_eq!(store.writers().expect("read").writers.len(), 1);
