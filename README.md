@@ -446,7 +446,7 @@ Options:
       --theme <NAME>   color theme for this session (overrides config)
   -R, --record         record mode: no deletions, the tape only rolls forward
   -o, --output         print to stdout on quit instead of writing a file
-      --writer <NAME>  registered writer to act as (default: $CASSETTE_WRITER, else $USER)
+      --writer <NAME>  registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
   -h, --help           Print help
   -V, --version        Print version
 ```
