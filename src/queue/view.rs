@@ -256,6 +256,45 @@ mod tests {
     }
 
     #[test]
+    fn since_keeps_a_cassette_whose_own_timestamp_is_unreadable() {
+        // Same rule as `unreadable`: a cassette the store cannot fully read
+        // is counted, never hidden. A hand-edited `updated_at` must not
+        // silently drop the cassette out of a `--since` listing, where its
+        // absence is indistinguishable from "nothing changed".
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+
+        let mut good = meta("aaa00000000000000000000000", 10, Status::Open);
+        good.topic = Some("older-one".to_string());
+        good.updated_at = "2026-09-15T09:00:00Z".to_string();
+        let mut broken = meta("bbb00000000000000000000000", 20, Status::Open);
+        broken.topic = Some("garbled".to_string());
+        broken.updated_at = "not a timestamp".to_string();
+        store.add_cassette(&sid, &good, "").expect("add");
+        store.add_cassette(&sid, &broken, "").expect("add");
+
+        // A `since` after both: the readable one is correctly filtered out,
+        // and the unreadable one survives precisely because it cannot be
+        // checked against the filter.
+        let out = list(
+            &store,
+            &sid,
+            StatusFilter::All,
+            Some("2026-09-16T00:00:00Z"),
+        )
+        .expect("list");
+        assert!(
+            !out.contains("older-one"),
+            "older cassette must drop: {out}"
+        );
+        assert!(
+            out.contains("garbled"),
+            "an unparseable updated_at must be kept, not hidden: {out}"
+        );
+    }
+
+    #[test]
     fn list_rejects_an_unparseable_since() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
