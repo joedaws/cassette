@@ -55,10 +55,12 @@ pub enum QueueError {
     Io(String),
 }
 
-/// Which cassettes `queue list` shows. Doubles as the `--status` clap value
-/// enum (`open|closed|all`, via the derived `ValueEnum`'s default kebab-case
-/// naming) so `cli.rs` needs no separate arg-only enum for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+/// Which cassettes `queue list` shows. This module takes no dependency on
+/// the command-line parsing crate, same as the rest of `queue` and `store` —
+/// `cli.rs` is the only place the command line is read, so its
+/// command-line-facing counterpart is `cli::StatusArg`, converted via `From`
+/// the same way `cli::WriterKindArg` converts into `store::writers::Kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusFilter {
     Open,
     Closed,

@@ -175,7 +175,7 @@ enum QueueAction {
         session: String,
         /// which cassettes to show
         #[arg(long, value_enum, default_value = "open")]
-        status: crate::queue::StatusFilter,
+        status: StatusArg,
         /// only cassettes updated at or after this RFC3339 timestamp
         #[arg(long, value_name = "TIME")]
         since: Option<String>,
@@ -244,6 +244,28 @@ impl From<WriterKindArg> for crate::store::writers::Kind {
     }
 }
 
+/// `--status`'s clap-facing type. `queue::StatusFilter` is the domain type
+/// and stays clap-free — this mirrors `WriterKindArg` /
+/// `store::writers::Kind` below: the only place the command line is read is
+/// `cli.rs`, so the `ValueEnum` derive lives here, not on the type `queue`
+/// actually works with.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum StatusArg {
+    Open,
+    Closed,
+    All,
+}
+
+impl From<StatusArg> for crate::queue::StatusFilter {
+    fn from(s: StatusArg) -> crate::queue::StatusFilter {
+        match s {
+            StatusArg::Open => crate::queue::StatusFilter::Open,
+            StatusArg::Closed => crate::queue::StatusFilter::Closed,
+            StatusArg::All => crate::queue::StatusFilter::All,
+        }
+    }
+}
+
 impl Cli {
     fn into_args(self) -> Args {
         let mut args = Args {
@@ -275,7 +297,7 @@ impl Cli {
                         since,
                     } => QueueCmd::List {
                         session,
-                        status,
+                        status: status.into(),
                         since,
                     },
                     QueueAction::Show { id, session } => QueueCmd::Show { id, session },
