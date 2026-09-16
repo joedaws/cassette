@@ -361,6 +361,15 @@ impl Store {
         lock::acquire(id, path, &anchor_path, as_writer, lock::Blocking::No)
     }
 
+    /// Whether `id`'s lock is free right now. A snapshot, not a claim: the
+    /// lock may be taken the instant after this returns, and a caller that
+    /// needs to act on the answer (`queue write`) still has to race for it
+    /// with a real `lock`. Never stamps or creates the anchor — see
+    /// `lock::probe`.
+    pub fn is_free(&self, session: &str, id: &str) -> io::Result<bool> {
+        lock::probe(&self.locks_dir(session).join(id))
+    }
+
     /// Acquire several cassette locks at once, all or nothing.
     ///
     /// Locks are always taken in **ascending id order**, regardless of the

@@ -169,6 +169,7 @@ fn main() -> io::Result<()> {
                     Ok(()) => std::process::exit(0),
                     Err(queue::QueueError::Usage(m)) => die_with(2, &m),
                     Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
                     Err(queue::QueueError::Io(m)) => die_with(1, &m),
                 }
             }
@@ -187,6 +188,11 @@ fn main() -> io::Result<()> {
             )),
             cli::QueueCmd::Show { id, session } => {
                 exit_on_queue_result(queue::view::show(&store, session, id))
+            }
+            // No writer identity: `next` reports an id, it attributes
+            // nothing.
+            cli::QueueCmd::Next { session } => {
+                exit_on_queue_result(queue::view::next(&store, session))
             }
         }
     }
@@ -1041,9 +1047,9 @@ fn die_with(code: i32, msg: &str) -> ! {
     std::process::exit(code);
 }
 
-/// Print and exit for `queue list`/`queue show`, which both succeed with a
-/// message to print rather than nothing — unlike `queue write`, handled
-/// separately since `Ok(())` has nothing to print.
+/// Print and exit for `queue list`/`queue show`/`queue next`, which all
+/// succeed with a message to print rather than nothing — unlike `queue
+/// write`, handled separately since `Ok(())` has nothing to print.
 fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
     match result {
         Ok(msg) => {
@@ -1052,6 +1058,7 @@ fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
         }
         Err(queue::QueueError::Usage(m)) => die_with(2, &m),
         Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+        Err(queue::QueueError::Empty(m)) => die_with(5, &m),
         Err(queue::QueueError::Io(m)) => die_with(1, &m),
     }
 }

@@ -46,6 +46,9 @@ pub enum QueueCmd {
         id: String,
         session: String,
     },
+    Next {
+        session: String,
+    },
 }
 
 /// `writer …` as `main()` consumes it.
@@ -188,6 +191,12 @@ enum QueueAction {
         #[arg(long, value_name = "ID")]
         session: String,
     },
+    /// print the id of the next open, unlocked cassette in queue order
+    Next {
+        /// session to search
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -301,6 +310,7 @@ impl Cli {
                         since,
                     },
                     QueueAction::Show { id, session } => QueueCmd::Show { id, session },
+                    QueueAction::Next { session } => QueueCmd::Next { session },
                 });
             }
             Some(Command::Writer { action }) => {

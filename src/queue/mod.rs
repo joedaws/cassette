@@ -1,10 +1,13 @@
 //! The `cassette queue` commands.
 //!
 //! Split on the lock boundary: `view` holds the read-only commands (`list`,
-//! `show`) and never touches `LockGuard::write`, while `write` holds the one
-//! command that does. `LockGuard::write` (see `store::lock`) is the only code
-//! in the crate that writes a cassette file, and that invariant is meant to
-//! be checkable by reading `view.rs` alone — no locks, no writes, full stop.
+//! `show`, `next`) and never touches `LockGuard::write`, while `write` holds
+//! the one command that does. `LockGuard::write` (see `store::lock`) is the
+//! only code in the crate that writes a cassette file, and that invariant is
+//! meant to be checkable by reading `view.rs` alone — no locks *held*, no
+//! writes, full stop. `next` probes locks (`Store::is_free`) to skip busy
+//! cassettes, but a probe acquires and releases within one call and never
+//! constructs a `LockGuard`, so it never holds anything past a return.
 //!
 //! `pub use write::write` keeps `main.rs`'s existing `queue::write(...)` call
 //! site unchanged even though `write` now names both a module and a function;
@@ -51,6 +54,12 @@ pub enum QueueError {
     /// `--json` is what will likely need the fields back, since it emits
     /// `id` and `holder` raw rather than prose.
     Busy(String),
+    /// `queue next` found no open cassettes at all — a different situation
+    /// from `Busy`, which means open cassettes exist but every one is
+    /// currently locked. `Busy` says "wait and retry"; `Empty` says "there is
+    /// nothing to wait for — the caller should sit idle or enqueue work".
+    /// Exit 5, distinct from `Busy`'s exit 3 for exactly that reason.
+    Empty(String),
     /// Anything else. Exit 1.
     Io(String),
 }

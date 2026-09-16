@@ -500,3 +500,86 @@ fn queue_list_and_show_need_no_writer_identity() {
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
+
+#[test]
+fn queue_next_on_an_empty_session_exits_five() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let id = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", &id])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_next_prints_the_id_of_an_open_unlocked_cassette() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), ID);
+}
+
+#[test]
+fn queue_next_exits_three_when_every_open_cassette_is_locked() {
+    // Every open cassette held is a different empty-handed outcome than no
+    // open cassettes at all (exit 5, see `queue_next_on_an_empty_session_
+    // exits_five`): 3 says wait and retry, 5 says there is nothing to wait
+    // for. Held by flocking the anchor directly in this test process, the
+    // same primitive `queue write`/`queue next` use.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let anchor_path = root.join("sessions").join(&sid).join(".locks").join(ID);
+    let anchor = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(&anchor_path)
+        .expect("open anchor");
+    fs4::FileExt::lock(&anchor).expect("flock the anchor");
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+
+    fs4::FileExt::unlock(&anchor).expect("release");
+}

@@ -1,11 +1,15 @@
-//! Read-only `cassette queue` commands: `list` and `show`.
+//! Read-only `cassette queue` commands: `list`, `show`, and `next`.
 //!
-//! **This module performs no writes.** Every mutation to a cassette file
-//! goes through `LockGuard::write` (see `store::lock`), and this module never
-//! constructs or touches a `LockGuard` at all — `list` and `show` take no
-//! lock, cassette or registry. A reviewer can confirm the whole invariant by
-//! reading this file alone: there is no `guard.write(`, no `atomic_write(`,
-//! no `std::fs::write(`, nothing.
+//! **This module performs no writes and holds no lock.** Every mutation to a
+//! cassette file goes through `LockGuard::write` (see `store::lock`), and
+//! this module never constructs a `LockGuard` at all — `list` and `show`
+//! take no lock, cassette or registry. `next` calls `Store::is_free`, which
+//! opens a cassette's lock anchor, tries the flock, and releases it within
+//! that single call to answer "is this free right now" (a snapshot, not a
+//! claim) — so no lock is ever held across a return from this module. A
+//! reviewer can confirm the whole invariant by reading this file alone:
+//! there is no `guard.write(`, no `atomic_write(`, no `std::fs::write(`,
+//! nothing.
 
 use crate::queue::{QueueError, StatusFilter};
 use crate::store::meta::{CassetteMeta, Status};
@@ -114,6 +118,57 @@ pub fn show(store: &Store, session: &str, id: &str) -> Result<String, QueueError
         .map_err(|e| QueueError::Io(format!("cannot look up '{id}': {e}")))?
         .ok_or_else(|| QueueError::Usage(format!("no cassette '{id}' in session '{session}'")))?;
     std::fs::read_to_string(&path).map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))
+}
+
+/// `cassette queue next --session <ID>`: the id of the next cassette a
+/// writer should take.
+///
+/// A one-shot CLI process cannot hold a lock for its caller — flock dies
+/// with the process — so this reports an id rather than claiming one; the
+/// caller races for it with `queue write`. That window is real and is
+/// accepted by design: `queue write` already returns exit 3 with the
+/// holder's attribution when it loses the race, so the loser just retries.
+/// Closing the window needs a sticky lock, which is a later phase.
+///
+/// Walks the session's open cassettes in queue order (`store::priority`,
+/// same comparator `queue list` uses) and returns the first whose lock
+/// `Store::is_free` reports free. Distinguishes two empty-handed outcomes,
+/// on purpose (see `QueueError::Empty`):
+/// - open cassettes exist but every one is currently locked → `Busy` (exit 3,
+///   wait and retry)
+/// - no open cassettes at all → `Empty` (exit 5, idle or enqueue)
+pub fn next(store: &Store, session: &str) -> Result<String, QueueError> {
+    let scan = store
+        .scan_session(session)
+        .map_err(|e| QueueError::Io(format!("cannot scan session '{session}': {e}")))?;
+
+    let mut open: Vec<CassetteMeta> = scan
+        .cassettes
+        .into_iter()
+        .map(|c| c.meta)
+        .filter(|m| m.status == Status::Open)
+        .collect();
+
+    if open.is_empty() {
+        return Err(QueueError::Empty(format!(
+            "no open cassettes in session '{session}'"
+        )));
+    }
+
+    priority::queue_order(&mut open);
+
+    for m in &open {
+        let free = store
+            .is_free(session, &m.id)
+            .map_err(|e| QueueError::Io(format!("cannot check lock on '{}': {e}", m.id)))?;
+        if free {
+            return Ok(m.id.clone());
+        }
+    }
+
+    Err(QueueError::Busy(
+        "every open cassette is being written — try again shortly".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -239,6 +294,104 @@ mod tests {
         match show(&store, "nope", "nope") {
             Err(QueueError::Usage(m)) => assert!(m.contains("nope"), "{m}"),
             other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    fn new_session(store: &Store) -> String {
+        store
+            .create_session(&crate::store::session::SessionMeta {
+                alias: None,
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session")
+    }
+
+    #[test]
+    fn next_returns_empty_when_there_are_no_open_cassettes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Closed),
+                "",
+            )
+            .expect("add");
+
+        match next(&store, &sid) {
+            Err(QueueError::Empty(m)) => assert!(m.contains(&sid), "{m}"),
+            other => panic!("expected Empty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn next_returns_empty_for_a_session_with_no_cassettes_at_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        match next(&store, &sid) {
+            Err(QueueError::Empty(_)) => {}
+            other => panic!("expected Empty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn next_skips_a_locked_cassette_and_returns_the_next_free_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("bbb00000000000000000000000", 20, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        // Lock the higher-priority (lower id) cassette, so `next` must skip
+        // it and report the other open one instead of reporting Busy.
+        let holder = crate::store::lock::Attribution::for_now("writer-1", "joseph");
+        let _held = store
+            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .expect("hold it");
+
+        assert_eq!(
+            next(&store, &sid).expect("next"),
+            "bbb00000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn next_returns_busy_when_every_open_cassette_is_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        let holder = crate::store::lock::Attribution::for_now("writer-1", "joseph");
+        let _held = store
+            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .expect("hold it");
+
+        match next(&store, &sid) {
+            Err(QueueError::Busy(_)) => {}
+            other => panic!("expected Busy, got {other:?}"),
         }
     }
 }

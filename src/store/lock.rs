@@ -294,6 +294,35 @@ pub(crate) fn acquire(
     })
 }
 
+/// Is this lock free right now? Opens the anchor without creating it and
+/// tries the lock, releasing immediately when it succeeds.
+///
+/// Deliberately NOT `acquire` with the guard dropped: `acquire` stamps the
+/// holder into the anchor after locking, so using it to ask a question would
+/// write to every cassette the caller merely looked at. The answer is a
+/// snapshot — the lock may be taken the instant after this returns — which is
+/// why the only caller, `queue next`, reports rather than claims.
+pub(crate) fn probe(anchor_path: &Path) -> io::Result<bool> {
+    let anchor = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(anchor_path)
+    {
+        Ok(f) => f,
+        // No anchor means nobody has ever locked this cassette.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e),
+    };
+    // UFCS, not `anchor.try_lock()` — see the comment in `acquire` above:
+    // this toolchain's `std::fs::File` has an inherent `try_lock` that would
+    // otherwise shadow fs4's trait method.
+    match FileExt::try_lock(&anchor) {
+        Ok(()) => Ok(true), // released when `anchor` drops
+        Err(fs4::TryLockError::WouldBlock) => Ok(false),
+        Err(fs4::TryLockError::Error(e)) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,6 +732,60 @@ mod tests {
             !b_anchor.contains("writer-2"),
             "b must never have been acquired — acquisition did not start at the \
              lowest id: {b_anchor}"
+        );
+    }
+
+    #[test]
+    fn probe_reports_free_without_creating_or_stamping_the_anchor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor = dir.path().join("01K5GR7T2M9WPD0000000000AB");
+
+        // A cassette nobody has ever locked has no anchor file. That is free,
+        // and probing must not bring the file into existence.
+        assert!(probe(&anchor).expect("probe"), "an absent anchor is free");
+        assert!(
+            !anchor.exists(),
+            "probe must not create the anchor: it is a read"
+        );
+    }
+
+    #[test]
+    fn probe_reports_busy_while_the_lock_is_held() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        const ID: &str = "aaa00000000000000000000000";
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+
+        let holder = Attribution::for_now("writer-1", "joseph");
+        let _held = s.lock(&sid, ID, &holder).expect("hold it");
+
+        assert!(
+            !probe(&s.locks_dir(&sid).join(ID)).expect("probe"),
+            "the lock is held, so probe must report busy"
+        );
+    }
+
+    #[test]
+    fn probe_does_not_stamp_the_anchor_it_finds_free() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        const ID: &str = "aaa00000000000000000000000";
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+
+        // Acquire and release once, so the anchor exists and carries a real
+        // holder's stamp — the state a cassette is normally found in.
+        let holder = Attribution::for_now("writer-1", "joseph");
+        drop(s.lock(&sid, ID, &holder).expect("acquire once"));
+        let anchor_path = s.locks_dir(&sid).join(ID);
+        let before = std::fs::read_to_string(&anchor_path).expect("read anchor");
+        assert!(before.contains("writer-1"), "{before}");
+
+        assert!(probe(&anchor_path).expect("probe"), "released, so free");
+
+        let after = std::fs::read_to_string(&anchor_path).expect("read anchor");
+        assert_eq!(
+            before, after,
+            "probe must not rewrite the anchor's attribution: it only reads"
         );
     }
 }
