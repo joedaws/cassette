@@ -9,8 +9,9 @@
 //! `Store::lock_many`.
 
 use super::{require_error_to_queue_error, resolve_error_to_queue_error, QueueError, WriterSource};
-use crate::store::lock::Attribution;
+use crate::store::lock::{Attribution, LockError};
 use crate::store::meta::{CassetteMeta, Status};
+use crate::store::writers::Kind;
 use crate::store::{ids, priority, Store};
 
 /// Where a new cassette lands in the queue.
@@ -64,7 +65,6 @@ pub fn is_full(statuses: &[Status], max_open: usize) -> bool {
 ///    which is `QueueError::Io`.
 /// 4. Create the cassette through `Store::add_cassette`, which takes and
 ///    releases its own lock — a freshly minted id cannot be contended.
-#[allow(clippy::too_many_arguments)]
 pub fn new(
     store: &Store,
     session: &str,
@@ -153,6 +153,186 @@ fn place(placement: Placement, open_priorities: &[i64]) -> Result<Option<i64>, Q
         Placement::First => priority::first(open_priorities),
         Placement::Explicit(n) => Some(validate_priority(n)?),
     })
+}
+
+/// Turn a failed `Store::lock` into the `QueueError` it deserves. Shared by
+/// `close` and `reopen`, the two `edit` commands that lock an *existing*
+/// cassette (`new` mints a fresh id through `Store::add_cassette`, which
+/// cannot contend, so it never needs this).
+///
+/// `Busy` covers everyone: a cassette another writer is actively holding
+/// cannot be closed or reopened by anyone, human or agent — that boundary is
+/// the advisory `flock`, not `locked_by`, and it binds regardless of `Kind`.
+fn lock_error_to_queue_error(id: &str, session: &str, e: LockError) -> QueueError {
+    match e {
+        LockError::Busy { holder, .. } => {
+            let who = holder
+                .map(|a| format!("{} (since {})", a.name, a.since))
+                .unwrap_or_else(|| "another writer".to_string());
+            QueueError::Busy(format!("'{id}' is open by {who} — try again later"))
+        }
+        LockError::NoSuchCassette { .. } => {
+            QueueError::Usage(format!("no cassette '{id}' in session '{session}'"))
+        }
+        LockError::Io(e) => QueueError::Io(format!("cannot lock '{id}': {e}")),
+    }
+}
+
+/// Whether `kind` may close a cassette currently claimed by `locked_by`.
+///
+/// This is the permission boundary the writer `kind` system exists for: a
+/// **busy** cassette (another writer holds the advisory `flock`) cannot be
+/// closed by anyone and is rejected earlier, by `Store::lock` itself, before
+/// this is ever consulted. This function is about the *sticky* claim in
+/// `CassetteMeta::locked_by` instead — a writer has claimed the cassette for
+/// work without necessarily holding it locked at this instant. An agent may
+/// not close over that claim; a human may.
+///
+/// Nothing in this phase (4b) ever sets `locked_by` — `queue lock`/`unlock`
+/// are 4c — so the `Err` arm is unreachable until then. It is implemented
+/// now on purpose: the rule is in place before the command that makes it
+/// reachable, rather than the two arriving together.
+fn close_permitted(kind: Kind, locked_by: Option<&str>) -> Result<(), QueueError> {
+    match (kind, locked_by) {
+        (Kind::Agent, Some(holder)) => Err(QueueError::Sticky(format!(
+            "cassette is locked by '{holder}' — only a human may close it"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Render `-m`'s close-out message as the trailing blockquote line `close`
+/// appends to the body: `\n> <message>\n`.
+///
+/// A blockquote is a note *about* the cassette rather than cassette prose,
+/// and it round-trips through `meta::split` without colliding with the
+/// `## Side A` / `## Side B` headings `output::parse_markdown` looks for. A
+/// `message` containing a newline would inject a second body line that is
+/// not a quote, so it is rejected here as a usage error rather than being
+/// silently flattened or split across lines.
+fn close_message_line(message: &str) -> Result<String, QueueError> {
+    if message.contains('\n') {
+        return Err(QueueError::Usage(
+            "-m message must not contain a newline".to_string(),
+        ));
+    }
+    Ok(format!("\n> {message}\n"))
+}
+
+/// `cassette queue close <ID> --session <ID> [-m <MESSAGE>]`: mark a
+/// cassette closed.
+///
+/// Order of operations, each deliberate:
+/// 1. Validate `-m` first — cheap and no I/O — so a malformed message fails
+///    before the writer is even resolved.
+/// 2. Resolve the writer, keeping its `Kind` this time (`queue/write.rs`
+///    binds it as `_kind` — this is the command that starts to need it).
+/// 3. Acquire the cassette's lock. `Busy` (exit 3): a cassette someone is
+///    actively writing cannot be closed by anyone, human or agent — that is
+///    the advisory `flock`, unconditional on `Kind`.
+/// 4. Read through the guard and check `close_permitted` against the
+///    cassette's `locked_by`. An agent facing a set `locked_by` gets
+///    `Sticky` (exit 4); a human may proceed.
+/// 5. Set `status = Closed`, `last_writer`, `updated_at`, append the
+///    blockquote line when `-m` was given, and write through the guard.
+pub fn close(
+    store: &Store,
+    session: &str,
+    id: &str,
+    message: Option<&str>,
+    who_name: &str,
+    source: WriterSource,
+) -> Result<(), QueueError> {
+    let line = message.map(close_message_line).transpose()?;
+
+    let (writer, kind) = match source {
+        WriterSource::Env => store
+            .resolve_writer(who_name)
+            .map_err(resolve_error_to_queue_error)?,
+        WriterSource::Flag => store
+            .require_writer(who_name)
+            .map_err(require_error_to_queue_error)?,
+    };
+    let who = Attribution::for_now(&writer, who_name);
+
+    let guard = store
+        .lock(session, id, &who)
+        .map_err(|e| lock_error_to_queue_error(id, session, e))?;
+
+    let current = guard
+        .read()
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+    close_permitted(kind, current.meta.locked_by.as_deref())?;
+
+    let mut m = current.meta;
+    m.status = Status::Closed;
+    m.last_writer = writer;
+    m.updated_at = crate::store::meta::now_utc();
+
+    let mut body = current.body;
+    if let Some(line) = line {
+        body.push_str(&line);
+    }
+
+    guard
+        .write(&m, &body)
+        .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
+}
+
+/// `cassette queue reopen <ID> --session <ID>`: mark a closed cassette open
+/// again.
+///
+/// Reopening is not gated on `locked_by`: the sticky lock guards *closing*
+/// work someone claimed, and nothing is claimed by reopening — so this never
+/// consults `Kind` at all. It DOES raise the session's open count, so it
+/// takes the same cap check `new` uses and fails `Full` (exit 6) when the
+/// session already holds `max_open` open cassettes, checked before the lock
+/// is taken for the same reason `new` checks before computing a priority: a
+/// full queue should never pay for a lock acquisition it cannot use.
+pub fn reopen(
+    store: &Store,
+    session: &str,
+    id: &str,
+    who_name: &str,
+    source: WriterSource,
+    max_open: usize,
+) -> Result<(), QueueError> {
+    let (writer, _kind) = match source {
+        WriterSource::Env => store
+            .resolve_writer(who_name)
+            .map_err(resolve_error_to_queue_error)?,
+        WriterSource::Flag => store
+            .require_writer(who_name)
+            .map_err(require_error_to_queue_error)?,
+    };
+    let who = Attribution::for_now(&writer, who_name);
+
+    let scan = store
+        .scan_session(session)
+        .map_err(|e| QueueError::Io(format!("cannot scan session '{session}': {e}")))?;
+    let statuses: Vec<Status> = scan.cassettes.iter().map(|c| c.meta.status).collect();
+    if is_full(&statuses, max_open) {
+        return Err(QueueError::Full(format!(
+            "session '{session}' already holds {max_open} open cassettes"
+        )));
+    }
+
+    let guard = store
+        .lock(session, id, &who)
+        .map_err(|e| lock_error_to_queue_error(id, session, e))?;
+
+    let current = guard
+        .read()
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+
+    let mut m = current.meta;
+    m.status = Status::Open;
+    m.last_writer = writer;
+    m.updated_at = crate::store::meta::now_utc();
+
+    guard
+        .write(&m, &current.body)
+        .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
 }
 
 /// Give every cassette in `session` fresh sparse priorities, in queue order.
@@ -427,5 +607,243 @@ mod tests {
         let sid = new_session(&store);
         let who = Attribution::for_now("w", "tester");
         renumber_all(&store, &sid, &who).expect("renumber");
+    }
+
+    #[test]
+    fn an_agent_may_not_close_a_sticky_locked_cassette_but_a_human_may() {
+        // The permission boundary this phase's writer `kind` exists for.
+        // Nothing in 4b SETS locked_by — `queue lock` is 4c — so this is the
+        // rule being in place before the command that makes it reachable.
+        assert!(matches!(
+            close_permitted(Kind::Agent, Some("01WRITER")),
+            Err(QueueError::Sticky(_))
+        ));
+        assert!(close_permitted(Kind::Human, Some("01WRITER")).is_ok());
+        assert!(close_permitted(Kind::Agent, None).is_ok());
+    }
+
+    #[test]
+    fn a_close_message_may_not_contain_a_newline() {
+        assert!(close_message_line("done for now").is_ok());
+        assert!(
+            close_message_line("done\n## Side B").is_err(),
+            "a newline would inject a body line that is not a quote"
+        );
+    }
+
+    #[test]
+    fn close_message_line_renders_a_trailing_blockquote() {
+        assert_eq!(
+            close_message_line("done for now").expect("ok"),
+            "\n> done for now\n"
+        );
+    }
+
+    #[test]
+    fn close_marks_a_cassette_closed_and_appends_the_message() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "## Side A\n\nhello\n",
+            )
+            .expect("add");
+
+        close(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            Some("done for now"),
+            "tester",
+            WriterSource::Env,
+        )
+        .expect("close");
+
+        let scan = store.scan_session(&sid).expect("scan");
+        let c = scan
+            .cassettes
+            .iter()
+            .find(|c| c.meta.id == "aaa00000000000000000000000")
+            .expect("found");
+        assert_eq!(c.meta.status, Status::Closed);
+        assert!(c.body.ends_with("\n> done for now\n"), "{}", c.body);
+    }
+
+    #[test]
+    fn close_refuses_a_busy_cassette_for_human_and_agent_alike() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        let holder = Attribution::for_now("writer-1", "joseph");
+        let _held = store
+            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .expect("hold it");
+
+        match close(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            None,
+            "tester",
+            WriterSource::Env,
+        ) {
+            Err(QueueError::Busy(_)) => {}
+            other => panic!("expected Busy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn close_end_to_end_denies_an_agent_over_a_sticky_lock_but_allows_a_human() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let mut m = meta("aaa00000000000000000000000", 10, Status::Open);
+        m.locked_by = Some("01WRITER0000000000000000AB".to_string());
+        store.add_cassette(&sid, &m, "").expect("add");
+
+        store
+            .ensure_writer("bot", Kind::Agent)
+            .expect("register agent");
+        store
+            .ensure_writer("joseph", Kind::Human)
+            .expect("register human");
+
+        match close(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            None,
+            "bot",
+            WriterSource::Flag,
+        ) {
+            Err(QueueError::Sticky(_)) => {}
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+
+        close(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            None,
+            "joseph",
+            WriterSource::Flag,
+        )
+        .expect("a human may close a sticky-locked cassette");
+
+        let scan = store.scan_session(&sid).expect("scan");
+        assert_eq!(
+            scan.cassettes
+                .iter()
+                .find(|c| c.meta.id == "aaa00000000000000000000000")
+                .expect("found")
+                .meta
+                .status,
+            Status::Closed
+        );
+    }
+
+    #[test]
+    fn reopen_marks_a_closed_cassette_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Closed),
+                "",
+            )
+            .expect("add");
+
+        reopen(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "tester",
+            WriterSource::Env,
+            36,
+        )
+        .expect("reopen");
+
+        let scan = store.scan_session(&sid).expect("scan");
+        assert_eq!(
+            scan.cassettes
+                .iter()
+                .find(|c| c.meta.id == "aaa00000000000000000000000")
+                .expect("found")
+                .meta
+                .status,
+            Status::Open
+        );
+    }
+
+    #[test]
+    fn reopen_refuses_to_exceed_the_open_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("bbb00000000000000000000000", 20, Status::Closed),
+                "",
+            )
+            .expect("add");
+
+        match reopen(
+            &store,
+            &sid,
+            "bbb00000000000000000000000",
+            "tester",
+            WriterSource::Env,
+            1,
+        ) {
+            Err(QueueError::Full(m)) => assert!(m.contains(&sid), "{m}"),
+            other => panic!("expected Full, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reopen_is_not_gated_on_locked_by() {
+        // The sticky lock guards closing claimed work; reopening claims
+        // nothing, so it must succeed even for an agent over a set
+        // `locked_by`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let mut m = meta("aaa00000000000000000000000", 10, Status::Closed);
+        m.locked_by = Some("01WRITER0000000000000000AB".to_string());
+        store.add_cassette(&sid, &m, "").expect("add");
+        store
+            .ensure_writer("bot", Kind::Agent)
+            .expect("register agent");
+
+        reopen(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "bot",
+            WriterSource::Flag,
+            36,
+        )
+        .expect("an agent may reopen a sticky-locked cassette");
     }
 }

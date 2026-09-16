@@ -185,6 +185,7 @@ fn main() -> io::Result<()> {
                     }
                     Err(queue::QueueError::Usage(m)) => die_with(2, &m),
                     Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
                     Err(queue::QueueError::Empty(m)) => die_with(5, &m),
                     Err(queue::QueueError::Full(m)) => die_with(6, &m),
                     Err(queue::QueueError::Io(m)) => die_with(1, &m),
@@ -202,6 +203,7 @@ fn main() -> io::Result<()> {
                     Ok(()) => std::process::exit(0),
                     Err(queue::QueueError::Usage(m)) => die_with(2, &m),
                     Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
                     Err(queue::QueueError::Empty(m)) => die_with(5, &m),
                     Err(queue::QueueError::Full(m)) => die_with(6, &m),
                     Err(queue::QueueError::Io(m)) => die_with(1, &m),
@@ -227,6 +229,54 @@ fn main() -> io::Result<()> {
             // nothing.
             cli::QueueCmd::Next { session } => {
                 exit_on_queue_result(queue::view::next(&store, session))
+            }
+            // `close` attributes the closure and, when the acting writer is
+            // an agent, needs its `Kind` to enforce the sticky-lock
+            // boundary — see `queue::edit::close_permitted`.
+            cli::QueueCmd::Close {
+                id,
+                session,
+                message,
+            } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                match queue::edit::close(
+                    &store,
+                    session,
+                    id,
+                    message.as_deref(),
+                    &who_name,
+                    writer_source,
+                ) {
+                    Ok(()) => std::process::exit(0),
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
+            }
+            // `reopen` raises the session's open count, so — like `new` — it
+            // needs a writer identity to attribute the change to and the
+            // configured `max_open` cap.
+            cli::QueueCmd::Reopen { id, session } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
+                match queue::edit::reopen(&store, session, id, &who_name, writer_source, max_open) {
+                    Ok(()) => std::process::exit(0),
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
             }
         }
     }
@@ -1092,6 +1142,7 @@ fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
         }
         Err(queue::QueueError::Usage(m)) => die_with(2, &m),
         Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+        Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
         Err(queue::QueueError::Empty(m)) => die_with(5, &m),
         Err(queue::QueueError::Full(m)) => die_with(6, &m),
         Err(queue::QueueError::Io(m)) => die_with(1, &m),

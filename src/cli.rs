@@ -54,6 +54,15 @@ pub enum QueueCmd {
     Next {
         session: String,
     },
+    Close {
+        id: String,
+        session: String,
+        message: Option<String>,
+    },
+    Reopen {
+        id: String,
+        session: String,
+    },
 }
 
 /// `writer …` as `main()` consumes it.
@@ -220,6 +229,25 @@ enum QueueAction {
         #[arg(long, value_name = "ID")]
         session: String,
     },
+    /// close a cassette
+    Close {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// close-out note, appended to the body as a blockquote
+        #[arg(short = 'm', long, value_name = "TEXT")]
+        message: Option<String>,
+    },
+    /// reopen a closed cassette
+    Reopen {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -360,6 +388,16 @@ impl Cli {
                     },
                     QueueAction::Show { id, session } => QueueCmd::Show { id, session },
                     QueueAction::Next { session } => QueueCmd::Next { session },
+                    QueueAction::Close {
+                        id,
+                        session,
+                        message,
+                    } => QueueCmd::Close {
+                        id,
+                        session,
+                        message,
+                    },
+                    QueueAction::Reopen { id, session } => QueueCmd::Reopen { id, session },
                 });
             }
             Some(Command::Writer { action }) => {
