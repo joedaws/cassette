@@ -21,7 +21,7 @@ pub struct Args {
     pub resume: Option<Option<String>>,
     /// `queue …`, if that's what was invoked.
     pub queue_cmd: Option<QueueCmd>,
-    /// registered writer to act as (default: $USER, registered on first use)
+    /// registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
     pub writer: Option<String>,
     /// `writer register|list|whoami`, if that's what was invoked.
     pub writer_cmd: Option<WriterCmd>,
@@ -133,7 +133,7 @@ struct Cli {
     #[arg(short = 'o', long = "output", global = true)]
     print_stdout: bool,
 
-    /// registered writer to act as (default: $USER, registered on first use)
+    /// registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
     #[arg(long, value_name = "NAME", global = true)]
     writer: Option<String>,
 }

@@ -281,6 +281,64 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
 }
 
 #[test]
+fn queue_write_without_session_exits_two() {
+    // The headline behaviour Phase 4b introduced — every `queue` command
+    // requires `--session` — is otherwise unpinned by any test. clap itself
+    // must refuse a missing required arg before any store I/O happens.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let out = Command::new(bin())
+        .args(["queue", "write", "01K5GR7T2M9WPD0000000000AB"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--session"),
+        "clap's usage error should name the missing flag: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn cassette_writer_env_names_a_writer_but_must_already_be_registered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let out = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // `queue new` resolves a writer to act as, so an unknown name is a typo,
+    // not a first run — exit 2 rather than a second identity created as
+    // `human`, the privileged kind.
+    let out = Command::new(bin())
+        .args(["queue", "new", "a topic", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("CASSETTE_WRITER", "ghost")
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+
+    // ...and it must not have created one.
+    let listed = Command::new(bin())
+        .args(["writer", "list"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains("ghost"),
+        "a typo must not spawn an identity"
+    );
+}
+
+#[test]
 fn registering_a_known_name_with_a_different_kind_exits_two() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");

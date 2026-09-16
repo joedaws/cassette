@@ -254,8 +254,16 @@ more than one:
 Cassette is growing a second way to hold your writing: a **session store**, where
 each cassette is its own file, so you and one or more agents can write different
 cassettes in the same session without overwriting each other. It is being built
-in phases and is not yet wired into the TUI — today the only command that reaches
-it is `cassette queue write`.
+in phases and is not yet wired into the TUI — today it is reached only through
+the `queue`, `writer`, and `session` subcommands.
+
+**There is no active session.** Cassette never remembers which session you were
+last using: every `queue` command takes an explicit `--session <id>`, and if
+you've lost track of one, `cassette session list` prints every session's id
+(and its alias, if it has one) so you can pass it again. An **alias** (set with
+`session new --alias <name>` or `session alias <id> <name>`) is a display label
+shown next to the id in `session list` — it is never accepted in place of an id
+anywhere, including `--session` itself; sessions are named by id only.
 
 The store lives under `~/.local/share/cassette/`, or wherever
 `$CASSETTE_DATA_DIR` points:
@@ -263,7 +271,6 @@ The store lives under `~/.local/share/cassette/`, or wherever
 ```
 ~/.local/share/cassette/
   writers.toml                     # who may be credited with writing
-  active                           # id of the session in use
   .locks/writers                   # lock anchor for the registry
   sessions/<session id>/
     session.toml
@@ -280,6 +287,42 @@ else holds it you get exit code 3 and a message naming them, and the right move
 is to write a different cassette rather than wait. The lock is held by the
 kernel, so it is released even if a writer is killed outright — there is nothing
 to clean up and no stale-lock state to repair.
+
+### Command surface
+
+```
+session new [--alias <NAME>]                       # create a session, print its id
+session list [--all]                                # sessions newest-first (15 by default)
+session alias <ID> <ALIAS>                          # set/replace a session's display label
+
+writer register --name <NAME> --kind human|agent    # register a writer; kind is fixed at registration
+writer list                                          # list registered writers
+writer whoami                                        # show the writer this invocation acts as
+
+queue new <TOPIC> --session <ID> [--first|--last|--priority <N>]
+queue list --session <ID> [--status open|closed|all] [--since <TIME>]
+queue show <ID> --session <ID>
+queue next --session <ID>                            # id of the next open, unlocked cassette
+queue write <ID> --session <ID>                      # replace a cassette's body, read from stdin
+queue close <ID> --session <ID> [-m <TEXT>]
+queue reopen <ID> --session <ID>
+queue move <ID> --session <ID> (--before|--after) <ID>
+```
+
+Every `queue` command that mutates something also resolves a writer identity
+(`--writer <NAME>`, else `$CASSETTE_WRITER`, else `$USER`). Naming a writer
+explicitly with `--writer` or `$CASSETTE_WRITER` is a claim about identity, so
+an unregistered name is a usage error (exit 2) rather than silently creating a
+second, privileged (`human`) identity; only an unregistered `$USER` bootstraps
+a new writer on first use. `queue list` and `queue show` need no identity at
+all — they attribute nothing.
+
+Exit codes beyond the usual 0/1/2: **3** another writer currently holds the
+cassette's lock (try a different one, or wait); **4** the cassette carries a
+sticky `locked_by` claim and the acting writer is an agent, so only a human may
+close over it; **5** `queue next` found no open cassettes at all; **6** `queue
+new`/`queue reopen` would exceed the session's open-cassette cap (`max_open`,
+config key, default 36).
 
 ### `writers.toml` is managed by cassette, not by you
 
@@ -385,25 +428,31 @@ cassette — a freewriting TUI
 Usage: cassette [OPTIONS] [COMMAND]
 
 Commands:
-  new     start a session in a named note
-  today   open today's note, named by date
-  resume  load a saved note back into the TUI (default: most recently modified)
-  stats   streak, weekly/monthly notes and words, totals
-  find    list recent notes newest-first; TEXT filters by name, topic, or content
-  themes  list available themes (built-in and from config.toml)
-  queue   write a cassette in the session store, holding its lock
+  new      start a session in a named note
+  today    open today's note, named by date
+  resume   load a saved note back into the TUI (default: most recently modified)
+  stats    streak, weekly/monthly notes and words, totals
+  find     list recent notes newest-first; TEXT filters by name, topic, or content
+  themes   list available themes (built-in and from config.toml)
+  queue    work with the shared cassette queue
+  writer   register and inspect writers
+  session  create and inspect sessions
 
 Options:
-  -t <MINUTES>        countdown timer in minutes
-  -w <WORDS>          word goal (winds the tape reel)
-  -l <LINES>          visible text rows per cassette (2-40)
-  -T <TEMPLATE>       start with one cassette per topic from the named [templates] entry
-      --theme <NAME>  color theme for this session (overrides config)
-  -R, --record        record mode: no deletions, the tape only rolls forward
-  -o, --output        print to stdout on quit instead of writing a file
-  -h, --help          Print help
-  -V, --version       Print version
+  -t <MINUTES>         countdown timer in minutes
+  -w <WORDS>           word goal (winds the tape reel)
+  -l <LINES>           visible text rows per cassette (2-40)
+  -T <TEMPLATE>        start with one cassette per topic from the named [templates] entry
+      --theme <NAME>   color theme for this session (overrides config)
+  -R, --record         record mode: no deletions, the tape only rolls forward
+  -o, --output         print to stdout on quit instead of writing a file
+      --writer <NAME>  registered writer to act as (default: $CASSETTE_WRITER, else $USER)
+  -h, --help           Print help
+  -V, --version        Print version
 ```
+
+`queue`, `writer`, and `session` are the session-store commands — see
+"The session store (in progress)" below for the full command surface.
 
 Two defaults aren't spelled out in the help text above: a bare `cassette`
 (no subcommand) defaults to a timestamped file in the notes dir, and

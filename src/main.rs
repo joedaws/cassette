@@ -1089,15 +1089,6 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
     }
 }
 
-/// The writer to act as, and where that name came from: `--writer`, else
-/// `$USER`. There is deliberately no fallback — a shared `"unknown"` identity
-/// would silently attribute every agent's work to the same writer, in a
-/// system whose entire purpose is knowing who wrote what.
-///
-/// The source travels with the name rather than being flattened away: a
-/// command that resolves a writer (`queue write` today; six more in 4b) must
-/// treat an unregistered `--writer` as a usage error while still bootstrapping
-/// an unregistered `$USER` as a new human writer — see `queue::WriterSource`.
 /// `cassette session new|list|alias`. Rendering lives in `session.rs` as pure
 /// functions over `&Store`; this is the one place that turns their results
 /// into exit codes.
@@ -1134,6 +1125,20 @@ fn run_session_cmd(cmd: &cli::SessionCmd) -> ! {
     }
 }
 
+/// The writer to act as, and where that name came from: `--writer`, else
+/// `$CASSETTE_WRITER`, else `$USER`. There is deliberately no further
+/// fallback — a shared `"unknown"` identity would silently attribute every
+/// agent's work to the same writer, in a system whose entire purpose is
+/// knowing who wrote what.
+///
+/// The source travels with the name rather than being flattened away: a
+/// command that resolves a writer to act as (`queue write`, `queue new`, and
+/// the rest of 4b's mutating commands) must treat an unregistered `--writer`
+/// or `$CASSETTE_WRITER` as a usage error — naming a writer explicitly is a
+/// claim about identity, so a typo must fail loudly rather than silently
+/// spawn a second identity as `human`, the privileged kind — while still
+/// bootstrapping an unregistered `$USER` as a new human writer. See
+/// `queue::WriterSource`.
 fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource), String> {
     if let Some(name) = cli {
         let name = name.trim();
@@ -1142,11 +1147,20 @@ fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource
         }
         return Ok((name.to_string(), queue::WriterSource::Flag));
     }
+    if let Ok(env_writer) = std::env::var("CASSETTE_WRITER") {
+        let env_writer = env_writer.trim();
+        if !env_writer.is_empty() {
+            return Ok((env_writer.to_string(), queue::WriterSource::Flag));
+        }
+    }
     match std::env::var("USER") {
         Ok(user) if !user.trim().is_empty() => {
             Ok((user.trim().to_string(), queue::WriterSource::Env))
         }
-        _ => Err("no writer: $USER is empty or unset, so pass --writer <NAME>".to_string()),
+        _ => Err(
+            "no writer: $USER is empty or unset, so pass --writer <NAME> or set $CASSETTE_WRITER"
+                .to_string(),
+        ),
     }
 }
 
