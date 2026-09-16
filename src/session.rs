@@ -46,16 +46,20 @@ pub fn new_session(store: &Store, alias: Option<&str>) -> Result<String, String>
     store.create_session(&meta).map_err(|e| e.to_string())
 }
 
-/// Sort newest first by `created`, ties broken by id descending so the
-/// order is total and deterministic, then render one line per row
-/// (`<id>  <created>  <alias or "">`). With a `limit` that hides rows, the
-/// last line says how many were hidden rather than dropping them silently.
+/// Render one line per row (`<id>  <created>  <alias or "">`), in the order
+/// given. With a `limit` that hides rows, the last line says how many were
+/// hidden rather than dropping them silently.
+///
+/// Deliberately does **not** sort: `Store::list_sessions` already returns
+/// rows newest-first by `created`, ties broken by id descending, and sorting
+/// belongs with the fetch. This function had an identical second sort, which
+/// only meant two places to keep a comparator in step. Ordering is pinned by
+/// `store::tests::list_sessions_is_newest_first`; the tests here feed
+/// pre-sorted rows, as the only caller does.
 pub fn render_list(rows: &[(String, SessionMeta)], limit: Option<usize>) -> String {
     if rows.is_empty() {
         return "no sessions".to_string();
     }
-    let mut rows: Vec<&(String, SessionMeta)> = rows.iter().collect();
-    rows.sort_by(|(id_a, a), (id_b, b)| b.created.cmp(&a.created).then_with(|| id_b.cmp(id_a)));
     let total = rows.len();
     let shown = limit.map(|l| l.min(total)).unwrap_or(total);
     let mut lines: Vec<String> = rows[..shown]
@@ -103,19 +107,43 @@ mod tests {
     }
 
     #[test]
-    fn list_is_newest_first_and_shows_the_alias() {
+    fn list_keeps_the_stores_order_and_shows_the_alias() {
+        // Fed in the order `Store::list_sessions` returns — newest first —
+        // because that is the order the only caller passes. `render_list`
+        // does not re-sort; it must not reorder what it is given either.
         let rows = vec![
-            ("01AAA".to_string(), meta("2026-09-14T09:00:00Z", None)),
             (
                 "01BBB".to_string(),
                 meta("2026-09-15T09:00:00Z", Some("today")),
             ),
+            ("01AAA".to_string(), meta("2026-09-14T09:00:00Z", None)),
         ];
         let out = render_list(&rows, None);
         let bbb = out.find("01BBB").expect("bbb");
         let aaa = out.find("01AAA").expect("aaa");
-        assert!(bbb < aaa, "newest first: {out}");
+        assert!(bbb < aaa, "rows render in the order given: {out}");
         assert!(out.contains("today"), "alias must show: {out}");
+    }
+
+    #[test]
+    fn list_end_to_end_is_newest_first() {
+        // The ordering itself is the store's job, so pin it through the real
+        // path `session list` takes rather than through `render_list` alone.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        // Explicit timestamps: two sessions minted back to back can share a
+        // `created` second, and the id tiebreak is not creation order.
+        let old_id = store
+            .create_session(&meta("2026-09-14T09:00:00Z", Some("older")))
+            .expect("create");
+        let new_id = store
+            .create_session(&meta("2026-09-15T09:00:00Z", Some("newer")))
+            .expect("create");
+
+        let out = list(&store, true).expect("list");
+        let newer = out.find(&new_id).expect("newer");
+        let older = out.find(&old_id).expect("older");
+        assert!(newer < older, "newest first: {out}");
     }
 
     #[test]
