@@ -25,6 +25,8 @@ pub struct Args {
     pub writer: Option<String>,
     /// `writer register|list|whoami`, if that's what was invoked.
     pub writer_cmd: Option<WriterCmd>,
+    /// `session new|list|alias`, if that's what was invoked.
+    pub session_cmd: Option<SessionCmd>,
 }
 
 /// `queue …` as `main()` consumes it. Every variant carries `session`:
@@ -43,6 +45,14 @@ pub enum WriterCmd {
     },
     List,
     Whoami,
+}
+
+/// `session …` as `main()` consumes it.
+#[derive(Debug, PartialEq)]
+pub enum SessionCmd {
+    New { alias: Option<String> },
+    List { all: bool },
+    Alias { id: String, alias: String },
 }
 
 #[derive(Parser, Debug)]
@@ -129,6 +139,11 @@ enum Command {
         #[command(subcommand)]
         action: WriterAction,
     },
+    /// create and inspect sessions
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -157,6 +172,29 @@ enum WriterAction {
     List,
     /// show the writer this invocation acts as
     Whoami,
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionAction {
+    /// create a session and print its id
+    New {
+        /// display label shown in `session list`; it never resolves
+        #[arg(long, value_name = "NAME")]
+        alias: Option<String>,
+    },
+    /// list sessions, newest first
+    List {
+        /// show every session instead of the 15 most recent
+        #[arg(long)]
+        all: bool,
+    },
+    /// set a session's display label
+    Alias {
+        #[arg(value_name = "ID")]
+        id: String,
+        #[arg(value_name = "ALIAS")]
+        alias: String,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -209,6 +247,13 @@ impl Cli {
                     },
                     WriterAction::List => WriterCmd::List,
                     WriterAction::Whoami => WriterCmd::Whoami,
+                });
+            }
+            Some(Command::Session { action }) => {
+                args.session_cmd = Some(match action {
+                    SessionAction::New { alias } => SessionCmd::New { alias },
+                    SessionAction::List { all } => SessionCmd::List { all },
+                    SessionAction::Alias { id, alias } => SessionCmd::Alias { id, alias },
                 });
             }
         }

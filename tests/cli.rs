@@ -303,3 +303,45 @@ fn registering_a_known_name_with_a_different_kind_exits_two() {
         stderr(&second)
     );
 }
+
+#[test]
+fn session_new_then_list_then_alias() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(new.status.code(), Some(0), "{}", stderr(&new));
+    let id = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    assert_eq!(id.len(), 26, "a ULID is printed bare for scripting: {id:?}");
+
+    let aliased = Command::new(bin())
+        .args(["session", "alias", &id, "monday"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(aliased.status.code(), Some(0), "{}", stderr(&aliased));
+
+    let list = Command::new(bin())
+        .args(["session", "list"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let text = String::from_utf8_lossy(&list.stdout).to_string();
+    assert!(text.contains(&id), "{text}");
+    assert!(text.contains("monday"), "{text}");
+}
+
+#[test]
+fn session_alias_on_an_unknown_id_exits_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["session", "alias", "01K5GQ2R8V3XQZ0000000000AB", "x"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}

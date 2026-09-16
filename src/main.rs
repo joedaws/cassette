@@ -20,6 +20,7 @@ mod config;
 mod find;
 mod output;
 mod queue;
+mod session;
 mod stats;
 mod store;
 mod theme;
@@ -175,6 +176,10 @@ fn main() -> io::Result<()> {
 
     if let Some(cmd) = &args.writer_cmd {
         run_writer_cmd(cmd, args.writer.as_deref());
+    }
+
+    if let Some(cmd) = &args.session_cmd {
+        run_session_cmd(cmd);
     }
 
     // Resolve the theme and topic template before touching the terminal so
@@ -957,6 +962,42 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
 /// command that resolves a writer (`queue write` today; six more in 4b) must
 /// treat an unregistered `--writer` as a usage error while still bootstrapping
 /// an unregistered `$USER` as a new human writer — see `queue::WriterSource`.
+/// `cassette session new|list|alias`. Rendering lives in `session.rs` as pure
+/// functions over `&Store`; this is the one place that turns their results
+/// into exit codes.
+///
+/// `new` and `list` fail only on I/O (exit 1) — `session.rs`'s `Result<_,
+/// String>` already collapses that to one case. `alias` can also fail on an
+/// unknown session id, which is a usage error (exit 2): `session::set_alias`
+/// returns `SessionError` so this match can tell the two apart.
+fn run_session_cmd(cmd: &cli::SessionCmd) -> ! {
+    let store = store::Store::new(store_root());
+    match cmd {
+        cli::SessionCmd::New { alias } => match session::new_session(&store, alias.as_deref()) {
+            Ok(id) => {
+                println!("{id}");
+                std::process::exit(0)
+            }
+            Err(e) => die_with(1, &e),
+        },
+        cli::SessionCmd::List { all } => match session::list(&store, *all) {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0)
+            }
+            Err(e) => die_with(1, &e),
+        },
+        cli::SessionCmd::Alias { id, alias } => match session::set_alias(&store, id, alias) {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0)
+            }
+            Err(e @ session::SessionError::Usage(_)) => die_with(2, &e.to_string()),
+            Err(e @ session::SessionError::Io(_)) => die_with(1, &e.to_string()),
+        },
+    }
+}
+
 fn resolve_writer_name(cli: Option<&str>) -> Result<(String, queue::WriterSource), String> {
     if let Some(name) = cli {
         let name = name.trim();

@@ -435,6 +435,46 @@ impl Store {
         });
         Ok(found)
     }
+
+    /// Every session, newest first by `created` (ties broken by id,
+    /// descending, so the order is total and deterministic). A session
+    /// directory whose `session.toml` is missing or unparseable is skipped:
+    /// `session list` is a listing, not a repair tool, and one damaged
+    /// session must not hide the rest.
+    pub fn list_sessions(&self) -> io::Result<Vec<(String, session::SessionMeta)>> {
+        let dir = self.sessions_dir();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut found = Vec::new();
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(meta) = session::read(&path.join("session.toml")) else {
+                continue;
+            };
+            found.push((id.to_string(), meta));
+        }
+        found
+            .sort_by(|(id_a, a), (id_b, b)| b.created.cmp(&a.created).then_with(|| id_b.cmp(id_a)));
+        Ok(found)
+    }
+
+    /// Set a session's display alias. The alias never resolves — it is shown
+    /// in `session list` and nowhere else — so no uniqueness check applies.
+    pub fn set_session_alias(&self, session: &str, alias: &str) -> io::Result<()> {
+        let path = self.session_dir(session).join("session.toml");
+        let mut meta = session::read(&path)?;
+        meta.alias = Some(alias.to_string());
+        session::write(&path, &meta)
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +559,59 @@ mod tests {
         let id = s.create_session(&m).expect("create");
         let read_back = s.session_meta(&id).expect("read");
         assert_eq!(read_back.alias.as_deref(), Some("morning"));
+    }
+
+    #[test]
+    fn list_sessions_is_newest_first() {
+        let (_dir, s) = store();
+        let older = s
+            .create_session(&SessionMeta {
+                created: "2026-09-14T09:00:00Z".to_string(),
+                ..session_meta()
+            })
+            .expect("create");
+        let newer = s
+            .create_session(&SessionMeta {
+                created: "2026-09-15T09:00:00Z".to_string(),
+                ..session_meta()
+            })
+            .expect("create");
+        let rows = s.list_sessions().expect("list");
+        let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec![newer.as_str(), older.as_str()]);
+    }
+
+    #[test]
+    fn listing_sessions_with_none_yet_is_empty_not_an_error() {
+        let (_dir, s) = store();
+        assert!(s.list_sessions().expect("list").is_empty());
+    }
+
+    #[test]
+    fn a_session_with_unparseable_metadata_is_skipped_not_fatal() {
+        let (_dir, s) = store();
+        let good = s.create_session(&session_meta()).expect("create");
+        std::fs::create_dir_all(s.session_dir("broken")).expect("mkdir");
+        std::fs::write(s.session_dir("broken").join("session.toml"), "not toml").expect("write");
+        let rows = s.list_sessions().expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, good);
+    }
+
+    #[test]
+    fn set_session_alias_updates_it_in_place() {
+        let (_dir, s) = store();
+        let id = s.create_session(&session_meta()).expect("create");
+        s.set_session_alias(&id, "monday").expect("set alias");
+        let read_back = s.session_meta(&id).expect("read");
+        assert_eq!(read_back.alias.as_deref(), Some("monday"));
+    }
+
+    #[test]
+    fn set_session_alias_on_an_unknown_id_is_not_found() {
+        let (_dir, s) = store();
+        let err = s.set_session_alias("nope", "x").expect_err("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
