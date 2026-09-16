@@ -583,3 +583,123 @@ fn queue_next_exits_three_when_every_open_cassette_is_locked() {
 
     fs4::FileExt::unlock(&anchor).expect("release");
 }
+
+#[test]
+fn queue_new_rejects_a_non_positive_priority() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args([
+            "queue",
+            "new",
+            "a topic",
+            "--session",
+            &sid,
+            "--priority",
+            "0",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_new_then_next_returns_the_new_cassette() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let made = Command::new(bin())
+        .args(["queue", "new", "gratitude", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(made.status.code(), Some(0), "{}", stderr(&made));
+    let cid = String::from_utf8_lossy(&made.stdout).trim().to_string();
+
+    let next = Command::new(bin())
+        .args(["queue", "next", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(next.status.code(), Some(0), "{}", stderr(&next));
+    assert_eq!(String::from_utf8_lossy(&next.stdout).trim(), cid);
+}
+
+#[test]
+fn queue_new_first_and_last_are_mutually_exclusive() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args([
+            "queue",
+            "new",
+            "a topic",
+            "--session",
+            &sid,
+            "--first",
+            "--last",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_new_exits_six_once_the_open_cap_is_reached() {
+    // The cap arithmetic itself (open-only counting, boundary value) is unit
+    // tested in `src/queue/edit.rs::tests::the_cap_counts_open_cassettes_only`;
+    // this is the end-to-end pin that the CLI actually enforces
+    // `store::MAX_OPEN` (36) and maps a full queue to exit code 6.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    for _ in 0..36 {
+        let out = Command::new(bin())
+            .args(["queue", "new", "filler", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    }
+
+    let out = Command::new(bin())
+        .args(["queue", "new", "one too many", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
+}

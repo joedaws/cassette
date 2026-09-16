@@ -158,8 +158,41 @@ fn main() -> io::Result<()> {
     if let Some(cmd) = &args.queue_cmd {
         let store = store::Store::new(store_root());
         match cmd {
-            // The only queue command that writes, so it's the only one that
-            // needs a writer identity to attribute the write to.
+            // The only command that creates a cassette, so — like `write` —
+            // it needs a writer identity to attribute the creation to.
+            cli::QueueCmd::New {
+                topic,
+                session,
+                placement,
+            } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => die_with(2, &msg),
+                };
+                let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
+                match queue::edit::new(
+                    &store,
+                    session,
+                    topic,
+                    *placement,
+                    &who_name,
+                    writer_source,
+                    max_open,
+                ) {
+                    Ok(id) => {
+                        println!("{id}");
+                        std::process::exit(0)
+                    }
+                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
+                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
+                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
+                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                }
+            }
+            // The only queue command that writes an existing cassette, so
+            // it's the only one that needs a writer identity to attribute the
+            // write to.
             cli::QueueCmd::Write { id, session } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
@@ -170,6 +203,7 @@ fn main() -> io::Result<()> {
                     Err(queue::QueueError::Usage(m)) => die_with(2, &m),
                     Err(queue::QueueError::Busy(m)) => die_with(3, &m),
                     Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
                     Err(queue::QueueError::Io(m)) => die_with(1, &m),
                 }
             }
@@ -1059,6 +1093,7 @@ fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
         Err(queue::QueueError::Usage(m)) => die_with(2, &m),
         Err(queue::QueueError::Busy(m)) => die_with(3, &m),
         Err(queue::QueueError::Empty(m)) => die_with(5, &m),
+        Err(queue::QueueError::Full(m)) => die_with(6, &m),
         Err(queue::QueueError::Io(m)) => die_with(1, &m),
     }
 }

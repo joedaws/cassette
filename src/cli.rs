@@ -33,6 +33,11 @@ pub struct Args {
 /// there is no active session to fall back to.
 #[derive(Debug, PartialEq)]
 pub enum QueueCmd {
+    New {
+        topic: String,
+        session: String,
+        placement: crate::queue::Placement,
+    },
     Write {
         id: String,
         session: String,
@@ -163,6 +168,24 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum QueueAction {
+    /// create a cassette and print its id
+    New {
+        #[arg(value_name = "TOPIC")]
+        topic: String,
+        /// session to add the cassette to
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// place at the head of the queue
+        #[arg(long, conflicts_with_all = ["last", "priority"])]
+        first: bool,
+        /// place at the tail of the queue (default)
+        #[arg(long, conflicts_with_all = ["first", "priority"])]
+        last: bool,
+        /// place at an exact, positive sparse priority
+        #[arg(long, value_name = "N", conflicts_with_all = ["first", "last"],
+              value_parser = clap::value_parser!(i64).range(1..))]
+        priority: Option<i64>,
+    },
     /// replace a cassette's body, read from stdin
     Write {
         #[arg(value_name = "ID")]
@@ -299,6 +322,32 @@ impl Cli {
             Some(Command::Themes) => args.list_themes = true,
             Some(Command::Queue { action }) => {
                 args.queue_cmd = Some(match action {
+                    QueueAction::New {
+                        topic,
+                        session,
+                        first,
+                        last: _,
+                        priority,
+                    } => {
+                        // `--priority`'s clap `range(1..)` already rejects a
+                        // non-positive value before this ever runs; `first`
+                        // wins any (impossible, thanks to `conflicts_with_all`)
+                        // ambiguity, and no flag at all means the default:
+                        // tail placement, so an agent adding work cannot jump
+                        // the human's line.
+                        let placement = if first {
+                            crate::queue::Placement::First
+                        } else if let Some(p) = priority {
+                            crate::queue::Placement::Explicit(p)
+                        } else {
+                            crate::queue::Placement::Last
+                        };
+                        QueueCmd::New {
+                            topic,
+                            session,
+                            placement,
+                        }
+                    }
                     QueueAction::Write { id, session } => QueueCmd::Write { id, session },
                     QueueAction::List {
                         session,

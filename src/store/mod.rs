@@ -55,6 +55,15 @@ pub const CASSETTES_DIR: &str = "cassettes";
 /// Per-session directory of flock anchors — see `lock`.
 pub const LOCKS_DIR: &str = ".locks";
 
+/// The most open cassettes one session may hold, overridable by the
+/// `max_open` config key.
+///
+/// Defined here and NOT taken from `app::MAX_CASSETTES`, which happens to be
+/// the same number: that one is a TUI display concern (how many cassettes the
+/// stack can show and select), and binding the store's cap to it would assert
+/// a relationship the code does not have.
+pub const MAX_OPEN: usize = 36;
+
 /// Write via a temp file in the same directory, then `rename()` over the
 /// target. Spec invariant 4: a reader either sees the old file whole or the
 /// new one whole, never a half-written mix. Same directory matters — `rename`

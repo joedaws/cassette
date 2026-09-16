@@ -1,22 +1,26 @@
 //! The `cassette queue` commands.
 //!
 //! Split on the lock boundary: `view` holds the read-only commands (`list`,
-//! `show`, `next`) and never touches `LockGuard::write`, while `write` holds
-//! the one command that does. `LockGuard::write` (see `store::lock`) is the
-//! only code in the crate that writes a cassette file, and that invariant is
-//! meant to be checkable by reading `view.rs` alone — no locks *held*, no
-//! writes, full stop. `next` probes locks (`Store::is_free`) to skip busy
-//! cassettes, but a probe acquires and releases within one call and never
-//! constructs a `LockGuard`, so it never holds anything past a return.
+//! `show`, `next`) and never touches `LockGuard::write`, while `write` and
+//! `edit` hold the commands that do — `write` replaces a cassette's body,
+//! `edit` creates cassettes and renumbers a session's priorities.
+//! `LockGuard::write` (see `store::lock`) is the only code in the crate that
+//! writes a cassette file, and that invariant is meant to be checkable by
+//! reading `view.rs` alone — no locks *held*, no writes, full stop. `next`
+//! probes locks (`Store::is_free`) to skip busy cassettes, but a probe
+//! acquires and releases within one call and never constructs a `LockGuard`,
+//! so it never holds anything past a return.
 //!
 //! `pub use write::write` keeps `main.rs`'s existing `queue::write(...)` call
 //! site unchanged even though `write` now names both a module and a function;
 //! those live in separate namespaces, so this is ordinary Rust, not a
 //! collision to design around.
 
+pub mod edit;
 pub mod view;
 pub mod write;
 
+pub use edit::Placement;
 pub use write::write;
 
 use crate::store::writers;
@@ -60,6 +64,12 @@ pub enum QueueError {
     /// nothing to wait for — the caller should sit idle or enqueue work".
     /// Exit 5, distinct from `Busy`'s exit 3 for exactly that reason.
     Empty(String),
+    /// `queue new` found the session already holding `max_open` open
+    /// cassettes. Exit 6, distinct from every other variant: it is neither a
+    /// bad invocation, a lock fight, nor an empty queue — the queue is
+    /// (over)full. Checked before any priority is computed, so a full queue
+    /// is never charged a renumber.
+    Full(String),
     /// Anything else. Exit 1.
     Io(String),
 }
