@@ -79,30 +79,35 @@ pub fn split_sides(body: &str) -> (String, String) {
     const HEADING_A: &str = "## Side A";
     const HEADING_B: &str = "## Side B";
 
-    let Some(a_start) = body.lines().position(|l| l.trim_end() == HEADING_A) else {
+    let lines: Vec<&str> = body.lines().collect();
+
+    let Some(a_start) = lines.iter().position(|l| l.trim_end() == HEADING_A) else {
         return (body.to_string(), String::new());
     };
 
+    // Any preamble before the heading is kept, not dropped — it is not part
+    // of `build_body`'s output today, but this function must never be the
+    // reason text goes missing from an agent's view of a cassette.
+    let preamble = &lines[..a_start];
     // Skip the heading line itself, then find where Side B (if any) begins
     // within what follows.
-    let after_a: String = body
-        .lines()
-        .skip(a_start + 1)
+    let after_a = &lines[a_start + 1..];
+
+    let (side_a_lines, side_b_lines): (&[&str], &[&str]) =
+        match after_a.iter().position(|l| l.trim_end() == HEADING_B) {
+            Some(b_start) => (&after_a[..b_start], &after_a[b_start + 1..]),
+            None => (after_a, &[]),
+        };
+
+    let side_a = preamble
+        .iter()
+        .chain(side_a_lines.iter())
+        .copied()
         .collect::<Vec<_>>()
         .join("\n");
+    let side_b = side_b_lines.join("\n");
 
-    match after_a.lines().position(|l| l.trim_end() == HEADING_B) {
-        Some(b_start) => {
-            let side_a = after_a.lines().take(b_start).collect::<Vec<_>>().join("\n");
-            let side_b = after_a
-                .lines()
-                .skip(b_start + 1)
-                .collect::<Vec<_>>()
-                .join("\n");
-            (side_a, side_b)
-        }
-        None => (after_a, String::new()),
-    }
+    (side_a, side_b)
 }
 
 /// Word count over both sides — `split_whitespace().count()` summed —
@@ -144,6 +149,18 @@ mod tests {
         // that must not silently lose the text.
         let (a, b) = split_sides("just prose an agent wrote\n");
         assert_eq!(a.trim(), "just prose an agent wrote");
+        assert_eq!(b, "");
+    }
+
+    #[test]
+    fn text_before_the_first_heading_survives_in_side_a() {
+        // Not a shape `build_body` ever writes, but this function must never
+        // be the reason text disappears from an agent's view of a cassette:
+        // silent truncation here is indistinguishable from the human never
+        // having written the words.
+        let (a, b) = split_sides("stray preamble\n## Side A\n\nwords\n");
+        assert!(a.contains("stray preamble"), "{a}");
+        assert!(a.contains("words"), "{a}");
         assert_eq!(b, "");
     }
 
