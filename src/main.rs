@@ -351,11 +351,11 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(cmd) = &args.writer_cmd {
-        run_writer_cmd(cmd, args.writer.as_deref());
+        run_writer_cmd(cmd, args.writer.as_deref(), args.json);
     }
 
     if let Some(cmd) = &args.session_cmd {
-        run_session_cmd(cmd);
+        run_session_cmd(cmd, args.json);
     }
 
     // Resolve the theme and topic template before touching the terminal so
@@ -1091,7 +1091,12 @@ fn die(msg: &str) -> ! {
 /// `KindMismatch` or `EmptyName` from `register` is a usage error (exit 2) —
 /// the caller asked for something the registry cannot honor, not a system
 /// failure.
-fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
+///
+/// `json` routes every failure through `exit_with` instead of `die_with`, so
+/// `--json` on `writer` gets the same `{"error","code"}` envelope `queue`
+/// commands do (spec decision 2 names `session`/`writer` explicitly) — exit
+/// codes are unchanged, only the channel and format for a failure.
+fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>, json: bool) -> ! {
     let store = store::Store::new(store_root());
     match cmd {
         cli::WriterCmd::Register { name, kind } => match writer::register(&store, name, *kind) {
@@ -1100,30 +1105,30 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
                 std::process::exit(0)
             }
             Err(e @ store::writers::EnsureError::KindMismatch { .. }) => {
-                die_with(2, &e.to_string())
+                exit_with(2, &e.to_string(), json)
             }
-            Err(e @ store::writers::EnsureError::EmptyName) => die_with(2, &e.to_string()),
-            Err(e @ store::writers::EnsureError::Io(_)) => die_with(1, &e.to_string()),
+            Err(e @ store::writers::EnsureError::EmptyName) => exit_with(2, &e.to_string(), json),
+            Err(e @ store::writers::EnsureError::Io(_)) => exit_with(1, &e.to_string(), json),
         },
         cli::WriterCmd::List => match writer::list(&store) {
             Ok(msg) => {
                 println!("{msg}");
                 std::process::exit(0)
             }
-            Err(e) => die_with(1, &e),
+            Err(e) => exit_with(1, &e, json),
         },
         cli::WriterCmd::Whoami => {
             // `whoami` only ever looks a name up (`writer::render_whoami`
             // never resolves or creates), so where the name came from makes
             // no difference here — `.0` drops the `WriterSource`.
             let (who_name, _source) =
-                resolve_writer_name(writer_flag).unwrap_or_else(|e| die_with(2, &e));
+                resolve_writer_name(writer_flag).unwrap_or_else(|e| exit_with(2, &e, json));
             match writer::whoami(&store, &who_name) {
                 Ok(msg) => {
                     println!("{msg}");
                     std::process::exit(0)
                 }
-                Err(e) => die_with(1, &e),
+                Err(e) => exit_with(1, &e, json),
             }
         }
     }
@@ -1137,7 +1142,12 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
 /// String>` already collapses that to one case. `alias` can also fail on an
 /// unknown session id, which is a usage error (exit 2): `session::set_alias`
 /// returns `SessionError` so this match can tell the two apart.
-fn run_session_cmd(cmd: &cli::SessionCmd) -> ! {
+///
+/// `json` routes every failure through `exit_with` instead of `die_with`, so
+/// `--json` on `session` gets the same `{"error","code"}` envelope `queue`
+/// commands do (spec decision 2 names `session`/`writer` explicitly) — exit
+/// codes are unchanged, only the channel and format for a failure.
+fn run_session_cmd(cmd: &cli::SessionCmd, json: bool) -> ! {
     let store = store::Store::new(store_root());
     match cmd {
         cli::SessionCmd::New { alias } => match session::new_session(&store, alias.as_deref()) {
@@ -1145,22 +1155,22 @@ fn run_session_cmd(cmd: &cli::SessionCmd) -> ! {
                 println!("{id}");
                 std::process::exit(0)
             }
-            Err(e) => die_with(1, &e),
+            Err(e) => exit_with(1, &e, json),
         },
         cli::SessionCmd::List { all } => match session::list(&store, *all) {
             Ok(msg) => {
                 println!("{msg}");
                 std::process::exit(0)
             }
-            Err(e) => die_with(1, &e),
+            Err(e) => exit_with(1, &e, json),
         },
         cli::SessionCmd::Alias { id, alias } => match session::set_alias(&store, id, alias) {
             Ok(msg) => {
                 println!("{msg}");
                 std::process::exit(0)
             }
-            Err(e @ session::SessionError::Usage(_)) => die_with(2, &e.to_string()),
-            Err(e @ session::SessionError::Io(_)) => die_with(1, &e.to_string()),
+            Err(e @ session::SessionError::Usage(_)) => exit_with(2, &e.to_string(), json),
+            Err(e @ session::SessionError::Io(_)) => exit_with(1, &e.to_string(), json),
         },
     }
 }

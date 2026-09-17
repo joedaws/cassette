@@ -205,4 +205,36 @@ mod tests {
             other => panic!("expected Usage, got {other:?}"),
         }
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_alias_on_an_unreadable_session_toml_is_an_io_error() {
+        // Mirrors store::tests::an_unreadable_session_toml_is_an_io_error_not_a_missing_session:
+        // `set_alias` routes through `Store::require_session` too, so its
+        // `RequireSessionError::Io` arm must reach `SessionError::Io` rather
+        // than being flattened into `Usage` (the "typo" case).
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let id = new_session(&store, None).expect("new");
+        let toml = dir.path().join("sessions").join(&id).join("session.toml");
+
+        let mut perms = std::fs::metadata(&toml).expect("metadata").permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&toml, perms).expect("chmod");
+
+        // Root ignores the mode bits; probe the real effect rather than
+        // guessing from $USER, same reasoning as the store-level test.
+        if std::fs::read_to_string(&toml).is_ok() {
+            return;
+        }
+
+        match set_alias(&store, &id, "monday") {
+            Err(SessionError::Io(m)) => assert!(
+                !m.contains("no session"),
+                "an unreadable store is I/O, not a typo: {m}"
+            ),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
 }

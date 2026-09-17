@@ -1676,3 +1676,108 @@ fn json_covers_a_missing_writer_identity_before_any_queue_error_exists() {
         "the message must name the fix: {v}"
     );
 }
+
+#[test]
+fn session_alias_on_an_unknown_id_emits_the_json_envelope() {
+    // Spec decision 2 names `session`/`writer` explicitly alongside the
+    // queue commands: --json must change every command's failure output,
+    // not only QueueError's. This pins `session alias` specifically since
+    // it is the one session command with its own usage-error case.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args([
+            "session",
+            "alias",
+            "01K5GQ2R8V3XQZ0000000000AB",
+            "x",
+            "--json",
+        ])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).is_empty(),
+        "no prose on stderr under --json: {}",
+        stderr(&out)
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("01K5GQ2R8V3XQZ0000000000AB"),
+        "{v}"
+    );
+}
+
+#[test]
+fn session_alias_on_an_unknown_id_without_json_still_prints_prose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["session", "alias", "01K5GQ2R8V3XQZ0000000000AB", "x"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty(), "no JSON without --json");
+    assert!(stderr(&out).contains("cassette:"), "{}", stderr(&out));
+}
+
+#[test]
+fn writer_register_kind_mismatch_emits_the_json_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let first = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+
+    let out = Command::new(bin())
+        .args([
+            "writer", "register", "--name", "bot", "--kind", "human", "--json",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).is_empty(),
+        "no prose on stderr under --json: {}",
+        stderr(&out)
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"].as_str().expect("error string").contains("bot"),
+        "{v}"
+    );
+}
+
+#[test]
+fn writer_register_kind_mismatch_without_json_still_prints_prose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let first = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+
+    let out = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "human"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "no JSON without --json");
+    assert!(stderr(&out).contains("cassette:"), "{}", stderr(&out));
+}
