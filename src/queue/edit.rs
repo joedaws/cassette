@@ -216,10 +216,9 @@ fn renumber_lock_error(session: &str, e: LockError) -> QueueError {
 /// work without necessarily holding it locked at this instant. An agent may
 /// not close over that claim; a human may.
 ///
-/// Nothing in this phase (4b) ever sets `locked_by` — `queue lock`/`unlock`
-/// are 4c — so the `Err` arm is unreachable until then. It is implemented
-/// now on purpose: the rule is in place before the command that makes it
-/// reachable, rather than the two arriving together.
+/// Phase 4b introduced this check while nothing yet set `locked_by` — `queue
+/// lock`/`unlock` (below) are 4c, and now do. The rule landed before the
+/// command that makes it reachable, rather than the two arriving together.
 fn close_permitted(kind: Kind, locked_by: Option<&str>) -> Result<(), QueueError> {
     match (kind, locked_by) {
         (Kind::Agent, Some(holder)) => Err(QueueError::Sticky(format!(
@@ -358,6 +357,130 @@ pub fn reopen(
     m.last_writer = writer;
     m.updated_at = crate::store::meta::now_utc();
 
+    guard
+        .write(&m, &current.body)
+        .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
+}
+
+/// `cassette queue lock <ID> --session <ID>`: set the sticky lock to the
+/// acting writer — the human-only mechanism for saying "hands off this one"
+/// to every agent. `close_permitted` (and, from Task 5 on, `queue write`'s
+/// own permission check) is what later respects `locked_by`; this is what
+/// sets it.
+///
+/// Order of operations, each deliberate:
+/// 1. Resolve the writer, keeping its `Kind` — this command needs it before
+///    anything else happens.
+/// 2. Reject a non-human `Usage` (exit 2) **before acquiring anything**. An
+///    agent invoking `lock` has met no durable claim to escalate over — it
+///    misused the CLI, which is what exit 2 is for — so refusing first means
+///    it never takes the lock only to be told to give it back.
+/// 3. Acquire the cassette's lock. `Busy` (exit 3), unconditional on `Kind`:
+///    a cassette someone is actively writing cannot be locked by anyone.
+/// 4. Read through the guard and apply the table: unlocked sets `locked_by`
+///    to the acting writer's id; already held by this same writer is a
+///    **no-op that performs no write** (4b's close-on-closed appends a
+///    second blockquote on a re-close, and that is the pattern not to
+///    repeat); held by another writer is `Sticky` (exit 4) — a human may not
+///    steal another writer's lock, only clear it (see `unlock`).
+pub fn lock(
+    store: &Store,
+    session: &str,
+    id: &str,
+    who_name: &str,
+    source: WriterSource,
+) -> Result<(), QueueError> {
+    let (writer, kind) = match source {
+        WriterSource::Env => store
+            .resolve_writer(who_name)
+            .map_err(resolve_error_to_queue_error)?,
+        WriterSource::Flag => store
+            .require_writer(who_name)
+            .map_err(require_error_to_queue_error)?,
+    };
+    if kind != Kind::Human {
+        return Err(QueueError::Usage(
+            "queue lock is human-only — an agent may not set a sticky lock".to_string(),
+        ));
+    }
+    let who = Attribution::for_now(&writer, who_name);
+
+    let guard = store
+        .lock(session, id, &who)
+        .map_err(|e| lock_error_to_queue_error(id, e))?;
+
+    let current = guard
+        .read()
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+
+    let holder = current.meta.locked_by.clone();
+    match holder {
+        // Already held by this same writer: a no-op, no write.
+        Some(h) if h == writer => Ok(()),
+        Some(h) => Err(QueueError::Sticky(format!(
+            "'{id}' is already locked by '{h}' — only a human may clear another writer's lock"
+        ))),
+        None => {
+            let mut m = current.meta;
+            m.locked_by = Some(writer.clone());
+            m.last_writer = writer;
+            m.updated_at = crate::store::meta::now_utc();
+            guard
+                .write(&m, &current.body)
+                .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
+        }
+    }
+}
+
+/// `cassette queue unlock <ID> --session <ID>`: clear the sticky lock,
+/// whoever holds it. Humans hold the escape hatch — any human may clear any
+/// writer's lock, not only their own — which is what lets a human take back
+/// a cassette an agent (or another human) claimed and then went quiet on.
+///
+/// Order of operations mirrors `lock`: resolve the writer, reject a
+/// non-human `Usage` (exit 2) before acquiring anything, acquire (`Busy`,
+/// exit 3), then read through the guard. An already-unlocked cassette is a
+/// **no-op that performs no write**, matching `lock`'s own no-op and, again,
+/// the pattern 4b's close-on-closed should not have set.
+pub fn unlock(
+    store: &Store,
+    session: &str,
+    id: &str,
+    who_name: &str,
+    source: WriterSource,
+) -> Result<(), QueueError> {
+    let (writer, kind) = match source {
+        WriterSource::Env => store
+            .resolve_writer(who_name)
+            .map_err(resolve_error_to_queue_error)?,
+        WriterSource::Flag => store
+            .require_writer(who_name)
+            .map_err(require_error_to_queue_error)?,
+    };
+    if kind != Kind::Human {
+        return Err(QueueError::Usage(
+            "queue unlock is human-only — an agent may not clear a sticky lock".to_string(),
+        ));
+    }
+    let who = Attribution::for_now(&writer, who_name);
+
+    let guard = store
+        .lock(session, id, &who)
+        .map_err(|e| lock_error_to_queue_error(id, e))?;
+
+    let current = guard
+        .read()
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+
+    if current.meta.locked_by.is_none() {
+        // Already unlocked: a no-op, no write.
+        return Ok(());
+    }
+
+    let mut m = current.meta;
+    m.locked_by = None;
+    m.last_writer = writer;
+    m.updated_at = crate::store::meta::now_utc();
     guard
         .write(&m, &current.body)
         .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
@@ -1384,6 +1507,171 @@ mod tests {
             Err(QueueError::Usage(m)) => assert!(m.contains("not open"), "{m}"),
             other => panic!("expected Usage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_agent_may_not_set_or_clear_a_sticky_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "",
+            )
+            .expect("add");
+        store
+            .ensure_writer("bot", Kind::Agent)
+            .expect("register agent");
+
+        // Exit 2, NOT 4: the agent has met no claim — the cassette is unlocked —
+        // it has called a command its kind may not call.
+        match lock(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "bot",
+            WriterSource::Flag,
+        ) {
+            Err(QueueError::Usage(_)) => {}
+            other => panic!("expected Usage, got {other:?}"),
+        }
+        match unlock(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "bot",
+            WriterSource::Flag,
+        ) {
+            Err(QueueError::Usage(_)) => {}
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn locking_twice_is_a_no_op_that_does_not_rewrite_the_cassette() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "body\n",
+            )
+            .expect("add");
+        store
+            .ensure_writer("joseph", Kind::Human)
+            .expect("register human");
+
+        lock(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "joseph",
+            WriterSource::Flag,
+        )
+        .expect("first lock");
+        let after_first = store.scan_session(&sid).expect("scan").cassettes[0]
+            .meta
+            .updated_at
+            .clone();
+
+        lock(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "joseph",
+            WriterSource::Flag,
+        )
+        .expect("locking your own lock again succeeds");
+        let after_second = store.scan_session(&sid).expect("scan").cassettes[0]
+            .meta
+            .updated_at
+            .clone();
+
+        assert_eq!(
+            after_first, after_second,
+            "a no-op must not rewrite the cassette — 4b's close appends a second \
+             blockquote on a re-close, and this is the pattern not to repeat"
+        );
+    }
+
+    #[test]
+    fn a_human_may_not_steal_another_writers_sticky_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let mut m = meta("aaa00000000000000000000000", 10, Status::Open);
+        m.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
+        store.add_cassette(&sid, &m, "").expect("add");
+        store
+            .ensure_writer("joseph", Kind::Human)
+            .expect("register human");
+
+        match lock(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "joseph",
+            WriterSource::Flag,
+        ) {
+            Err(QueueError::Sticky(_)) => {}
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+
+        // ...but any human may CLEAR any sticky lock: the spec's capability rule
+        // is that humans hold the escape hatch.
+        unlock(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "joseph",
+            WriterSource::Flag,
+        )
+        .expect("a human may clear another writer's lock");
+        assert!(store.scan_session(&sid).expect("scan").cassettes[0]
+            .meta
+            .locked_by
+            .is_none());
+    }
+
+    #[test]
+    fn unlocking_an_already_unlocked_cassette_is_a_no_op_that_does_not_rewrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        store
+            .add_cassette(
+                &sid,
+                &meta("aaa00000000000000000000000", 10, Status::Open),
+                "body\n",
+            )
+            .expect("add");
+        store
+            .ensure_writer("joseph", Kind::Human)
+            .expect("register human");
+
+        let before = store.scan_session(&sid).expect("scan").cassettes[0]
+            .meta
+            .updated_at
+            .clone();
+
+        unlock(
+            &store,
+            &sid,
+            "aaa00000000000000000000000",
+            "joseph",
+            WriterSource::Flag,
+        )
+        .expect("unlocking an unlocked cassette succeeds");
+
+        let after = store.scan_session(&sid).expect("scan").cassettes[0]
+            .meta
+            .updated_at
+            .clone();
+        assert_eq!(before, after, "a no-op must not rewrite the cassette");
     }
 
     #[test]

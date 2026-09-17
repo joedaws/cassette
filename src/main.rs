@@ -124,7 +124,7 @@ fn restore_terminal() {
 
 fn main() -> io::Result<()> {
     let args = cli::parse();
-    let cfg = config::load_config().unwrap_or_else(|e| die(&e));
+    let cfg = config::load_config().unwrap_or_else(|e| exit_with(2, &e, args.json));
 
     if args.list_themes {
         print_themes(&cfg);
@@ -156,7 +156,7 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(cmd) = &args.queue_cmd {
-        let store = store::Store::new(store_root());
+        let store = store::Store::new(store_root(args.json));
         // Before any command touches the store: `--session` must be a
         // well-formed ULID naming a session that exists. Done here, once,
         // against `QueueCmd::session()` rather than inside each command —
@@ -165,13 +165,8 @@ fn main() -> io::Result<()> {
         // permissive reads below (`scan_session` treats a missing directory
         // as an empty session) would otherwise report a typo as an empty
         // queue.
-        match queue::require_session(&store, cmd.session()) {
-            Ok(()) => {}
-            Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-            // `require_session` produces nothing else. Matched anyway so a
-            // later change fails loudly instead of letting a command run on
-            // an unchecked session id.
-            Err(other) => die_with(1, &format!("{other:?}")),
+        if let Err(e) = queue::require_session(&store, cmd.session()) {
+            exit_queue_err(&e, args.json);
         }
         match cmd {
             // The only command that creates a cassette, so — like `write` —
@@ -183,7 +178,7 @@ fn main() -> io::Result<()> {
             } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
                 match queue::edit::new(
@@ -195,16 +190,8 @@ fn main() -> io::Result<()> {
                     writer_source,
                     max_open,
                 ) {
-                    Ok(id) => {
-                        println!("{id}");
-                        std::process::exit(0)
-                    }
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(id) => exit_queue_ok(Some(id)),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
             // The only queue command that writes an existing cassette, so
@@ -213,16 +200,11 @@ fn main() -> io::Result<()> {
             cli::QueueCmd::Write { id, session } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 match queue::write(&store, id, session, &who_name, writer_source) {
-                    Ok(()) => std::process::exit(0),
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
             // `list` and `show` attribute nothing, so unlike `write` they
@@ -232,19 +214,52 @@ fn main() -> io::Result<()> {
                 session,
                 status,
                 since,
-            } => exit_on_queue_result(queue::view::list(
-                &store,
-                session,
-                *status,
-                since.as_deref(),
-            )),
+            } => {
+                if args.json {
+                    match queue::view::list_view(&store, session, *status, since.as_deref()) {
+                        Ok(listing) => exit_queue_ok(Some(
+                            serde_json::to_string(&listing).expect("Listing always serializes"),
+                        )),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                } else {
+                    match queue::view::list(&store, session, *status, since.as_deref()) {
+                        Ok(msg) => exit_queue_ok(Some(msg)),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                }
+            }
             cli::QueueCmd::Show { id, session } => {
-                exit_on_queue_result(queue::view::show(&store, session, id))
+                if args.json {
+                    match queue::view::show_view(&store, session, id) {
+                        Ok(view) => exit_queue_ok(Some(
+                            serde_json::to_string(&view).expect("CassetteView always serializes"),
+                        )),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                } else {
+                    match queue::view::show(&store, session, id) {
+                        Ok(msg) => exit_queue_ok(Some(msg)),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                }
             }
             // No writer identity: `next` reports an id, it attributes
             // nothing.
             cli::QueueCmd::Next { session } => {
-                exit_on_queue_result(queue::view::next(&store, session))
+                if args.json {
+                    match queue::view::next_view(&store, session) {
+                        Ok(view) => exit_queue_ok(Some(
+                            serde_json::to_string(&view).expect("CassetteView always serializes"),
+                        )),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                } else {
+                    match queue::view::next(&store, session) {
+                        Ok(msg) => exit_queue_ok(Some(msg)),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                }
             }
             // `close` attributes the closure and, when the acting writer is
             // an agent, needs its `Kind` to enforce the sticky-lock
@@ -256,7 +271,7 @@ fn main() -> io::Result<()> {
             } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 match queue::edit::close(
                     &store,
@@ -266,13 +281,8 @@ fn main() -> io::Result<()> {
                     &who_name,
                     writer_source,
                 ) {
-                    Ok(()) => std::process::exit(0),
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
             // `reopen` raises the session's open count, so — like `new` — it
@@ -281,17 +291,12 @@ fn main() -> io::Result<()> {
             cli::QueueCmd::Reopen { id, session } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
                 match queue::edit::reopen(&store, session, id, &who_name, writer_source, max_open) {
-                    Ok(()) => std::process::exit(0),
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
             // `move` reprioritizes an existing cassette, so — like `close`
@@ -304,7 +309,7 @@ fn main() -> io::Result<()> {
             } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 match queue::edit::move_cassette(
                     &store,
@@ -314,24 +319,43 @@ fn main() -> io::Result<()> {
                     &who_name,
                     writer_source,
                 ) {
-                    Ok(()) => std::process::exit(0),
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
+                }
+            }
+            // `lock`/`unlock` are human-only: `edit::lock`/`edit::unlock`
+            // reject a non-human writer with `Usage` (exit 2) before
+            // acquiring anything, so they need the resolved writer identity
+            // exactly like `close`/`reopen`/`move` do.
+            cli::QueueCmd::Lock { id, session } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => exit_usage(&msg, args.json),
+                };
+                match queue::edit::lock(&store, session, id, &who_name, writer_source) {
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
+                }
+            }
+            cli::QueueCmd::Unlock { id, session } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => exit_usage(&msg, args.json),
+                };
+                match queue::edit::unlock(&store, session, id, &who_name, writer_source) {
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
         }
     }
 
     if let Some(cmd) = &args.writer_cmd {
-        run_writer_cmd(cmd, args.writer.as_deref());
+        run_writer_cmd(cmd, args.writer.as_deref(), args.json);
     }
 
     if let Some(cmd) = &args.session_cmd {
-        run_session_cmd(cmd);
+        run_session_cmd(cmd, args.json);
     }
 
     // Resolve the theme and topic template before touching the terminal so
@@ -1067,8 +1091,13 @@ fn die(msg: &str) -> ! {
 /// `KindMismatch` or `EmptyName` from `register` is a usage error (exit 2) —
 /// the caller asked for something the registry cannot honor, not a system
 /// failure.
-fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
-    let store = store::Store::new(store_root());
+///
+/// `json` routes every failure through `exit_with` instead of `die_with`, so
+/// `--json` on `writer` gets the same `{"error","code"}` envelope `queue`
+/// commands do (spec decision 2 names `session`/`writer` explicitly) — exit
+/// codes are unchanged, only the channel and format for a failure.
+fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>, json: bool) -> ! {
+    let store = store::Store::new(store_root(json));
     match cmd {
         cli::WriterCmd::Register { name, kind } => match writer::register(&store, name, *kind) {
             Ok(msg) => {
@@ -1076,30 +1105,30 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
                 std::process::exit(0)
             }
             Err(e @ store::writers::EnsureError::KindMismatch { .. }) => {
-                die_with(2, &e.to_string())
+                exit_with(2, &e.to_string(), json)
             }
-            Err(e @ store::writers::EnsureError::EmptyName) => die_with(2, &e.to_string()),
-            Err(e @ store::writers::EnsureError::Io(_)) => die_with(1, &e.to_string()),
+            Err(e @ store::writers::EnsureError::EmptyName) => exit_with(2, &e.to_string(), json),
+            Err(e @ store::writers::EnsureError::Io(_)) => exit_with(1, &e.to_string(), json),
         },
         cli::WriterCmd::List => match writer::list(&store) {
             Ok(msg) => {
                 println!("{msg}");
                 std::process::exit(0)
             }
-            Err(e) => die_with(1, &e),
+            Err(e) => exit_with(1, &e, json),
         },
         cli::WriterCmd::Whoami => {
             // `whoami` only ever looks a name up (`writer::render_whoami`
             // never resolves or creates), so where the name came from makes
             // no difference here — `.0` drops the `WriterSource`.
             let (who_name, _source) =
-                resolve_writer_name(writer_flag).unwrap_or_else(|e| die_with(2, &e));
+                resolve_writer_name(writer_flag).unwrap_or_else(|e| exit_with(2, &e, json));
             match writer::whoami(&store, &who_name) {
                 Ok(msg) => {
                     println!("{msg}");
                     std::process::exit(0)
                 }
-                Err(e) => die_with(1, &e),
+                Err(e) => exit_with(1, &e, json),
             }
         }
     }
@@ -1113,30 +1142,35 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>) -> ! {
 /// String>` already collapses that to one case. `alias` can also fail on an
 /// unknown session id, which is a usage error (exit 2): `session::set_alias`
 /// returns `SessionError` so this match can tell the two apart.
-fn run_session_cmd(cmd: &cli::SessionCmd) -> ! {
-    let store = store::Store::new(store_root());
+///
+/// `json` routes every failure through `exit_with` instead of `die_with`, so
+/// `--json` on `session` gets the same `{"error","code"}` envelope `queue`
+/// commands do (spec decision 2 names `session`/`writer` explicitly) — exit
+/// codes are unchanged, only the channel and format for a failure.
+fn run_session_cmd(cmd: &cli::SessionCmd, json: bool) -> ! {
+    let store = store::Store::new(store_root(json));
     match cmd {
         cli::SessionCmd::New { alias } => match session::new_session(&store, alias.as_deref()) {
             Ok(id) => {
                 println!("{id}");
                 std::process::exit(0)
             }
-            Err(e) => die_with(1, &e),
+            Err(e) => exit_with(1, &e, json),
         },
         cli::SessionCmd::List { all } => match session::list(&store, *all) {
             Ok(msg) => {
                 println!("{msg}");
                 std::process::exit(0)
             }
-            Err(e) => die_with(1, &e),
+            Err(e) => exit_with(1, &e, json),
         },
         cli::SessionCmd::Alias { id, alias } => match session::set_alias(&store, id, alias) {
             Ok(msg) => {
                 println!("{msg}");
                 std::process::exit(0)
             }
-            Err(e @ session::SessionError::Usage(_)) => die_with(2, &e.to_string()),
-            Err(e @ session::SessionError::Io(_)) => die_with(1, &e.to_string()),
+            Err(e @ session::SessionError::Usage(_)) => exit_with(2, &e.to_string(), json),
+            Err(e @ session::SessionError::Io(_)) => exit_with(1, &e.to_string(), json),
         },
     }
 }
@@ -1190,22 +1224,48 @@ fn die_with(code: i32, msg: &str) -> ! {
     std::process::exit(code);
 }
 
-/// Print and exit for `queue list`/`queue show`/`queue next`, which all
-/// succeed with a message to print rather than nothing — unlike `queue
-/// write`, handled separately since `Ok(())` has nothing to print.
-fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
-    match result {
-        Ok(msg) => {
-            println!("{msg}");
-            std::process::exit(0)
-        }
-        Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-        Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-        Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-        Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-        Err(queue::QueueError::Full(m)) => die_with(6, &m),
-        Err(queue::QueueError::Io(m)) => die_with(1, &m),
+/// Exit successfully for any queue command, printing output first if there
+/// is any. Unifies `new`'s `Ok(id) => { println!(...); exit(0) }`, `write`'s
+/// (and `close`'s, `reopen`'s, `move`'s) `Ok(()) => exit(0)`, and
+/// `list`/`show`/`next`'s `Ok(msg) => { println!(...); exit(0) }` into one
+/// path, matching `exit_queue_err`'s single path for the failure side.
+fn exit_queue_ok(output: Option<String>) -> ! {
+    if let Some(s) = output {
+        println!("{s}");
     }
+    std::process::exit(0)
+}
+
+/// Exit with a message and code, in whichever form the caller asked for.
+/// The one place the `{"error","code"}` envelope's shape is built — both
+/// `exit_queue_err` and `exit_usage` render through here, so there cannot be
+/// a second, subtly different `serde_json::json!` call to drift out of sync.
+///
+/// The JSON envelope goes to **stdout**, not stderr: an agent that redirects
+/// stderr to a log must still receive a parseable failure on the channel it
+/// is reading. Prose keeps going to stderr, where it always has.
+fn exit_with(code: i32, msg: &str, json: bool) -> ! {
+    if json {
+        let envelope = serde_json::json!({ "error": msg, "code": code });
+        println!("{envelope}");
+        std::process::exit(code);
+    }
+    die_with(code, msg)
+}
+
+/// Exit on a failed queue command, in whichever form the caller asked for.
+fn exit_queue_err(e: &queue::QueueError, json: bool) -> ! {
+    exit_with(queue::exit_code(e), queue::message(e), json)
+}
+
+/// Exit 2 for a bad invocation that never reaches a `QueueError` — today
+/// only `resolve_writer_name`'s two failures (no `--writer`, no usable
+/// `$USER`/`$CASSETTE_WRITER`), at its five call sites. The spec's `--json`
+/// contract is unconditional — any command that fails emits the envelope —
+/// so these route through `exit_with` exactly like `exit_queue_err` does,
+/// rather than `die_with` straight to stderr prose regardless of `--json`.
+fn exit_usage(msg: &str, json: bool) -> ! {
+    exit_with(2, msg, json)
 }
 
 /// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.
@@ -1214,12 +1274,17 @@ fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
 /// `~/.local/share/cassette`. Phase 6 adds a `data_dir` config key beside it;
 /// the existing `notes_dir` key points at the old flat notes folder and is
 /// deliberately NOT consulted here.
-fn store_root() -> PathBuf {
+///
+/// Failing to determine a data dir at all is an I/O failure the caller cannot
+/// fix by retrying with different arguments (README's exit-1 rule), not a
+/// usage error — and, like every other failure under `--json`, it must still
+/// emit the `{"error","code"}` envelope rather than bare stderr prose.
+fn store_root(json: bool) -> PathBuf {
     std::env::var_os("CASSETTE_DATA_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(store::Store::default_root)
-        .unwrap_or_else(|| die("cannot determine a data dir"))
+        .unwrap_or_else(|| exit_with(1, "cannot determine a data dir", json))
 }
 
 #[cfg(test)]

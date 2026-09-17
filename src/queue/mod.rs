@@ -17,6 +17,7 @@
 //! collision to design around.
 
 pub mod edit;
+pub mod json;
 pub mod view;
 pub mod write;
 
@@ -34,18 +35,24 @@ use crate::store::{writers, Store};
 /// exhaustive, so a new variant fails to compile until it says where its
 /// session id lives.
 ///
-/// Both failures are `Usage` (exit 2), which is the spec's exit table:
-/// "unknown session" is listed there as 2, raised by any command. It has to
-/// be checked up front, because the store reads the argument permissively —
-/// `scan_session` maps a missing directory to an empty scan, so without this
-/// `queue list --session <typo>` would print `no cassettes` and exit 0, and
-/// `queue next` would exit 5, telling an agent loop "idle or enqueue work"
-/// when the truth is a typo.
+/// A malformed or unknown id is `Usage` (exit 2), which is the spec's exit
+/// table: "unknown session" is listed there as 2, raised by any command. It
+/// has to be checked up front, because the store reads the argument
+/// permissively — `scan_session` maps a missing directory to an empty scan,
+/// so without this `queue list --session <typo>` would print `no cassettes`
+/// and exit 0, and `queue next` would exit 5, telling an agent loop "idle or
+/// enqueue work" when the truth is a typo. A session directory the store
+/// otherwise cannot read (permissions, a corrupt `session.toml`) is `Io`
+/// (exit 1) instead — see `store::RequireSessionError`.
 ///
 /// `session alias` calls `Store::require_session` too, so the two paths
 /// cannot drift apart on what a session id is.
 pub fn require_session(store: &Store, session: &str) -> Result<(), QueueError> {
-    store.require_session(session).map_err(QueueError::Usage)
+    match store.require_session(session) {
+        Ok(()) => Ok(()),
+        Err(crate::store::RequireSessionError::Usage(m)) => Err(QueueError::Usage(m)),
+        Err(crate::store::RequireSessionError::Io(m)) => Err(QueueError::Io(m)),
+    }
 }
 
 /// Where a writer name came from. The distinction is load-bearing: an
@@ -93,19 +100,47 @@ pub enum QueueError {
     /// (over)full. Checked before any priority is computed, so a full queue
     /// is never charged a renumber.
     Full(String),
-    /// `queue close` found the cassette's `locked_by` set and the acting
-    /// writer is an agent. Exit 4, distinct from `Busy`'s exit 3: `Busy`
-    /// means another writer is actively holding the advisory `flock` right
-    /// now (nobody, human or agent, may close it); `Sticky` means nobody is
-    /// writing it at this instant but a writer has claimed it via the sticky
-    /// `locked_by` frontmatter field, and only a human may close over that
-    /// claim. Nothing in 4b ever sets `locked_by` — `queue lock`/`unlock`
-    /// arrive in 4c — so this arm is unreachable today; it is implemented
-    /// now so the rule is already enforced before the command that can
-    /// trigger it exists.
+    /// `queue close` or `queue write` found the cassette's `locked_by` set
+    /// and the acting writer is an agent; also `queue lock` finding the
+    /// cassette already claimed by a different writer. Exit 4, distinct from
+    /// `Busy`'s exit 3: `Busy` means another writer is actively holding the
+    /// advisory `flock` right now (nobody, human or agent, may act on it);
+    /// `Sticky` means nobody is writing it at this instant but a writer has
+    /// claimed it via the sticky `locked_by` frontmatter field, and only a
+    /// human may close or write over that claim (or, for `lock`, only a human
+    /// may clear someone else's claim — see `queue unlock`).
     Sticky(String),
     /// Anything else. Exit 1.
     Io(String),
+}
+
+/// The process exit code this failure deserves. The single source of truth
+/// for the spec's exit table: `main.rs` renders, this decides.
+///
+/// Kept here rather than in `main.rs` because `--json` puts the number in a
+/// machine-readable field — a caller branches on it — so it is contract, not
+/// presentation.
+pub fn exit_code(e: &QueueError) -> i32 {
+    match e {
+        QueueError::Io(_) => 1,
+        QueueError::Usage(_) => 2,
+        QueueError::Busy(_) => 3,
+        QueueError::Sticky(_) => 4,
+        QueueError::Empty(_) => 5,
+        QueueError::Full(_) => 6,
+    }
+}
+
+/// The human-readable message, whatever the variant.
+pub fn message(e: &QueueError) -> &str {
+    match e {
+        QueueError::Io(m)
+        | QueueError::Usage(m)
+        | QueueError::Busy(m)
+        | QueueError::Sticky(m)
+        | QueueError::Empty(m)
+        | QueueError::Full(m) => m,
+    }
 }
 
 /// Which cassettes `queue list` shows. This module takes no dependency on

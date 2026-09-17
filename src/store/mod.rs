@@ -139,6 +139,34 @@ pub struct StoredCassette {
     pub body: String,
 }
 
+/// Why `Store::require_session` rejected a session id.
+///
+/// A malformed id or a well-formed one naming no session are both usage
+/// errors (exit 2) — the caller typed something wrong. Anything else
+/// `session_meta` can fail with — permissions, a corrupt `session.toml` — is
+/// a store the caller cannot be blamed for and gets exit 1 instead,
+/// distinguished by `kind() == NotFound`: `session::read` opens the file
+/// with `std::fs::read_to_string` before it ever parses anything, so a
+/// missing session directory *or* a missing `session.toml` both surface as
+/// `NotFound`, and every other failure (permission denied, or a parse error
+/// `session::read` maps to `InvalidData`) is something else.
+#[derive(Debug)]
+pub enum RequireSessionError {
+    /// Malformed id, or a well-formed one naming no session. Exit 2.
+    Usage(String),
+    /// A session directory the store cannot read for some other reason
+    /// (permissions, a corrupt `session.toml`). Exit 1: not a typo.
+    Io(String),
+}
+
+impl std::fmt::Display for RequireSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequireSessionError::Usage(m) | RequireSessionError::Io(m) => write!(f, "{m}"),
+        }
+    }
+}
+
 /// The store rooted at a data dir. Holds no state beyond the path: every
 /// method reads or writes the filesystem directly, which is what makes
 /// concurrent writers possible.
@@ -252,21 +280,27 @@ impl Store {
     /// `session.toml`; anything else is reported as the missing session it
     /// is.
     ///
-    /// Returns the message rather than an error enum: both axes are usage
-    /// errors (exit 2) at every call site, so the only thing a caller needs
-    /// from a failure is prose that says which of the two it was.
-    pub fn require_session(&self, session: &str) -> Result<(), String> {
+    /// **I/O failures are not typos.** A `session.toml` the store cannot
+    /// read — wrong permissions, a corrupt file — is a different situation
+    /// from a session nobody created: `--json` puts the exit code in a
+    /// field an agent branches on, and an agent that sees exit 2 will "fix"
+    /// its argument and retry forever, where exit 1 tells it to escalate
+    /// instead. See `RequireSessionError`.
+    pub fn require_session(&self, session: &str) -> Result<(), RequireSessionError> {
         if !ids::is_valid_id(session) {
-            return Err(format!(
+            return Err(RequireSessionError::Usage(format!(
                 "malformed session id '{session}': expected a {}-character ULID",
                 ids::ID_LEN
-            ));
+            )));
         }
         match self.session_meta(session) {
             Ok(_) => Ok(()),
-            Err(_) => Err(format!(
-                "no session '{session}' — `cassette session list` shows what exists"
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(RequireSessionError::Usage(
+                format!("no session '{session}' — `cassette session list` shows what exists"),
             )),
+            Err(e) => Err(RequireSessionError::Io(format!(
+                "cannot read session '{session}': {e}"
+            ))),
         }
     }
 
@@ -682,11 +716,16 @@ mod tests {
     fn require_session_rejects_a_traversal_without_touching_the_disk() {
         let (dir, s) = store();
         for bad in ["..", "../../escaped", "a/b", "", "nope"] {
-            let msg = s.require_session(bad).expect_err("must be rejected");
-            assert!(
-                msg.contains("malformed session id"),
-                "shape failure must say so, not 'no session': {msg}"
-            );
+            let err = s.require_session(bad).expect_err("must be rejected");
+            match err {
+                RequireSessionError::Usage(msg) => assert!(
+                    msg.contains("malformed session id"),
+                    "shape failure must say so, not 'no session': {msg}"
+                ),
+                RequireSessionError::Io(msg) => {
+                    panic!("a shape failure is a usage error, not I/O: {msg}")
+                }
+            }
         }
         // Nothing was created anywhere on the way out — in particular not
         // the `escaped/` directory the unvalidated path join produced.
@@ -700,9 +739,14 @@ mod tests {
         // or a typo'd but well-formed id creates an unreachable session.
         let (_dir, s) = store();
         let ghost = ids::new_id();
-        let msg = s.require_session(&ghost).expect_err("must be rejected");
-        assert!(msg.contains("no session"), "{msg}");
-        assert!(msg.contains(&ghost), "{msg}");
+        let err = s.require_session(&ghost).expect_err("must be rejected");
+        match err {
+            RequireSessionError::Usage(msg) => {
+                assert!(msg.contains("no session"), "{msg}");
+                assert!(msg.contains(&ghost), "{msg}");
+            }
+            RequireSessionError::Io(msg) => panic!("a missing session is exit 2, not I/O: {msg}"),
+        }
         assert!(!s.session_dir(&ghost).exists(), "must not create it");
     }
 
@@ -715,8 +759,47 @@ mod tests {
         let (_dir, s) = store();
         let ghost = ids::new_id();
         std::fs::create_dir_all(s.cassettes_dir(&ghost)).expect("mkdir");
-        let msg = s.require_session(&ghost).expect_err("must be rejected");
-        assert!(msg.contains("no session"), "{msg}");
+        let err = s.require_session(&ghost).expect_err("must be rejected");
+        match err {
+            RequireSessionError::Usage(msg) => assert!(msg.contains("no session"), "{msg}"),
+            RequireSessionError::Io(msg) => {
+                panic!("a missing session.toml is exit 2, not I/O: {msg}")
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_session_toml_is_an_io_error_not_a_missing_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, s) = store();
+        let sid = s.create_session(&session_meta()).expect("create");
+        let toml = s.session_dir(&sid).join("session.toml");
+
+        let mut perms = std::fs::metadata(&toml).expect("metadata").permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&toml, perms).expect("chmod");
+
+        // Root ignores the mode bits, so the chmod proves nothing there.
+        // Probe the actual effect rather than guessing from $USER, which can
+        // be unset or lie in a container and does not track effective uid
+        // anyway.
+        if std::fs::read_to_string(&toml).is_ok() {
+            return; // running with privileges that defeat the test's premise
+        }
+
+        let err = s
+            .require_session(&sid)
+            .expect_err("must not read as present");
+        match err {
+            RequireSessionError::Io(msg) => assert!(
+                !msg.contains("no session"),
+                "an unreadable store is an I/O failure, not a typo: {msg}"
+            ),
+            RequireSessionError::Usage(msg) => {
+                panic!("an unreadable session.toml must be exit 1, not exit 2: {msg}")
+            }
+        }
     }
 
     #[test]

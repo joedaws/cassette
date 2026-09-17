@@ -27,6 +27,8 @@ pub struct Args {
     pub writer_cmd: Option<WriterCmd>,
     /// `session new|list|alias`, if that's what was invoked.
     pub session_cmd: Option<SessionCmd>,
+    /// emit machine-readable JSON instead of prose.
+    pub json: bool,
 }
 
 /// `queue …` as `main()` consumes it. Every variant carries `session`:
@@ -68,6 +70,14 @@ pub enum QueueCmd {
         session: String,
         anchor: crate::queue::edit::MoveAnchor,
     },
+    Lock {
+        id: String,
+        session: String,
+    },
+    Unlock {
+        id: String,
+        session: String,
+    },
 }
 
 impl QueueCmd {
@@ -88,7 +98,9 @@ impl QueueCmd {
             | QueueCmd::Next { session }
             | QueueCmd::Close { session, .. }
             | QueueCmd::Reopen { session, .. }
-            | QueueCmd::Move { session, .. } => session,
+            | QueueCmd::Move { session, .. }
+            | QueueCmd::Lock { session, .. }
+            | QueueCmd::Unlock { session, .. } => session,
         }
     }
 }
@@ -159,6 +171,11 @@ struct Cli {
     /// registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
     #[arg(long, value_name = "NAME", global = true)]
     writer: Option<String>,
+
+    /// emit machine-readable JSON (full data on queue list/next/show;
+    /// {"error","code"} on any command that fails)
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -291,6 +308,22 @@ enum QueueAction {
         #[arg(long, value_name = "ID")]
         after: Option<String>,
     },
+    /// set the sticky lock to the acting writer (human-only)
+    Lock {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
+    /// clear the sticky lock, whoever holds it (human-only)
+    Unlock {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -381,6 +414,7 @@ impl Cli {
             record: self.record,
             print_stdout: self.print_stdout,
             writer: self.writer,
+            json: self.json,
             ..Args::default()
         };
         match self.command {
@@ -441,6 +475,8 @@ impl Cli {
                         message,
                     },
                     QueueAction::Reopen { id, session } => QueueCmd::Reopen { id, session },
+                    QueueAction::Lock { id, session } => QueueCmd::Lock { id, session },
+                    QueueAction::Unlock { id, session } => QueueCmd::Unlock { id, session },
                     QueueAction::Move {
                         id,
                         session,

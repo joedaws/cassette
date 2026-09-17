@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::process::{Command, Output};
 
 fn bin() -> &'static str {
@@ -580,6 +581,188 @@ fn queue_list_and_show_need_no_writer_identity() {
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_list_json_emits_the_contract_shape() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new", "--alias", "monday"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let mut child = Command::new(bin())
+        .args(["queue", "write", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"three whole words\n")
+        .expect("write");
+    assert!(child.wait().expect("wait").success());
+
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["session"]["id"], sid.as_str());
+    assert_eq!(v["session"]["alias"], "monday");
+    assert_eq!(v["unreadable"], 0, "nothing damaged in this store: {v}");
+    let c = &v["cassettes"][0];
+    assert_eq!(c["id"], cid.as_str());
+    assert_eq!(c["status"], "open");
+    assert_eq!(c["words"], 3, "words counts the body: {c}");
+    assert_eq!(c["busy"], false, "nobody holds it: {c}");
+    assert_eq!(c["sticky_lock"], serde_json::Value::Null);
+    assert_eq!(c["last_writer"]["name"], "joseph");
+    assert_eq!(c["last_writer"]["kind"], "human");
+    assert_eq!(
+        c["waiting_on"], "agent",
+        "a human wrote last, so the agent is up"
+    );
+    assert_eq!(
+        c["side_a"].as_str().expect("side_a").trim(),
+        "three whole words"
+    );
+    assert_eq!(c["side_b"], "");
+}
+
+#[test]
+fn queue_list_json_counts_unreadable_cassettes_like_the_prose_listing_does() {
+    // A damaged cassette must not silently vanish from either form: prose
+    // `queue list` already counts it into a trailing "N unreadable" line
+    // rather than hiding it, and `--json` must report the same count from
+    // the same scan rather than going quiet about store damage.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    // A second file in the same cassettes dir with no parseable frontmatter
+    // at all — the store counts this as unreadable rather than skipping it
+    // silently.
+    let cassettes = root.join("sessions").join(&sid).join("cassettes");
+    std::fs::write(cassettes.join("garbled.md"), "not a cassette file\n").expect("garbled file");
+
+    let prose = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(prose.status.code(), Some(0), "{}", stderr(&prose));
+    let prose_text = String::from_utf8_lossy(&prose.stdout).to_string();
+    assert!(prose_text.contains("1 unreadable"), "prose: {prose_text}");
+
+    let json_out = Command::new(bin())
+        .args(["queue", "list", "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(json_out.status.code(), Some(0), "{}", stderr(&json_out));
+    let v: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("valid JSON");
+    assert_eq!(v["unreadable"], 1, "same count as the prose listing: {v}");
+    assert_eq!(
+        v["cassettes"].as_array().expect("cassettes").len(),
+        1,
+        "the one valid cassette is still listed: {v}"
+    );
+}
+
+#[test]
+fn queue_show_json_emits_the_same_cassette_as_show() {
+    // `show --json` reads and parses the same file `show`'s prose reads —
+    // the two must never disagree about which cassette they describe.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let out = Command::new(bin())
+        .args(["queue", "show", ID, "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["id"], ID);
+    assert_eq!(v["topic"], "gratitude");
+    assert_eq!(v["status"], "open");
+    assert_eq!(
+        v["side_a"].as_str().expect("side_a").trim(),
+        "hello from gratitude"
+    );
+    // The fixture's writer id ("w") is not in writers.toml, so both
+    // attributions must resolve to null rather than a guessed name.
+    assert_eq!(v["created_by"], serde_json::Value::Null);
+    assert_eq!(v["last_writer"], serde_json::Value::Null);
+    assert_eq!(v["waiting_on"], serde_json::Value::Null);
+}
+
+#[test]
+fn queue_next_json_emits_a_single_cassette_view_not_a_listing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(
+        v["id"], ID,
+        "a bare CassetteView, not {{\"cassettes\": [...]}}: {v}"
+    );
+    assert_eq!(v["busy"], false);
 }
 
 #[test]
@@ -1270,4 +1453,396 @@ fn queue_move_requires_exactly_one_of_before_or_after() {
         .output()
         .expect("spawn");
     assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
+}
+
+#[test]
+fn queue_lock_then_an_agent_is_refused_and_a_human_clears_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let reg = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(reg.status.code(), Some(0), "{}", stderr(&reg));
+
+    let locked = Command::new(bin())
+        .args(["queue", "lock", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(locked.status.code(), Some(0), "{}", stderr(&locked));
+
+    // An agent invoking a human-only command is exit 2, not 4.
+    let refused = Command::new(bin())
+        .args(["--writer", "bot", "queue", "lock", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+
+    let cleared = Command::new(bin())
+        .args(["queue", "unlock", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(cleared.status.code(), Some(0), "{}", stderr(&cleared));
+}
+
+#[test]
+fn queue_write_is_blocked_by_a_sticky_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let reg = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(reg.status.code(), Some(0), "{}", stderr(&reg));
+
+    let locked = Command::new(bin())
+        .args(["queue", "lock", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(locked.status.code(), Some(0), "{}", stderr(&locked));
+
+    // An agent writing over a sticky lock is exit 4, not 3: nobody is
+    // actively holding the advisory flock, but the sticky claim still binds.
+    let mut child = Command::new(bin())
+        .args(["--writer", "bot", "queue", "write", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"agent prose\n")
+        .expect("write");
+    let refused = child.wait_with_output().expect("wait");
+    assert_eq!(refused.status.code(), Some(4), "{}", stderr(&refused));
+
+    // A human may still write over the same sticky lock.
+    let mut child = Command::new(bin())
+        .args(["queue", "write", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"human prose\n")
+        .expect("write");
+    let allowed = child.wait_with_output().expect("wait");
+    assert_eq!(allowed.status.code(), Some(0), "{}", stderr(&allowed));
+}
+
+#[test]
+fn json_errors_carry_the_exit_code_in_the_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    // A malformed session id is exit 2 on every queue command.
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", "not-a-ulid", "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+
+    // The envelope goes to stdout as parseable JSON, not to stderr as prose:
+    // an agent redirecting stderr must still get a machine-readable failure.
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("not-a-ulid"),
+        "the message must name what was wrong: {v}"
+    );
+}
+
+#[test]
+fn without_json_errors_stay_prose_on_stderr() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", "not-a-ulid"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty(), "no JSON without --json");
+    assert!(stderr(&out).contains("cassette:"), "{}", stderr(&out));
+}
+
+#[test]
+fn json_covers_a_missing_writer_identity_before_any_queue_error_exists() {
+    // `resolve_writer_name`'s own failure (no `--writer`, no usable $USER or
+    // $CASSETTE_WRITER) is not a `QueueError` — it happens in `main.rs`
+    // before any queue command runs — so `exit_queue_err` alone cannot
+    // reach it. Pinned here so it doesn't regress back to prose-only under
+    // `--json`; see `a_writer_name_is_required_when_user_is_unset` for the
+    // non-JSON version of the same gap.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args([
+            "queue",
+            "write",
+            "01K5GR7T2M9WPD0000000000AB",
+            "--session",
+            &sid,
+            "--json",
+        ])
+        .env_remove("USER")
+        .env("CASSETTE_DATA_DIR", &root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).is_empty(),
+        "no prose on stderr under --json: {}",
+        stderr(&out)
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("--writer"),
+        "the message must name the fix: {v}"
+    );
+}
+
+#[test]
+fn session_alias_on_an_unknown_id_emits_the_json_envelope() {
+    // Spec decision 2 names `session`/`writer` explicitly alongside the
+    // queue commands: --json must change every command's failure output,
+    // not only QueueError's. This pins `session alias` specifically since
+    // it is the one session command with its own usage-error case.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args([
+            "session",
+            "alias",
+            "01K5GQ2R8V3XQZ0000000000AB",
+            "x",
+            "--json",
+        ])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).is_empty(),
+        "no prose on stderr under --json: {}",
+        stderr(&out)
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("01K5GQ2R8V3XQZ0000000000AB"),
+        "{v}"
+    );
+}
+
+#[test]
+fn session_alias_on_an_unknown_id_without_json_still_prints_prose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["session", "alias", "01K5GQ2R8V3XQZ0000000000AB", "x"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty(), "no JSON without --json");
+    assert!(stderr(&out).contains("cassette:"), "{}", stderr(&out));
+}
+
+#[test]
+fn writer_register_kind_mismatch_emits_the_json_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let first = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+
+    let out = Command::new(bin())
+        .args([
+            "writer", "register", "--name", "bot", "--kind", "human", "--json",
+        ])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).is_empty(),
+        "no prose on stderr under --json: {}",
+        stderr(&out)
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"].as_str().expect("error string").contains("bot"),
+        "{v}"
+    );
+}
+
+#[test]
+fn writer_register_kind_mismatch_without_json_still_prints_prose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let first = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+
+    let out = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "human"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "no JSON without --json");
+    assert!(stderr(&out).contains("cassette:"), "{}", stderr(&out));
+}
+
+#[test]
+fn malformed_config_toml_emits_the_json_envelope_on_every_command() {
+    // `config::load_config()` runs before any subcommand dispatch, so a
+    // broken config.toml used to print TOML-parser prose (plus "try
+    // 'cassette --help'") to stderr and exit 2 with an empty stdout — even
+    // under --json, on every command, not just `queue`. Spec decision 2
+    // ("Any command invoked with --json emits {"error","code"} on failure")
+    // and the README's identical claim make no exception for config load.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_home = dir.path().join("xdg-config");
+    std::fs::create_dir_all(config_home.join("cassette")).expect("mkdir");
+    std::fs::write(
+        config_home.join("cassette").join("config.toml"),
+        "this is not valid toml [[[\n",
+    )
+    .expect("write config");
+    let root = dir.path().join("store");
+
+    let out = Command::new(bin())
+        .args(["session", "new", "--json"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).is_empty(),
+        "no prose on stderr under --json: {}",
+        stderr(&out)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("invalid config"),
+        "{v}"
+    );
+}
+
+#[test]
+fn malformed_config_toml_without_json_still_prints_prose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_home = dir.path().join("xdg-config");
+    std::fs::create_dir_all(config_home.join("cassette")).expect("mkdir");
+    std::fs::write(
+        config_home.join("cassette").join("config.toml"),
+        "this is not valid toml [[[\n",
+    )
+    .expect("write config");
+    let root = dir.path().join("store");
+
+    let out = Command::new(bin())
+        .args(["session", "new"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "no JSON without --json");
+    assert!(stderr(&out).contains("invalid config"), "{}", stderr(&out));
 }

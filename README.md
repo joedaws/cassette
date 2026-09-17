@@ -314,7 +314,12 @@ queue write <ID> --session <ID>                      # replace a cassette's body
 queue close <ID> --session <ID> [-m <TEXT>]
 queue reopen <ID> --session <ID>
 queue move <ID> --session <ID> (--before|--after) <ID>
+queue lock <ID> --session <ID>                       # sticky-lock a cassette to yourself (human-only)
+queue unlock <ID> --session <ID>                     # clear a cassette's sticky lock, whoever holds it (human-only)
 ```
+
+Add `--json` to any command (global, alongside `-t`/`-w`/etc.) to get
+machine-readable output — see "Machine-readable output" below.
 
 Every `queue` command that mutates something also resolves a writer identity
 (`--writer <NAME>`, else `$CASSETTE_WRITER`, else `$USER`). Naming a writer
@@ -327,9 +332,123 @@ all — they attribute nothing.
 Exit codes beyond the usual 0/1/2: **3** another writer currently holds the
 cassette's lock (try a different one, or wait); **4** the cassette carries a
 sticky `locked_by` claim and the acting writer is an agent, so only a human may
-close over it; **5** `queue next` found no open cassettes at all; **6** `queue
-new`/`queue reopen` would exceed the session's open-cassette cap (`max_open`,
-config key, default 36).
+write or close it — or a human's `queue lock` found it already claimed by a
+*different* writer; **5** `queue next` found no open cassettes at all; **6**
+`queue new`/`queue reopen` would exceed the session's open-cassette cap
+(`max_open`, config key, default 36). An agent invoking `queue lock` or
+`queue unlock` at all is exit **2**, not 4 — it has misused the CLI, not run
+into someone else's claim.
+
+Exit 1 is reserved for I/O failures the caller cannot fix by trying a
+different argument — a `session.toml` cassette cannot read because of
+permissions, say, rather than an unknown or malformed `--session`, which is
+exit 2. The distinction matters most under `--json`, where an agent branches
+on `code`: exit 2 says "check what you passed in and retry"; exit 1 says
+"something is wrong with the store itself — escalate instead of looping".
+
+### Machine-readable output (`--json`)
+
+Add `--json` to any `queue`, `session`, or `writer` invocation. On success the
+three read-only queue commands differ in shape: `queue list --json` wraps its
+results in the full `{session, cassettes, unreadable}` contract shown below,
+while `queue show --json` and `queue next --json` each emit a **bare cassette
+object** — the same shape as one entry of `list`'s `cassettes` array, not
+wrapped in a `{session, cassettes, unreadable}` envelope (see the example
+below). Don't script `.cassettes[0]` against `show`/`next` output — there is
+no `cassettes` key there.
+
+`session list --json`, `writer list --json`, and `writer whoami --json` emit
+the same **prose** those commands always have — no promise is broken (the
+JSON-success contract above only names the three queue reads), but
+`cassette session list --json | jq` will fail to parse, so don't expect JSON
+from them.
+
+Every mutating command (`queue new`, `write`, `close`, `reopen`, `move`,
+`lock`, `unlock`, and the `session`/`writer` commands) keeps the same exit
+code and successful output it has without `--json`: `queue new` still prints
+the new cassette's bare ULID and nothing else, and every other mutating
+command prints nothing extra. **Any** command, on failure, emits a one-line
+`{"error", "code"}` envelope to stdout instead of the usual stderr prose, so
+an agent reading only stdout still gets a parseable failure:
+
+```
+$ cassette queue list --session 01AAAAAAAAAAAAAAAAAAAAAAAA --json
+{"code":2,"error":"no session '01AAAAAAAAAAAAAAAAAAAAAAAA' — `cassette session list` shows what exists"}
+```
+
+A successful `queue list --json` looks like this (one real session, one
+cassette, captured from a live run):
+
+```
+$ cassette queue list --session 01M2QSSJG2CG8XQYG7PVH3E59H --json
+{"session":{"id":"01M2QSSJG2CG8XQYG7PVH3E59H","alias":"demo"},"cassettes":[{"id":"01M2QSSJG751F2KCGP17K9GQVY","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T13:44:43Z","side_a":"writing about the morning","side_b":""}],"unreadable":0}
+```
+
+`queue show --json` and `queue next --json` are bare cassette objects, not
+wrapped in `{session, cassettes, unreadable}` (a different demo session,
+captured from a live run):
+
+```
+$ cassette queue show 01M2RFZEC6QQXWNRS950HKSBP0 --session 01M2RFZEC00N0WPKKRBBVZTD26 --json
+{"id":"01M2RFZEC6QQXWNRS950HKSBP0","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T20:12:24Z","side_a":"writing about the morning\n","side_b":""}
+
+$ cassette queue next --session 01M2RFZEC00N0WPKKRBBVZTD26 --json
+{"id":"01M2RFZEC6QQXWNRS950HKSBP0","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T20:12:24Z","side_a":"writing about the morning\n","side_b":""}
+```
+
+`unreadable` counts cassette files the store could not parse — the same count
+the prose listing shows as `N unreadable`, never silently dropped. `busy` is
+whether the cassette's advisory lock is currently held by a live writer;
+`sticky_lock` is the durable claim set by `queue lock` (see below), `null`
+when there is none. `waiting_on` is the inverse of `last_writer`'s kind
+(`"human"` wrote last → `"agent"` is up next), or `null` when the last writer
+can't be resolved against `writers.toml`. `side_a`/`side_b` split the body on
+the `## Side A`/`## Side B` headings the TUI writes; nothing writes side B
+through `queue write` yet, so it is `""` until Phase 5.
+
+Once a cassette carries a sticky lock, `sticky_lock` is populated and an
+agent's write against it fails through the same envelope:
+
+```
+$ echo "agent tries again" | cassette queue write --session 01M2QSSJG2CG8XQYG7PVH3E59H 01M2QSSJG751F2KCGP17K9GQVY --writer agent-1 --json
+{"code":4,"error":"cassette is locked by '01M2QSSJFSWSZ7BW9J4XT7FKD6' — only a human may write it"}
+```
+
+### The sticky lock
+
+`queue lock`/`queue unlock` are how a human says *hands off this one* to
+every agent, independent of who is actively holding the advisory flock at
+any given instant:
+
+```
+queue lock <ID> --session <ID>       # claim it — sets locked_by to you
+queue unlock <ID> --session <ID>     # clear it, whoever holds it
+```
+
+**Only a human writer may set or clear the lock.** An agent calling either
+command exits 2 — misuse of the CLI, not a claim to escalate over. Locking
+is idempotent for its own holder (locking a cassette you already hold is a
+no-op, exit 0) and `unlock` on a cassette that isn't locked is likewise a
+no-op — neither writes the file. Locking a cassette a *different* writer
+already holds is exit 4; unlocking always succeeds regardless of who holds
+it, so a human can always take back a cassette an agent or another human
+claimed and went quiet on.
+
+Once set, the lock has two effects on an agent, and none on a human:
+
+- **`queue next` skips it.** A sticky-locked cassette is invisible to the
+  next-work-item query — the whole point of removing something from an
+  agent's queue — even while it is otherwise open and unlocked at the flock
+  level.
+- **`queue write` and `queue close` refuse it**, exit 4, for an agent. A
+  human may write or close a locked cassette freely; the lock only ever
+  restricts agents, never other humans, so one terminal session can't lock
+  another human out of their own work.
+
+The lock is orthogonal to the advisory `.locks/<id>` flock `queue write`
+already takes: `busy` (someone actively writing right now) and
+`sticky_lock` (someone has durably claimed it) are independent fields in
+the `--json` contract and can be true/set in any combination.
 
 ### `writers.toml` is managed by cassette, not by you
 
@@ -454,6 +573,7 @@ Options:
   -R, --record         record mode: no deletions, the tape only rolls forward
   -o, --output         print to stdout on quit instead of writing a file
       --writer <NAME>  registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
+      --json           emit machine-readable JSON (full data on queue list/next/show; {"error","code"} on any command that fails)
   -h, --help           Print help
   -V, --version        Print version
 ```
