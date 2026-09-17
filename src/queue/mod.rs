@@ -17,6 +17,7 @@
 //! collision to design around.
 
 pub mod edit;
+pub mod json;
 pub mod view;
 pub mod write;
 
