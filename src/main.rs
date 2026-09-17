@@ -323,6 +323,30 @@ fn main() -> io::Result<()> {
                     Err(e) => exit_queue_err(&e, args.json),
                 }
             }
+            // `lock`/`unlock` are human-only: `edit::lock`/`edit::unlock`
+            // reject a non-human writer with `Usage` (exit 2) before
+            // acquiring anything, so they need the resolved writer identity
+            // exactly like `close`/`reopen`/`move` do.
+            cli::QueueCmd::Lock { id, session } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => exit_usage(&msg, args.json),
+                };
+                match queue::edit::lock(&store, session, id, &who_name, writer_source) {
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
+                }
+            }
+            cli::QueueCmd::Unlock { id, session } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => exit_usage(&msg, args.json),
+                };
+                match queue::edit::unlock(&store, session, id, &who_name, writer_source) {
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
+                }
+            }
         }
     }
 

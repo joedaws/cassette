@@ -70,6 +70,14 @@ pub enum QueueCmd {
         session: String,
         anchor: crate::queue::edit::MoveAnchor,
     },
+    Lock {
+        id: String,
+        session: String,
+    },
+    Unlock {
+        id: String,
+        session: String,
+    },
 }
 
 impl QueueCmd {
@@ -90,7 +98,9 @@ impl QueueCmd {
             | QueueCmd::Next { session }
             | QueueCmd::Close { session, .. }
             | QueueCmd::Reopen { session, .. }
-            | QueueCmd::Move { session, .. } => session,
+            | QueueCmd::Move { session, .. }
+            | QueueCmd::Lock { session, .. }
+            | QueueCmd::Unlock { session, .. } => session,
         }
     }
 }
@@ -298,6 +308,22 @@ enum QueueAction {
         #[arg(long, value_name = "ID")]
         after: Option<String>,
     },
+    /// set the sticky lock to the acting writer (human-only)
+    Lock {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
+    /// clear the sticky lock, whoever holds it (human-only)
+    Unlock {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -449,6 +475,8 @@ impl Cli {
                         message,
                     },
                     QueueAction::Reopen { id, session } => QueueCmd::Reopen { id, session },
+                    QueueAction::Lock { id, session } => QueueCmd::Lock { id, session },
+                    QueueAction::Unlock { id, session } => QueueCmd::Unlock { id, session },
                     QueueAction::Move {
                         id,
                         session,
