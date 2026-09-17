@@ -27,6 +27,8 @@ pub struct Args {
     pub writer_cmd: Option<WriterCmd>,
     /// `session new|list|alias`, if that's what was invoked.
     pub session_cmd: Option<SessionCmd>,
+    /// emit machine-readable JSON instead of prose.
+    pub json: bool,
 }
 
 /// `queue …` as `main()` consumes it. Every variant carries `session`:
@@ -159,6 +161,11 @@ struct Cli {
     /// registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
     #[arg(long, value_name = "NAME", global = true)]
     writer: Option<String>,
+
+    /// emit machine-readable JSON (full data on queue list/next/show;
+    /// {"error","code"} on any command that fails)
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -381,6 +388,7 @@ impl Cli {
             record: self.record,
             print_stdout: self.print_stdout,
             writer: self.writer,
+            json: self.json,
             ..Args::default()
         };
         match self.command {

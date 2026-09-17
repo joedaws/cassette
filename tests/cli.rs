@@ -1271,3 +1271,44 @@ fn queue_move_requires_exactly_one_of_before_or_after() {
         .expect("spawn");
     assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
 }
+
+#[test]
+fn json_errors_carry_the_exit_code_in_the_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    // A malformed session id is exit 2 on every queue command.
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", "not-a-ulid", "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+
+    // The envelope goes to stdout as parseable JSON, not to stderr as prose:
+    // an agent redirecting stderr must still get a machine-readable failure.
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("not-a-ulid"),
+        "the message must name what was wrong: {v}"
+    );
+}
+
+#[test]
+fn without_json_errors_stay_prose_on_stderr() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", "not-a-ulid"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .env("USER", "tester")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty(), "no JSON without --json");
+    assert!(stderr(&out).contains("cassette:"), "{}", stderr(&out));
+}

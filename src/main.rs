@@ -165,13 +165,8 @@ fn main() -> io::Result<()> {
         // permissive reads below (`scan_session` treats a missing directory
         // as an empty session) would otherwise report a typo as an empty
         // queue.
-        match queue::require_session(&store, cmd.session()) {
-            Ok(()) => {}
-            Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-            // `require_session` produces nothing else. Matched anyway so a
-            // later change fails loudly instead of letting a command run on
-            // an unchecked session id.
-            Err(other) => die_with(1, &format!("{other:?}")),
+        if let Err(e) = queue::require_session(&store, cmd.session()) {
+            exit_queue_err(&e, args.json);
         }
         match cmd {
             // The only command that creates a cassette, so — like `write` —
@@ -195,16 +190,8 @@ fn main() -> io::Result<()> {
                     writer_source,
                     max_open,
                 ) {
-                    Ok(id) => {
-                        println!("{id}");
-                        std::process::exit(0)
-                    }
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(id) => exit_queue_ok(Some(id)),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
             // The only queue command that writes an existing cassette, so
@@ -216,13 +203,8 @@ fn main() -> io::Result<()> {
                     Err(msg) => die_with(2, &msg),
                 };
                 match queue::write(&store, id, session, &who_name, writer_source) {
-                    Ok(()) => std::process::exit(0),
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
             // `list` and `show` attribute nothing, so unlike `write` they
@@ -232,20 +214,20 @@ fn main() -> io::Result<()> {
                 session,
                 status,
                 since,
-            } => exit_on_queue_result(queue::view::list(
-                &store,
-                session,
-                *status,
-                since.as_deref(),
-            )),
-            cli::QueueCmd::Show { id, session } => {
-                exit_on_queue_result(queue::view::show(&store, session, id))
-            }
+            } => match queue::view::list(&store, session, *status, since.as_deref()) {
+                Ok(msg) => exit_queue_ok(Some(msg)),
+                Err(e) => exit_queue_err(&e, args.json),
+            },
+            cli::QueueCmd::Show { id, session } => match queue::view::show(&store, session, id) {
+                Ok(msg) => exit_queue_ok(Some(msg)),
+                Err(e) => exit_queue_err(&e, args.json),
+            },
             // No writer identity: `next` reports an id, it attributes
             // nothing.
-            cli::QueueCmd::Next { session } => {
-                exit_on_queue_result(queue::view::next(&store, session))
-            }
+            cli::QueueCmd::Next { session } => match queue::view::next(&store, session) {
+                Ok(msg) => exit_queue_ok(Some(msg)),
+                Err(e) => exit_queue_err(&e, args.json),
+            },
             // `close` attributes the closure and, when the acting writer is
             // an agent, needs its `Kind` to enforce the sticky-lock
             // boundary — see `queue::edit::close_permitted`.
@@ -266,13 +248,8 @@ fn main() -> io::Result<()> {
                     &who_name,
                     writer_source,
                 ) {
-                    Ok(()) => std::process::exit(0),
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
             // `reopen` raises the session's open count, so — like `new` — it
@@ -285,13 +262,8 @@ fn main() -> io::Result<()> {
                 };
                 let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
                 match queue::edit::reopen(&store, session, id, &who_name, writer_source, max_open) {
-                    Ok(()) => std::process::exit(0),
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
             // `move` reprioritizes an existing cassette, so — like `close`
@@ -314,13 +286,8 @@ fn main() -> io::Result<()> {
                     &who_name,
                     writer_source,
                 ) {
-                    Ok(()) => std::process::exit(0),
-                    Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-                    Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-                    Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-                    Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-                    Err(queue::QueueError::Full(m)) => die_with(6, &m),
-                    Err(queue::QueueError::Io(m)) => die_with(1, &m),
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
                 }
             }
         }
@@ -1190,22 +1157,31 @@ fn die_with(code: i32, msg: &str) -> ! {
     std::process::exit(code);
 }
 
-/// Print and exit for `queue list`/`queue show`/`queue next`, which all
-/// succeed with a message to print rather than nothing — unlike `queue
-/// write`, handled separately since `Ok(())` has nothing to print.
-fn exit_on_queue_result(result: Result<String, queue::QueueError>) -> ! {
-    match result {
-        Ok(msg) => {
-            println!("{msg}");
-            std::process::exit(0)
-        }
-        Err(queue::QueueError::Usage(m)) => die_with(2, &m),
-        Err(queue::QueueError::Busy(m)) => die_with(3, &m),
-        Err(queue::QueueError::Sticky(m)) => die_with(4, &m),
-        Err(queue::QueueError::Empty(m)) => die_with(5, &m),
-        Err(queue::QueueError::Full(m)) => die_with(6, &m),
-        Err(queue::QueueError::Io(m)) => die_with(1, &m),
+/// Exit successfully for any queue command, printing output first if there
+/// is any. Unifies `new`'s `Ok(id) => { println!(...); exit(0) }`, `write`'s
+/// (and `close`'s, `reopen`'s, `move`'s) `Ok(()) => exit(0)`, and
+/// `list`/`show`/`next`'s `Ok(msg) => { println!(...); exit(0) }` into one
+/// path, matching `exit_queue_err`'s single path for the failure side.
+fn exit_queue_ok(output: Option<String>) -> ! {
+    if let Some(s) = output {
+        println!("{s}");
     }
+    std::process::exit(0)
+}
+
+/// Exit on a failed queue command, in whichever form the caller asked for.
+///
+/// The JSON envelope goes to **stdout**, not stderr: an agent that redirects
+/// stderr to a log must still receive a parseable failure on the channel it
+/// is reading. Prose keeps going to stderr, where it always has.
+fn exit_queue_err(e: &queue::QueueError, json: bool) -> ! {
+    let code = queue::exit_code(e);
+    if json {
+        let envelope = serde_json::json!({ "error": queue::message(e), "code": code });
+        println!("{envelope}");
+        std::process::exit(code);
+    }
+    die_with(code, queue::message(e))
 }
 
 /// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.

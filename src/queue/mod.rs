@@ -108,6 +108,35 @@ pub enum QueueError {
     Io(String),
 }
 
+/// The process exit code this failure deserves. The single source of truth
+/// for the spec's exit table: `main.rs` renders, this decides.
+///
+/// Kept here rather than in `main.rs` because `--json` puts the number in a
+/// machine-readable field — a caller branches on it — so it is contract, not
+/// presentation.
+pub fn exit_code(e: &QueueError) -> i32 {
+    match e {
+        QueueError::Io(_) => 1,
+        QueueError::Usage(_) => 2,
+        QueueError::Busy(_) => 3,
+        QueueError::Sticky(_) => 4,
+        QueueError::Empty(_) => 5,
+        QueueError::Full(_) => 6,
+    }
+}
+
+/// The human-readable message, whatever the variant.
+pub fn message(e: &QueueError) -> &str {
+    match e {
+        QueueError::Io(m)
+        | QueueError::Usage(m)
+        | QueueError::Busy(m)
+        | QueueError::Sticky(m)
+        | QueueError::Empty(m)
+        | QueueError::Full(m) => m,
+    }
+}
+
 /// Which cassettes `queue list` shows. This module takes no dependency on
 /// the command-line parsing crate, same as the rest of `queue` and `store` —
 /// `cli.rs` is the only place the command line is read, so its
