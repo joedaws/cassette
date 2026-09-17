@@ -89,7 +89,11 @@ pub fn list(store: &Store, all: bool) -> Result<String, String> {
 /// takes an id a human typed, and it joins it onto the store root just the
 /// same.
 pub fn set_alias(store: &Store, id: &str, alias: &str) -> Result<String, SessionError> {
-    store.require_session(id).map_err(SessionError::Usage)?;
+    match store.require_session(id) {
+        Ok(()) => {}
+        Err(crate::store::RequireSessionError::Usage(m)) => return Err(SessionError::Usage(m)),
+        Err(crate::store::RequireSessionError::Io(m)) => return Err(SessionError::Io(m)),
+    }
     match store.set_session_alias(id, alias) {
         Ok(()) => Ok(format!("{id}  {alias}")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
