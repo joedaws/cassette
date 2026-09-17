@@ -1,9 +1,3 @@
-// Nothing outside this module's own tests calls these yet — a later task
-// wires `queue list --json` to build a `Listing` from the store and pass it
-// through `serde_json`. Until then every item here is dead code to clippy
-// in the non-test build. Remove this once that wiring lands.
-#![allow(dead_code)]
-
 //! The `--json` contract types and the body splitter.
 //!
 //! **Pure data. No `Store`, no `std::fs`, no locking.** That is what makes

@@ -214,20 +214,53 @@ fn main() -> io::Result<()> {
                 session,
                 status,
                 since,
-            } => match queue::view::list(&store, session, *status, since.as_deref()) {
-                Ok(msg) => exit_queue_ok(Some(msg)),
-                Err(e) => exit_queue_err(&e, args.json),
-            },
-            cli::QueueCmd::Show { id, session } => match queue::view::show(&store, session, id) {
-                Ok(msg) => exit_queue_ok(Some(msg)),
-                Err(e) => exit_queue_err(&e, args.json),
-            },
+            } => {
+                if args.json {
+                    match queue::view::list_view(&store, session, *status, since.as_deref()) {
+                        Ok(listing) => exit_queue_ok(Some(
+                            serde_json::to_string(&listing).expect("Listing always serializes"),
+                        )),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                } else {
+                    match queue::view::list(&store, session, *status, since.as_deref()) {
+                        Ok(msg) => exit_queue_ok(Some(msg)),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                }
+            }
+            cli::QueueCmd::Show { id, session } => {
+                if args.json {
+                    match queue::view::show_view(&store, session, id) {
+                        Ok(view) => exit_queue_ok(Some(
+                            serde_json::to_string(&view).expect("CassetteView always serializes"),
+                        )),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                } else {
+                    match queue::view::show(&store, session, id) {
+                        Ok(msg) => exit_queue_ok(Some(msg)),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                }
+            }
             // No writer identity: `next` reports an id, it attributes
             // nothing.
-            cli::QueueCmd::Next { session } => match queue::view::next(&store, session) {
-                Ok(msg) => exit_queue_ok(Some(msg)),
-                Err(e) => exit_queue_err(&e, args.json),
-            },
+            cli::QueueCmd::Next { session } => {
+                if args.json {
+                    match queue::view::next_view(&store, session) {
+                        Ok(view) => exit_queue_ok(Some(
+                            serde_json::to_string(&view).expect("CassetteView always serializes"),
+                        )),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                } else {
+                    match queue::view::next(&store, session) {
+                        Ok(msg) => exit_queue_ok(Some(msg)),
+                        Err(e) => exit_queue_err(&e, args.json),
+                    }
+                }
+            }
             // `close` attributes the closure and, when the acting writer is
             // an agent, needs its `Kind` to enforce the sticky-lock
             // boundary — see `queue::edit::close_permitted`.

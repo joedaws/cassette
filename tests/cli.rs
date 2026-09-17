@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::process::{Command, Output};
 
 fn bin() -> &'static str {
@@ -580,6 +581,138 @@ fn queue_list_and_show_need_no_writer_identity() {
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+#[test]
+fn queue_list_json_emits_the_contract_shape() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new", "--alias", "monday"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let mut child = Command::new(bin())
+        .args(["queue", "write", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"three whole words\n")
+        .expect("write");
+    assert!(child.wait().expect("wait").success());
+
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["session"]["id"], sid.as_str());
+    assert_eq!(v["session"]["alias"], "monday");
+    let c = &v["cassettes"][0];
+    assert_eq!(c["id"], cid.as_str());
+    assert_eq!(c["status"], "open");
+    assert_eq!(c["words"], 3, "words counts the body: {c}");
+    assert_eq!(c["busy"], false, "nobody holds it: {c}");
+    assert_eq!(c["sticky_lock"], serde_json::Value::Null);
+    assert_eq!(c["last_writer"]["name"], "joseph");
+    assert_eq!(c["last_writer"]["kind"], "human");
+    assert_eq!(
+        c["waiting_on"], "agent",
+        "a human wrote last, so the agent is up"
+    );
+    assert_eq!(
+        c["side_a"].as_str().expect("side_a").trim(),
+        "three whole words"
+    );
+    assert_eq!(c["side_b"], "");
+}
+
+#[test]
+fn queue_show_json_emits_the_same_cassette_as_show() {
+    // `show --json` reads and parses the same file `show`'s prose reads —
+    // the two must never disagree about which cassette they describe.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let out = Command::new(bin())
+        .args(["queue", "show", ID, "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(v["id"], ID);
+    assert_eq!(v["topic"], "gratitude");
+    assert_eq!(v["status"], "open");
+    assert_eq!(
+        v["side_a"].as_str().expect("side_a").trim(),
+        "hello from gratitude"
+    );
+    // The fixture's writer id ("w") is not in writers.toml, so both
+    // attributions must resolve to null rather than a guessed name.
+    assert_eq!(v["created_by"], serde_json::Value::Null);
+    assert_eq!(v["last_writer"], serde_json::Value::Null);
+    assert_eq!(v["waiting_on"], serde_json::Value::Null);
+}
+
+#[test]
+fn queue_next_json_emits_a_single_cassette_view_not_a_listing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let out = Command::new(bin())
+        .args(["queue", "next", "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(
+        v["id"], ID,
+        "a bare CassetteView, not {{\"cassettes\": [...]}}: {v}"
+    );
+    assert_eq!(v["busy"], false);
 }
 
 #[test]

@@ -11,8 +11,10 @@
 //! there is no `guard.write(`, no `atomic_write(`, no `std::fs::write(`,
 //! nothing.
 
+use crate::queue::json;
 use crate::queue::{QueueError, StatusFilter};
 use crate::store::meta::{CassetteMeta, Status};
+use crate::store::writers::Writers;
 use crate::store::{priority, Store, StoredCassette};
 
 /// Order `cassettes` (open before closed, then priority, then id — see
@@ -49,36 +51,34 @@ pub fn render_list(cassettes: &[StoredCassette], unreadable: usize) -> String {
     lines.join("\n")
 }
 
-/// `cassette queue list --session <ID> [--status open|closed|all] [--since <TIME>]`.
-///
-/// Filters the session's cassettes by status and, when given, by
-/// `updated_at >= since` (an unparseable `--since` is a usage error, not an
-/// empty result) before rendering. Takes no lock: a scan is many independent
-/// reads, and a torn read of one cassette mid-write is expected, not an
-/// error — see `show`.
-pub fn list(
-    store: &Store,
-    session: &str,
-    status: StatusFilter,
-    since: Option<&str>,
-) -> Result<String, QueueError> {
-    let since = match since {
-        Some(s) => Some(
+/// Parse a `--since` argument into the timestamp `filter_cassettes` compares
+/// against. An unparseable value is a usage error, not an empty result —
+/// shared by `list` and `list_view` so the two cannot disagree about what
+/// counts as a valid `--since`.
+fn parse_since(since: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, QueueError> {
+    match since {
+        Some(s) => Ok(Some(
             chrono::DateTime::parse_from_rfc3339(s)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .map_err(|_| {
                     QueueError::Usage(format!("invalid --since '{s}': expected RFC3339"))
                 })?,
-        ),
-        None => None,
-    };
+        )),
+        None => Ok(None),
+    }
+}
 
-    let scan = store
-        .scan_session(session)
-        .map_err(|e| QueueError::Io(format!("cannot scan session '{session}': {e}")))?;
-
-    let filtered: Vec<StoredCassette> = scan
-        .cassettes
+/// Filter `cassettes` by status and, when given, by `updated_at >= since`.
+/// The single filter behind both `list` and `list_view`: a later change to
+/// what "in scope" means (sticky-lock filtering, say) lands here once and
+/// both the prose and JSON forms of `queue list` pick it up together — they
+/// cannot drift apart on which cassettes they show.
+fn filter_cassettes(
+    cassettes: Vec<StoredCassette>,
+    status: StatusFilter,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<StoredCassette> {
+    cassettes
         .into_iter()
         .filter(|c| match status {
             StatusFilter::All => true,
@@ -94,9 +94,123 @@ pub fn list(
                 .map(|dt| dt.with_timezone(&chrono::Utc) >= since)
                 .unwrap_or(true),
         })
-        .collect();
+        .collect()
+}
 
-    Ok(render_list(&filtered, scan.unreadable))
+/// Scan and filter a session's cassettes — the shared body of `list` and
+/// `list_view`. Takes no lock: a scan is many independent reads, and a torn
+/// read of one cassette mid-write is expected, not an error — see `show`.
+fn scan_filtered(
+    store: &Store,
+    session: &str,
+    status: StatusFilter,
+    since: Option<&str>,
+) -> Result<(Vec<StoredCassette>, usize), QueueError> {
+    let since = parse_since(since)?;
+    let scan = store
+        .scan_session(session)
+        .map_err(|e| QueueError::Io(format!("cannot scan session '{session}': {e}")))?;
+    Ok((
+        filter_cassettes(scan.cassettes, status, since),
+        scan.unreadable,
+    ))
+}
+
+/// `cassette queue list --session <ID> [--status open|closed|all] [--since <TIME>]`.
+///
+/// Filters the session's cassettes by status and, when given, by
+/// `updated_at >= since` (an unparseable `--since` is a usage error, not an
+/// empty result) before rendering. Takes no lock: a scan is many independent
+/// reads, and a torn read of one cassette mid-write is expected, not an
+/// error — see `show`.
+pub fn list(
+    store: &Store,
+    session: &str,
+    status: StatusFilter,
+    since: Option<&str>,
+) -> Result<String, QueueError> {
+    let (filtered, unreadable) = scan_filtered(store, session, status, since)?;
+    Ok(render_list(&filtered, unreadable))
+}
+
+/// The `--json` sibling of `list`: same scan, same `filter_cassettes`, same
+/// queue order — see `scan_filtered`. Reads the writer registry once for the
+/// whole listing rather than once per cassette.
+pub fn list_view(
+    store: &Store,
+    session: &str,
+    status: StatusFilter,
+    since: Option<&str>,
+) -> Result<json::Listing, QueueError> {
+    let (filtered, _unreadable) = scan_filtered(store, session, status, since)?;
+
+    let writers = store
+        .writers()
+        .map_err(|e| QueueError::Io(format!("cannot read writer registry: {e}")))?;
+    let session_meta = store
+        .session_meta(session)
+        .map_err(|e| QueueError::Io(format!("cannot read session '{session}': {e}")))?;
+
+    let cassettes = filtered
+        .iter()
+        .map(|c| build_view(store, session, c, &writers))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(json::Listing {
+        session: json::SessionRef {
+            id: session.to_string(),
+            alias: session_meta.alias,
+        },
+        cassettes,
+    })
+}
+
+/// Assemble a `CassetteView` from a `StoredCassette` already read from the
+/// store. `writers` is read once by the caller (`list_view`, `next_view`,
+/// `show_view`) and passed in here rather than re-read per cassette.
+///
+/// `busy` comes from `Store::is_free` negated — the non-stamping probe, never
+/// a `Store::lock`/`LockGuard`, so building a view never writes an anchor
+/// file that didn't already exist. See the module doc.
+pub fn build_view(
+    store: &Store,
+    session: &str,
+    c: &StoredCassette,
+    writers: &Writers,
+) -> Result<json::CassetteView, QueueError> {
+    let busy = !store
+        .is_free(session, &c.meta.id)
+        .map_err(|e| QueueError::Io(format!("cannot check lock on '{}': {e}", c.meta.id)))?;
+
+    let resolve = |id: &str| -> Option<json::WriterRef> {
+        writers.writers.get(id).map(|w| json::WriterRef {
+            name: w.name.clone(),
+            kind: w.kind.as_str(),
+        })
+    };
+
+    let created_by = resolve(&c.meta.created_by);
+    let last_writer = resolve(&c.meta.last_writer);
+    let sticky_lock = c.meta.locked_by.as_deref().and_then(resolve);
+    let waiting_on = json::waiting_on(last_writer.as_ref());
+    let (side_a, side_b) = json::split_sides(&c.body);
+    let words = json::count_words(&side_a, &side_b);
+
+    Ok(json::CassetteView {
+        id: c.meta.id.clone(),
+        topic: c.meta.topic.clone(),
+        priority: c.meta.priority,
+        status: c.meta.status.as_str(),
+        words,
+        busy,
+        sticky_lock,
+        created_by,
+        last_writer,
+        waiting_on,
+        updated_at: c.meta.updated_at.clone(),
+        side_a,
+        side_b,
+    })
 }
 
 /// `cassette queue show <ID> --session <ID>`: the cassette's frontmatter and
@@ -120,6 +234,93 @@ pub fn show(store: &Store, session: &str, id: &str) -> Result<String, QueueError
     std::fs::read_to_string(&path).map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))
 }
 
+/// The `--json` sibling of `show`: reads and parses the same file `show`
+/// reads, but as a `CassetteView` rather than raw text. `show`'s prose stays
+/// the untouched file contents — see `show`'s doc comment — this is a
+/// separate read, not a re-rendering of it.
+pub fn show_view(store: &Store, session: &str, id: &str) -> Result<json::CassetteView, QueueError> {
+    let path = store
+        .cassette_path(session, id)
+        .map_err(|e| QueueError::Io(format!("cannot look up '{id}': {e}")))?
+        .ok_or_else(|| QueueError::Usage(format!("no cassette '{id}' in session '{session}'")))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+    let (meta, body) = crate::store::meta::split(&content);
+    let meta = meta.ok_or_else(|| {
+        QueueError::Io(format!("cannot parse frontmatter for '{id}' at {path:?}"))
+    })?;
+    let stored = StoredCassette {
+        path,
+        meta,
+        body: body.to_string(),
+    };
+
+    let writers = store
+        .writers()
+        .map_err(|e| QueueError::Io(format!("cannot read writer registry: {e}")))?;
+    build_view(store, session, &stored, &writers)
+}
+
+/// The session's open cassettes, in queue order — the candidate list `next`
+/// and `next_view` both walk. The single shared list behind both: a later
+/// change to what counts as a candidate (sticky-lock filtering, say) lands
+/// here once, so the id `queue next` prints and the cassette `queue next
+/// --json` describes can never be two different cassettes.
+fn open_candidates(store: &Store, session: &str) -> Result<Vec<StoredCassette>, QueueError> {
+    let scan = store
+        .scan_session(session)
+        .map_err(|e| QueueError::Io(format!("cannot scan session '{session}': {e}")))?;
+
+    let mut open: Vec<StoredCassette> = scan
+        .cassettes
+        .into_iter()
+        .filter(|c| c.meta.status == Status::Open)
+        .collect();
+
+    if open.is_empty() {
+        return Err(QueueError::Empty(format!(
+            "no open cassettes in session '{session}'"
+        )));
+    }
+
+    let mut metas: Vec<CassetteMeta> = open.iter().map(|c| c.meta.clone()).collect();
+    priority::queue_order(&mut metas);
+    let order: Vec<&str> = metas.iter().map(|m| m.id.as_str()).collect();
+    open.sort_by_key(|c| {
+        order
+            .iter()
+            .position(|id| *id == c.meta.id)
+            .unwrap_or(usize::MAX)
+    });
+
+    Ok(open)
+}
+
+/// The first of `candidates` whose lock `Store::is_free` reports free, or
+/// `None` when every one is currently held. Shared by `next` and
+/// `next_view` for the same reason as `open_candidates`.
+fn first_free<'a>(
+    store: &Store,
+    session: &str,
+    candidates: &'a [StoredCassette],
+) -> Result<Option<&'a StoredCassette>, QueueError> {
+    for c in candidates {
+        let free = store
+            .is_free(session, &c.meta.id)
+            .map_err(|e| QueueError::Io(format!("cannot check lock on '{}': {e}", c.meta.id)))?;
+        if free {
+            return Ok(Some(c));
+        }
+    }
+    Ok(None)
+}
+
+/// `every open cassette is locked` — `next` and `next_view`'s shared `Busy`
+/// message, so the two forms cannot report the outcome differently.
+fn busy_err() -> QueueError {
+    QueueError::Busy("every open cassette is being written — try again shortly".to_string())
+}
+
 /// `cassette queue next --session <ID>`: the id of the next cassette a
 /// writer should take.
 ///
@@ -138,37 +339,25 @@ pub fn show(store: &Store, session: &str, id: &str) -> Result<String, QueueError
 ///   wait and retry)
 /// - no open cassettes at all → `Empty` (exit 5, idle or enqueue)
 pub fn next(store: &Store, session: &str) -> Result<String, QueueError> {
-    let scan = store
-        .scan_session(session)
-        .map_err(|e| QueueError::Io(format!("cannot scan session '{session}': {e}")))?;
-
-    let mut open: Vec<CassetteMeta> = scan
-        .cassettes
-        .into_iter()
-        .map(|c| c.meta)
-        .filter(|m| m.status == Status::Open)
-        .collect();
-
-    if open.is_empty() {
-        return Err(QueueError::Empty(format!(
-            "no open cassettes in session '{session}'"
-        )));
+    let candidates = open_candidates(store, session)?;
+    match first_free(store, session, &candidates)? {
+        Some(c) => Ok(c.meta.id.clone()),
+        None => Err(busy_err()),
     }
+}
 
-    priority::queue_order(&mut open);
+/// The `--json` sibling of `next`: walks the exact same candidate list
+/// (`open_candidates`) and picks the same winner (`first_free`) as `next`,
+/// then shapes it as a `CassetteView` instead of a bare id — never a
+/// `Listing`, since there is exactly one cassette to report.
+pub fn next_view(store: &Store, session: &str) -> Result<json::CassetteView, QueueError> {
+    let candidates = open_candidates(store, session)?;
+    let winner = first_free(store, session, &candidates)?.ok_or_else(busy_err)?;
 
-    for m in &open {
-        let free = store
-            .is_free(session, &m.id)
-            .map_err(|e| QueueError::Io(format!("cannot check lock on '{}': {e}", m.id)))?;
-        if free {
-            return Ok(m.id.clone());
-        }
-    }
-
-    Err(QueueError::Busy(
-        "every open cassette is being written — try again shortly".to_string(),
-    ))
+    let writers = store
+        .writers()
+        .map_err(|e| QueueError::Io(format!("cannot read writer registry: {e}")))?;
+    build_view(store, session, winner, &writers)
 }
 
 #[cfg(test)]
