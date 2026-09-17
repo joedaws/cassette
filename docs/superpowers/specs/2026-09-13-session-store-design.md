@@ -605,7 +605,15 @@ phases, each independently testable and each leaving the tool working.
      `locked_by` already exists in `CassetteMeta`. The arm is unreachable until 4c can
      set the field, so 4c adds commands to an already-enforced rule.
    - **4c — JSON and the sticky lock.** The `--json` contract including the derived
-     `waiting_on` / `busy` / `words` fields, and `queue lock` / `unlock`.
+     `waiting_on` / `busy` / `words` fields, and `queue lock` / `unlock`. Spec:
+     `2026-09-16-json-and-sticky-lock-design.md`, authoritative for this sub-phase.
+
+     4c also closes two gaps this document's own command surface implies but no phase
+     delivered: `queue next` must skip cassettes carrying a sticky lock (stated under
+     "`queue next` is the turn-taking primitive" above, never implemented), and the sticky
+     lock must bind on an agent's `queue write`, not only on `close`. A third gap —
+     `queue write`'s `--side` / `--append` / `--replace` flags, listed in the CLI surface
+     and never implemented — is deferred to Phase 5, where the TUI makes sides real.
 
    **`cassette sessions` — the interactive picker ("15 recent, 'a' = all") — moves to
    Phase 5.** It is an interactive UI, not a CLI command, and belongs with the TUI work
