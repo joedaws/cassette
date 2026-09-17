@@ -178,7 +178,7 @@ fn main() -> io::Result<()> {
             } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
                 match queue::edit::new(
@@ -200,7 +200,7 @@ fn main() -> io::Result<()> {
             cli::QueueCmd::Write { id, session } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 match queue::write(&store, id, session, &who_name, writer_source) {
                     Ok(()) => exit_queue_ok(None),
@@ -238,7 +238,7 @@ fn main() -> io::Result<()> {
             } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 match queue::edit::close(
                     &store,
@@ -258,7 +258,7 @@ fn main() -> io::Result<()> {
             cli::QueueCmd::Reopen { id, session } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 let max_open = cfg.max_open.unwrap_or(store::MAX_OPEN);
                 match queue::edit::reopen(&store, session, id, &who_name, writer_source, max_open) {
@@ -276,7 +276,7 @@ fn main() -> io::Result<()> {
             } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
-                    Err(msg) => die_with(2, &msg),
+                    Err(msg) => exit_usage(&msg, args.json),
                 };
                 match queue::edit::move_cassette(
                     &store,
@@ -1169,19 +1169,36 @@ fn exit_queue_ok(output: Option<String>) -> ! {
     std::process::exit(0)
 }
 
-/// Exit on a failed queue command, in whichever form the caller asked for.
+/// Exit with a message and code, in whichever form the caller asked for.
+/// The one place the `{"error","code"}` envelope's shape is built — both
+/// `exit_queue_err` and `exit_usage` render through here, so there cannot be
+/// a second, subtly different `serde_json::json!` call to drift out of sync.
 ///
 /// The JSON envelope goes to **stdout**, not stderr: an agent that redirects
 /// stderr to a log must still receive a parseable failure on the channel it
 /// is reading. Prose keeps going to stderr, where it always has.
-fn exit_queue_err(e: &queue::QueueError, json: bool) -> ! {
-    let code = queue::exit_code(e);
+fn exit_with(code: i32, msg: &str, json: bool) -> ! {
     if json {
-        let envelope = serde_json::json!({ "error": queue::message(e), "code": code });
+        let envelope = serde_json::json!({ "error": msg, "code": code });
         println!("{envelope}");
         std::process::exit(code);
     }
-    die_with(code, queue::message(e))
+    die_with(code, msg)
+}
+
+/// Exit on a failed queue command, in whichever form the caller asked for.
+fn exit_queue_err(e: &queue::QueueError, json: bool) -> ! {
+    exit_with(queue::exit_code(e), queue::message(e), json)
+}
+
+/// Exit 2 for a bad invocation that never reaches a `QueueError` — today
+/// only `resolve_writer_name`'s two failures (no `--writer`, no usable
+/// `$USER`/`$CASSETTE_WRITER`), at its five call sites. The spec's `--json`
+/// contract is unconditional — any command that fails emits the envelope —
+/// so these route through `exit_with` exactly like `exit_queue_err` does,
+/// rather than `die_with` straight to stderr prose regardless of `--json`.
+fn exit_usage(msg: &str, json: bool) -> ! {
+    exit_with(2, msg, json)
 }
 
 /// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.

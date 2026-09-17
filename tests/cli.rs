@@ -1312,3 +1312,53 @@ fn without_json_errors_stay_prose_on_stderr() {
     assert!(out.stdout.is_empty(), "no JSON without --json");
     assert!(stderr(&out).contains("cassette:"), "{}", stderr(&out));
 }
+
+#[test]
+fn json_covers_a_missing_writer_identity_before_any_queue_error_exists() {
+    // `resolve_writer_name`'s own failure (no `--writer`, no usable $USER or
+    // $CASSETTE_WRITER) is not a `QueueError` — it happens in `main.rs`
+    // before any queue command runs — so `exit_queue_err` alone cannot
+    // reach it. Pinned here so it doesn't regress back to prose-only under
+    // `--json`; see `a_writer_name_is_required_when_user_is_unset` for the
+    // non-JSON version of the same gap.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+
+    let out = Command::new(bin())
+        .args([
+            "queue",
+            "write",
+            "01K5GR7T2M9WPD0000000000AB",
+            "--session",
+            &sid,
+            "--json",
+        ])
+        .env_remove("USER")
+        .env("CASSETTE_DATA_DIR", &root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).is_empty(),
+        "no prose on stderr under --json: {}",
+        stderr(&out)
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("--writer"),
+        "the message must name the fix: {v}"
+    );
+}
