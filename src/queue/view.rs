@@ -252,7 +252,10 @@ pub fn show_view(store: &Store, session: &str, id: &str) -> Result<json::Cassett
         .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
     let (meta, body) = crate::store::meta::split(&content);
     let meta = meta.ok_or_else(|| {
-        QueueError::Io(format!("cannot parse frontmatter for '{id}' at {path:?}"))
+        QueueError::Io(format!(
+            "cannot parse frontmatter for '{id}' at {}",
+            path.display()
+        ))
     })?;
     let stored = StoredCassette {
         path,
@@ -536,6 +539,30 @@ mod tests {
         match show(&store, "nope", "nope") {
             Err(QueueError::Usage(m)) => assert!(m.contains("nope"), "{m}"),
             other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn show_view_on_a_cassette_with_no_frontmatter_names_the_path_unescaped() {
+        // Reachable by hand-editing (or otherwise damaging) a cassette file
+        // down to a body with no frontmatter block at all — `store::meta::split`
+        // then returns `None` for `meta`, same as garbled frontmatter would.
+        // The failure message embeds the path and must read as a plain path,
+        // not a `{:?}`-escaped `PathBuf` (which would put backslash-escaped
+        // quotes around it inside the `--json` error string).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let id = "01K5GR7T2M9WPD0000000000CD";
+        let path = store.cassettes_dir(&sid).join(format!("broken-{id}.md"));
+        std::fs::write(&path, "no frontmatter here\n").expect("write");
+
+        match show_view(&store, &sid, id) {
+            Err(QueueError::Io(m)) => {
+                assert!(m.contains(&path.display().to_string()), "{m}");
+                assert!(!m.contains("\\\""), "path must not be {{:?}}-escaped: {m}");
+            }
+            other => panic!("expected Io, got {other:?}"),
         }
     }
 

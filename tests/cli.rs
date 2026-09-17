@@ -1781,3 +1781,68 @@ fn writer_register_kind_mismatch_without_json_still_prints_prose() {
     assert!(out.stdout.is_empty(), "no JSON without --json");
     assert!(stderr(&out).contains("cassette:"), "{}", stderr(&out));
 }
+
+#[test]
+fn malformed_config_toml_emits_the_json_envelope_on_every_command() {
+    // `config::load_config()` runs before any subcommand dispatch, so a
+    // broken config.toml used to print TOML-parser prose (plus "try
+    // 'cassette --help'") to stderr and exit 2 with an empty stdout — even
+    // under --json, on every command, not just `queue`. Spec decision 2
+    // ("Any command invoked with --json emits {"error","code"} on failure")
+    // and the README's identical claim make no exception for config load.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_home = dir.path().join("xdg-config");
+    std::fs::create_dir_all(config_home.join("cassette")).expect("mkdir");
+    std::fs::write(
+        config_home.join("cassette").join("config.toml"),
+        "this is not valid toml [[[\n",
+    )
+    .expect("write config");
+    let root = dir.path().join("store");
+
+    let out = Command::new(bin())
+        .args(["session", "new", "--json"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).is_empty(),
+        "no prose on stderr under --json: {}",
+        stderr(&out)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(v["code"], 2, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("invalid config"),
+        "{v}"
+    );
+}
+
+#[test]
+fn malformed_config_toml_without_json_still_prints_prose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_home = dir.path().join("xdg-config");
+    std::fs::create_dir_all(config_home.join("cassette")).expect("mkdir");
+    std::fs::write(
+        config_home.join("cassette").join("config.toml"),
+        "this is not valid toml [[[\n",
+    )
+    .expect("write config");
+    let root = dir.path().join("store");
+
+    let out = Command::new(bin())
+        .args(["session", "new"])
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "no JSON without --json");
+    assert!(stderr(&out).contains("invalid config"), "{}", stderr(&out));
+}

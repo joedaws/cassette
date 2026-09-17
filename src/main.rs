@@ -124,7 +124,7 @@ fn restore_terminal() {
 
 fn main() -> io::Result<()> {
     let args = cli::parse();
-    let cfg = config::load_config().unwrap_or_else(|e| die(&e));
+    let cfg = config::load_config().unwrap_or_else(|e| exit_with(2, &e, args.json));
 
     if args.list_themes {
         print_themes(&cfg);
@@ -156,7 +156,7 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(cmd) = &args.queue_cmd {
-        let store = store::Store::new(store_root());
+        let store = store::Store::new(store_root(args.json));
         // Before any command touches the store: `--session` must be a
         // well-formed ULID naming a session that exists. Done here, once,
         // against `QueueCmd::session()` rather than inside each command —
@@ -1097,7 +1097,7 @@ fn die(msg: &str) -> ! {
 /// commands do (spec decision 2 names `session`/`writer` explicitly) — exit
 /// codes are unchanged, only the channel and format for a failure.
 fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>, json: bool) -> ! {
-    let store = store::Store::new(store_root());
+    let store = store::Store::new(store_root(json));
     match cmd {
         cli::WriterCmd::Register { name, kind } => match writer::register(&store, name, *kind) {
             Ok(msg) => {
@@ -1148,7 +1148,7 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>, json: bool) -
 /// commands do (spec decision 2 names `session`/`writer` explicitly) — exit
 /// codes are unchanged, only the channel and format for a failure.
 fn run_session_cmd(cmd: &cli::SessionCmd, json: bool) -> ! {
-    let store = store::Store::new(store_root());
+    let store = store::Store::new(store_root(json));
     match cmd {
         cli::SessionCmd::New { alias } => match session::new_session(&store, alias.as_deref()) {
             Ok(id) => {
@@ -1274,12 +1274,17 @@ fn exit_usage(msg: &str, json: bool) -> ! {
 /// `~/.local/share/cassette`. Phase 6 adds a `data_dir` config key beside it;
 /// the existing `notes_dir` key points at the old flat notes folder and is
 /// deliberately NOT consulted here.
-fn store_root() -> PathBuf {
+///
+/// Failing to determine a data dir at all is an I/O failure the caller cannot
+/// fix by retrying with different arguments (README's exit-1 rule), not a
+/// usage error — and, like every other failure under `--json`, it must still
+/// emit the `{"error","code"}` envelope rather than bare stderr prose.
+fn store_root(json: bool) -> PathBuf {
     std::env::var_os("CASSETTE_DATA_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(store::Store::default_root)
-        .unwrap_or_else(|| die("cannot determine a data dir"))
+        .unwrap_or_else(|| exit_with(1, "cannot determine a data dir", json))
 }
 
 #[cfg(test)]

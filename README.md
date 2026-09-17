@@ -348,11 +348,26 @@ on `code`: exit 2 says "check what you passed in and retry"; exit 1 says
 
 ### Machine-readable output (`--json`)
 
-Add `--json` to any `queue`, `session`, or `writer` invocation. `queue list`,
-`queue show`, and `queue next` emit the full contract on success; every other
-mutating command (`new`, `write`, `close`, `reopen`, `move`, `lock`, `unlock`)
-prints nothing extra when it succeeds — its exit code is still 0, the same as
-without `--json`. **Any** command, on failure, emits a one-line
+Add `--json` to any `queue`, `session`, or `writer` invocation. On success the
+three read-only queue commands differ in shape: `queue list --json` wraps its
+results in the full `{session, cassettes, unreadable}` contract shown below,
+while `queue show --json` and `queue next --json` each emit a **bare cassette
+object** — the same shape as one entry of `list`'s `cassettes` array, not
+wrapped in a `{session, cassettes, unreadable}` envelope (see the example
+below). Don't script `.cassettes[0]` against `show`/`next` output — there is
+no `cassettes` key there.
+
+`session list --json`, `writer list --json`, and `writer whoami --json` emit
+the same **prose** those commands always have — no promise is broken (the
+JSON-success contract above only names the three queue reads), but
+`cassette session list --json | jq` will fail to parse, so don't expect JSON
+from them.
+
+Every mutating command (`queue new`, `write`, `close`, `reopen`, `move`,
+`lock`, `unlock`, and the `session`/`writer` commands) keeps the same exit
+code and successful output it has without `--json`: `queue new` still prints
+the new cassette's bare ULID and nothing else, and every other mutating
+command prints nothing extra. **Any** command, on failure, emits a one-line
 `{"error", "code"}` envelope to stdout instead of the usual stderr prose, so
 an agent reading only stdout still gets a parseable failure:
 
@@ -367,6 +382,18 @@ cassette, captured from a live run):
 ```
 $ cassette queue list --session 01M2QSSJG2CG8XQYG7PVH3E59H --json
 {"session":{"id":"01M2QSSJG2CG8XQYG7PVH3E59H","alias":"demo"},"cassettes":[{"id":"01M2QSSJG751F2KCGP17K9GQVY","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T13:44:43Z","side_a":"writing about the morning","side_b":""}],"unreadable":0}
+```
+
+`queue show --json` and `queue next --json` are bare cassette objects, not
+wrapped in `{session, cassettes, unreadable}` (a different demo session,
+captured from a live run):
+
+```
+$ cassette queue show 01M2RFZEC6QQXWNRS950HKSBP0 --session 01M2RFZEC00N0WPKKRBBVZTD26 --json
+{"id":"01M2RFZEC6QQXWNRS950HKSBP0","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T20:12:24Z","side_a":"writing about the morning\n","side_b":""}
+
+$ cassette queue next --session 01M2RFZEC00N0WPKKRBBVZTD26 --json
+{"id":"01M2RFZEC6QQXWNRS950HKSBP0","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T20:12:24Z","side_a":"writing about the morning\n","side_b":""}
 ```
 
 `unreadable` counts cassette files the store could not parse — the same count
