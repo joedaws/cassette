@@ -266,11 +266,20 @@ pub fn show_view(store: &Store, session: &str, id: &str) -> Result<json::Cassett
     build_view(store, session, &stored, &writers)
 }
 
-/// The session's open cassettes, in queue order — the candidate list `next`
-/// and `next_view` both walk. The single shared list behind both: a later
-/// change to what counts as a candidate (sticky-lock filtering, say) lands
-/// here once, so the id `queue next` prints and the cassette `queue next
-/// --json` describes can never be two different cassettes.
+/// The session's open, not-sticky-locked cassettes, in queue order — the
+/// candidate list `next` and `next_view` both walk. The single shared list
+/// behind both: a later change to what counts as a candidate lands here once,
+/// so the id `queue next` prints and the cassette `queue next --json`
+/// describes can never be two different cassettes.
+///
+/// Filters `locked_by.is_none()` alongside `Status::Open`, before any lock is
+/// ever probed: the parent spec defines `next` as "the highest-priority open
+/// cassette carrying no sticky lock and no live flock", and a sticky-locked
+/// cassette should not cost a probe syscall in `first_free` either. Filtering
+/// here also means a session where every open cassette is sticky-locked falls
+/// straight into the `open.is_empty()` branch below and reports `Empty` (exit
+/// 5), never `Busy` (exit 3) — a sticky lock is cleared by a human, never by
+/// waiting, so telling an agent to retry would spin it forever.
 fn open_candidates(store: &Store, session: &str) -> Result<Vec<StoredCassette>, QueueError> {
     let scan = store
         .scan_session(session)
@@ -279,7 +288,7 @@ fn open_candidates(store: &Store, session: &str) -> Result<Vec<StoredCassette>, 
     let mut open: Vec<StoredCassette> = scan
         .cassettes
         .into_iter()
-        .filter(|c| c.meta.status == Status::Open)
+        .filter(|c| c.meta.status == Status::Open && c.meta.locked_by.is_none())
         .collect();
 
     if open.is_empty() {
@@ -625,6 +634,50 @@ mod tests {
         match next(&store, &sid) {
             Err(QueueError::Busy(_)) => {}
             other => panic!("expected Busy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn next_skips_a_sticky_locked_cassette() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+
+        // The HIGHER-priority cassette is the claimed one, so a `next` that
+        // ignored locked_by would return it — this test fails loudly rather
+        // than passing by luck of ordering.
+        let mut claimed = meta("aaa00000000000000000000000", 10, Status::Open);
+        claimed.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
+        store.add_cassette(&sid, &claimed, "").expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("bbb00000000000000000000000", 20, Status::Open),
+                "",
+            )
+            .expect("add");
+
+        assert_eq!(
+            next(&store, &sid).expect("a free cassette exists"),
+            "bbb00000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn a_queue_of_only_sticky_locked_cassettes_is_empty_not_busy() {
+        // Exit 5, not 3. Busy means "another process is writing it right now —
+        // retry shortly". A sticky lock is cleared by a human, never by
+        // waiting, so reporting Busy would spin an agent's retry loop forever.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let mut only = meta("aaa00000000000000000000000", 10, Status::Open);
+        only.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
+        store.add_cassette(&sid, &only, "").expect("add");
+
+        match next(&store, &sid) {
+            Err(QueueError::Empty(_)) => {}
+            other => panic!("expected Empty, got {other:?}"),
         }
     }
 }

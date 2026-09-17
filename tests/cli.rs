@@ -1455,12 +1455,6 @@ fn queue_move_requires_exactly_one_of_before_or_after() {
     assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
 }
 
-// This is the brief's `queue_lock_then_an_agent_is_refused_and_a_human_clears_it`
-// with its middle assertion (an agent's `queue write` on a sticky-locked
-// cassette exiting 4) split out to `queue_write_is_blocked_by_a_sticky_lock`
-// below, which Task 5 fills in — `queue write`'s own permission check does
-// not exist yet, so keeping that assertion here would fail until Task 5
-// lands. Splitting keeps every commit in this task green.
 #[test]
 fn queue_lock_then_an_agent_is_refused_and_a_human_clears_it() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1514,6 +1508,82 @@ fn queue_lock_then_an_agent_is_refused_and_a_human_clears_it() {
         .output()
         .expect("spawn");
     assert_eq!(cleared.status.code(), Some(0), "{}", stderr(&cleared));
+}
+
+#[test]
+fn queue_write_is_blocked_by_a_sticky_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let reg = Command::new(bin())
+        .args(["writer", "register", "--name", "bot", "--kind", "agent"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(reg.status.code(), Some(0), "{}", stderr(&reg));
+
+    let locked = Command::new(bin())
+        .args(["queue", "lock", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(locked.status.code(), Some(0), "{}", stderr(&locked));
+
+    // An agent writing over a sticky lock is exit 4, not 3: nobody is
+    // actively holding the advisory flock, but the sticky claim still binds.
+    let mut child = Command::new(bin())
+        .args(["--writer", "bot", "queue", "write", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"agent prose\n")
+        .expect("write");
+    let refused = child.wait_with_output().expect("wait");
+    assert_eq!(refused.status.code(), Some(4), "{}", stderr(&refused));
+
+    // A human may still write over the same sticky lock.
+    let mut child = Command::new(bin())
+        .args(["queue", "write", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"human prose\n")
+        .expect("write");
+    let allowed = child.wait_with_output().expect("wait");
+    assert_eq!(allowed.status.code(), Some(0), "{}", stderr(&allowed));
 }
 
 #[test]

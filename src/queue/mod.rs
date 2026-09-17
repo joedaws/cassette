@@ -94,16 +94,15 @@ pub enum QueueError {
     /// (over)full. Checked before any priority is computed, so a full queue
     /// is never charged a renumber.
     Full(String),
-    /// `queue close` found the cassette's `locked_by` set and the acting
-    /// writer is an agent. Exit 4, distinct from `Busy`'s exit 3: `Busy`
-    /// means another writer is actively holding the advisory `flock` right
-    /// now (nobody, human or agent, may close it); `Sticky` means nobody is
-    /// writing it at this instant but a writer has claimed it via the sticky
-    /// `locked_by` frontmatter field, and only a human may close over that
-    /// claim. Nothing in 4b ever sets `locked_by` — `queue lock`/`unlock`
-    /// arrive in 4c — so this arm is unreachable today; it is implemented
-    /// now so the rule is already enforced before the command that can
-    /// trigger it exists.
+    /// `queue close` or `queue write` found the cassette's `locked_by` set
+    /// and the acting writer is an agent; also `queue lock` finding the
+    /// cassette already claimed by a different writer. Exit 4, distinct from
+    /// `Busy`'s exit 3: `Busy` means another writer is actively holding the
+    /// advisory `flock` right now (nobody, human or agent, may act on it);
+    /// `Sticky` means nobody is writing it at this instant but a writer has
+    /// claimed it via the sticky `locked_by` frontmatter field, and only a
+    /// human may close or write over that claim (or, for `lock`, only a human
+    /// may clear someone else's claim — see `queue unlock`).
     Sticky(String),
     /// Anything else. Exit 1.
     Io(String),

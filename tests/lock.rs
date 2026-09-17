@@ -410,3 +410,62 @@ fn queue_close_on_a_held_cassette_exits_three_and_names_the_holder() {
     let done = winner.wait().expect("wait winner");
     assert!(done.success(), "{:?}", done);
 }
+
+#[test]
+fn queue_list_json_reports_busy_true_for_a_live_held_cassette() {
+    // Same technique as the two tests above: `contend` proves — by
+    // elimination, never by assumption — that the winner is holding `ID`'s
+    // lock at the moment `queue list --json` runs against it. A bare
+    // `spawn_write` would not: `queue write` emits nothing after acquiring,
+    // so a successful stdin write only proves the pipe buffer accepted
+    // bytes, not that the child ever reached `store.lock`. See the module
+    // doc and the comment on `contend`.
+    let (_d, root) = fixture();
+    let (loser_out, mut winner) = contend(&root, ID);
+    assert_eq!(
+        loser_out.status.code(),
+        Some(3),
+        "exactly one racing writer must lose, which proves the other now \
+         holds '{ID}': {:?}",
+        loser_out
+    );
+
+    let out = Command::new(bin())
+        .args(["queue", "list", "--session", SESSION, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn list --json");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("queue list --json must emit valid JSON");
+    let cassettes = v["cassettes"].as_array().expect("cassettes array");
+    let held = cassettes
+        .iter()
+        .find(|c| c["id"] == ID)
+        .expect("the held cassette must be listed");
+    assert_eq!(
+        held["busy"],
+        serde_json::json!(true),
+        "a live holder must be reported busy: {held}"
+    );
+    let other = cassettes
+        .iter()
+        .find(|c| c["id"] == SECOND_ID)
+        .expect("the other cassette must be listed");
+    assert_eq!(
+        other["busy"],
+        serde_json::json!(false),
+        "an unheld cassette must not be reported busy: {other}"
+    );
+
+    // Release the holder the same way every other test here does.
+    drop(winner.stdin.take());
+    let done = winner.wait().expect("wait winner");
+    assert!(done.success(), "{:?}", done);
+}
