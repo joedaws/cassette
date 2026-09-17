@@ -50,10 +50,16 @@ pub struct CassetteView {
 }
 
 /// The top-level `--json` payload for `queue list`.
+///
+/// `unreadable` is the same count `render_list`'s prose `N unreadable` line
+/// carries, from the same `SessionScan` — a cassette file the store cannot
+/// parse must not silently vanish from the machine-readable listing any more
+/// than from the human one, which already counts rather than hides it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Listing {
     pub session: SessionRef,
     pub cassettes: Vec<CassetteView>,
+    pub unreadable: usize,
 }
 
 /// Split a cassette body into `(side_a, side_b)`.

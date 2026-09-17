@@ -136,13 +136,17 @@ pub fn list(
 /// The `--json` sibling of `list`: same scan, same `filter_cassettes`, same
 /// queue order — see `scan_filtered`. Reads the writer registry once for the
 /// whole listing rather than once per cassette.
+///
+/// `unreadable` comes from the same `SessionScan` `list`'s prose `render_list`
+/// counts into its trailing `N unreadable` line — one source, so the two
+/// forms cannot disagree about how much of the store is damaged.
 pub fn list_view(
     store: &Store,
     session: &str,
     status: StatusFilter,
     since: Option<&str>,
 ) -> Result<json::Listing, QueueError> {
-    let (filtered, _unreadable) = scan_filtered(store, session, status, since)?;
+    let (filtered, unreadable) = scan_filtered(store, session, status, since)?;
 
     let writers = store
         .writers()
@@ -162,6 +166,7 @@ pub fn list_view(
             alias: session_meta.alias,
         },
         cassettes,
+        unreadable,
     })
 }
 

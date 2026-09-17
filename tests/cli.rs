@@ -631,6 +631,7 @@ fn queue_list_json_emits_the_contract_shape() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
     assert_eq!(v["session"]["id"], sid.as_str());
     assert_eq!(v["session"]["alias"], "monday");
+    assert_eq!(v["unreadable"], 0, "nothing damaged in this store: {v}");
     let c = &v["cassettes"][0];
     assert_eq!(c["id"], cid.as_str());
     assert_eq!(c["status"], "open");
@@ -648,6 +649,55 @@ fn queue_list_json_emits_the_contract_shape() {
         "three whole words"
     );
     assert_eq!(c["side_b"], "");
+}
+
+#[test]
+fn queue_list_json_counts_unreadable_cassettes_like_the_prose_listing_does() {
+    // A damaged cassette must not silently vanish from either form: prose
+    // `queue list` already counts it into a trailing "N unreadable" line
+    // rather than hiding it, and `--json` must report the same count from
+    // the same scan rather than going quiet about store damage.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    // A second file in the same cassettes dir with no parseable frontmatter
+    // at all — the store counts this as unreadable rather than skipping it
+    // silently.
+    let cassettes = root.join("sessions").join(&sid).join("cassettes");
+    std::fs::write(cassettes.join("garbled.md"), "not a cassette file\n").expect("garbled file");
+
+    let prose = Command::new(bin())
+        .args(["queue", "list", "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(prose.status.code(), Some(0), "{}", stderr(&prose));
+    let prose_text = String::from_utf8_lossy(&prose.stdout).to_string();
+    assert!(prose_text.contains("1 unreadable"), "prose: {prose_text}");
+
+    let json_out = Command::new(bin())
+        .args(["queue", "list", "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env_remove("USER")
+        .output()
+        .expect("spawn");
+    assert_eq!(json_out.status.code(), Some(0), "{}", stderr(&json_out));
+    let v: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("valid JSON");
+    assert_eq!(v["unreadable"], 1, "same count as the prose listing: {v}");
+    assert_eq!(
+        v["cassettes"].as_array().expect("cassettes").len(),
+        1,
+        "the one valid cassette is still listed: {v}"
+    );
 }
 
 #[test]

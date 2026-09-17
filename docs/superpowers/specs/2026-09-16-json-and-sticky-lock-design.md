@@ -131,11 +131,18 @@ without a second call.
     "updated_at": "2026-09-13T14:02:11Z",
     "side_a": "…full text…",
     "side_b": ""
-  }]
+  }],
+  "unreadable": 0
 }
 ```
 
-`alias` is `null` when unset. `topic` is `null` when unset.
+`alias` is `null` when unset. `topic` is `null` when unset. `unreadable` (only on
+`queue list --json`'s `Listing`, not on the single-cassette `queue next --json` /
+`queue show --json` payload) is the same count `render_list`'s prose `N unreadable`
+line carries, from the same scan: a cassette file the store cannot parse must not
+leave the machine consumer of `queue list` any less aware of store damage than the
+human one, which already counts rather than hides it. `0` in the overwhelmingly
+common case.
 
 ### Derived fields
 
