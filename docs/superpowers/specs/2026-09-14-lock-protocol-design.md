@@ -32,7 +32,7 @@ pub struct LockGuard<'s> {
     session: String,
     id: String,
     path: PathBuf,
-    _file: File,   // the flock lives here; dropping it releases
+    _file: File,   // the flock lives on this file's open *description*
 }
 
 impl Store {
@@ -93,6 +93,27 @@ need waiting on a cassette, that is an additive flag, not a redesign.
 
 Release is `Drop`, plus the kernel on process death for any reason including `SIGKILL`.
 Nothing to reap — that is the whole reason the anchor's existence carries no meaning.
+
+`Drop` must release with an explicit **`LOCK_UN`**, and must not simply close the file.
+An earlier draft of this document said "the flock lives here; dropping it releases", and
+that is wrong in a way that cost a phase's worth of debugging (see
+`.superpowers/sdd/2026-09-17-tui-writes-the-store/flake-fix-report.md`). `flock` attaches
+to the open file **description**, not to the descriptor. Any `fork()` that happens while
+the lock is held hands the child a second descriptor onto the same description, and
+`flock(2)` releases the lock only "by an explicit `LOCK_UN` operation on any of these
+duplicate file descriptors, or when all such file descriptors have been closed". Our
+descriptors are `O_CLOEXEC`, so the child's copy does go — but not until it reaches
+`execve`. Between our `close()` and that `exec`, the lock outlives the guard that owned
+it, and the next acquisition of the same anchor is refused by a lock nobody holds.
+
+`LOCK_UN` acts on the description itself, so it releases every descriptor sharing it —
+the not-yet-`exec`'d child's included — which makes release synchronous with dropping the
+guard, as every caller already assumes. Close-on-exit remains the backstop underneath it:
+that is what makes death by `SIGKILL` safe and keeps "no reaper" true.
+
+`Drop` releases the flock **before** it clears the in-process `HELD` registry. Clearing
+first would leave a window in which `Store::holds` answers "no" about a lock we are still
+holding, and a caller acting on that answer would be told `Busy` by us.
 
 ### Anchor lifecycle
 

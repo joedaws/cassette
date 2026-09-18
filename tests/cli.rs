@@ -1846,3 +1846,397 @@ fn malformed_config_toml_without_json_still_prints_prose() {
     assert!(out.stdout.is_empty(), "no JSON without --json");
     assert!(stderr(&out).contains("invalid config"), "{}", stderr(&out));
 }
+
+/// Spawn `queue write` with `body` piped to stdin, waiting for it to finish.
+/// Shared by the `--side`/`--append`/`--replace` wiring tests below.
+fn write_stdin(args: &[&str], root: &std::path::Path, body: &[u8]) -> Output {
+    let mut child = Command::new(bin())
+        .args(args)
+        .env("CASSETTE_DATA_DIR", root)
+        .env("USER", "joseph")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(body)
+        .expect("write");
+    child.wait_with_output().expect("wait")
+}
+
+#[test]
+fn queue_write_defaults_to_side_a() {
+    // `--side` defaults to `a` — the behaviour every caller had before
+    // `--side` existed, and what `tests/lock.rs`'s cross-process cases rely
+    // on staying true.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+
+    let out = write_stdin(
+        &["queue", "write", &cid, "--session", &sid],
+        &root,
+        b"front text\n",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let show = Command::new(bin())
+        .args(["queue", "show", &cid, "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let v: serde_json::Value = serde_json::from_slice(&show.stdout).expect("valid JSON");
+    assert_eq!(v["side_a"].as_str().expect("side_a").trim(), "front text");
+    assert_eq!(v["side_b"], "");
+}
+
+#[test]
+fn queue_write_side_b_targets_side_b_and_leaves_side_a_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let first = write_stdin(
+        &["queue", "write", &cid, "--session", &sid],
+        &root,
+        b"front text\n",
+    );
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let out = write_stdin(
+        &["queue", "write", &cid, "--session", &sid, "--side", "b"],
+        &root,
+        b"back text\n",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let show = Command::new(bin())
+        .args(["queue", "show", &cid, "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let v: serde_json::Value = serde_json::from_slice(&show.stdout).expect("valid JSON");
+    assert_eq!(
+        v["side_a"].as_str().expect("side_a").trim(),
+        "front text",
+        "writing --side b must not touch side A: {v}"
+    );
+    assert_eq!(v["side_b"].as_str().expect("side_b").trim(), "back text");
+}
+
+#[test]
+fn queue_write_append_and_replace_are_mutually_exclusive() {
+    // Neither a real session nor a real cassette is needed: clap's
+    // `conflicts_with` rejects the combination during argument parsing,
+    // before the command ever touches the store or reads stdin.
+    let out = run(&[
+        "queue",
+        "write",
+        "nosuchcassette0000000000AB",
+        "--session",
+        "01K5GQ2R8V3XQZ0000000000AB",
+        "--append",
+        "--replace",
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn an_unknown_side_value_exits_two() {
+    // Same reasoning as the conflict test above: clap's `value_enum` rejects
+    // an unrecognized `--side` before any store I/O happens.
+    let out = run(&[
+        "queue",
+        "write",
+        "nosuchcassette0000000000AB",
+        "--session",
+        "01K5GQ2R8V3XQZ0000000000AB",
+        "--side",
+        "z",
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn stats_and_find_read_a_session_written_through_the_store() {
+    // Phase 5a: `stats` and `find` read only the session store, not the
+    // legacy notes dir. A session created and written through the same
+    // primitives the TUI now uses must show up in both commands.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let write = write_stdin(
+        &["queue", "write", &cid, "--session", &sid],
+        &root,
+        b"five whole words right here\n",
+    );
+    assert_eq!(
+        write.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&write.stderr)
+    );
+
+    let stats = Command::new(bin())
+        .args(["stats"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(stats.status.code(), Some(0), "{}", stderr(&stats));
+    let stats_out = String::from_utf8_lossy(&stats.stdout);
+    assert!(
+        stats_out.contains("1 note") && stats_out.contains("5 words"),
+        "{stats_out}"
+    );
+
+    let find = Command::new(bin())
+        .args(["find"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(find.status.code(), Some(0), "{}", stderr(&find));
+    let find_out = String::from_utf8_lossy(&find.stdout);
+    assert!(find_out.contains(&sid), "{find_out}");
+    assert!(find_out.contains("gratitude"), "{find_out}");
+    assert!(
+        find_out.contains("five whole words right here"),
+        "{find_out}"
+    );
+}
+
+/// The discovery→reopen loop, end to end: whatever `find` prints and
+/// whatever it lets you search by must both lead back into the session.
+///
+/// `find`'s query used to be matched against the session id and the cassette
+/// bodies only, so a row that printed `— gratitude` was missed by `cassette
+/// find gratitude`, and the id every row printed was rejected by `resume`,
+/// which matched aliases alone.
+#[test]
+fn find_matches_the_alias_and_topic_it_prints_and_resume_takes_the_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let aliased = Command::new(bin())
+        .args(["session", "alias", &sid, "morning-pages"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(aliased.status.code(), Some(0), "{}", stderr(&aliased));
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let write = write_stdin(
+        &["queue", "write", &cid, "--session", &sid],
+        &root,
+        b"nothing here repeats the topic\n",
+    );
+    assert_eq!(write.status.code(), Some(0), "{}", stderr(&write));
+
+    for query in ["gratitude", "morning-pages", sid.as_str()] {
+        let out = Command::new(bin())
+            .args(["find", query])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains(&sid),
+            "'cassette find {query}' must find the session whose row shows it: {text}"
+        );
+    }
+
+    // And the id that listing prints is openable. Driving the TUI itself
+    // needs a pty (`.claude/skills/verify`), so this asserts on the one
+    // thing that can be seen without one: resolution happens before the
+    // terminal is touched, so a rejected name exits 2 with "no session
+    // named" and an accepted one gets as far as failing to enter raw mode
+    // on a pipe.
+    let opened = Command::new(bin())
+        .args(["resume", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert!(
+        !stderr(&opened).contains("no session named"),
+        "the id `find` printed must resolve: {}",
+        stderr(&opened)
+    );
+    assert_ne!(
+        opened.status.code(),
+        Some(2),
+        "and it must not be a usage error: {}",
+        stderr(&opened)
+    );
+
+    let unknown = Command::new(bin())
+        .args(["resume", "01K5GQ2R8V3XQZ0000000000AB"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(unknown.status.code(), Some(2), "{}", stderr(&unknown));
+    assert!(
+        stderr(&unknown).contains("no session named"),
+        "{}",
+        stderr(&unknown)
+    );
+}
+
+/// `-o` prints this sitting to stdout and persists nothing, so it names no
+/// store session — which used to mean `cassette -o resume` opened a blank
+/// editor and silently dropped the subcommand the user typed.
+#[test]
+fn print_stdout_refuses_the_subcommands_that_name_a_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    for args in [
+        vec!["-o", "resume"],
+        vec!["-o", "today"],
+        vec!["-o", "new", "somename"],
+    ] {
+        let out = Command::new(bin())
+            .args(&args)
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("persists nothing"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+    assert!(
+        !root.exists(),
+        "a refused combination must not create a store"
+    );
+}
+
+/// `-T` seeds one cassette per topic into a *new* session. On a day that
+/// already has one, `load_cassettes` replaces everything `apply_topics`
+/// built, so the topics were silently discarded; `resume` + `-T` already
+/// refuses rather than discard them, and `today` now matches.
+#[test]
+fn today_refuses_a_template_once_the_day_already_has_a_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let xdg = dir.path().join("xdg");
+    std::fs::create_dir_all(xdg.join("cassette")).expect("mkdir");
+    std::fs::write(
+        xdg.join("cassette").join("config.toml"),
+        "[templates]\nmorning = [\"gratitude\", \"priorities\"]\n",
+    )
+    .expect("config");
+
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let aliased = Command::new(bin())
+        .args(["session", "alias", &sid, &today])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(aliased.status.code(), Some(0), "{}", stderr(&aliased));
+
+    let out = Command::new(bin())
+        .args(["-T", "morning", "today"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("already exists"),
+        "the discarded topics must be reported, not dropped: {}",
+        stderr(&out)
+    );
+}

@@ -171,11 +171,20 @@ Two locks with deliberately different lifetimes:
 
 | | Mechanism | Released by | Meaning to a blocked writer |
 |---|---|---|---|
-| Implicit | `flock(LOCK_EX\|LOCK_NB)` on `.locks/<id>` | Kernel, on unfocus or process death | Transient — retry (exit 3) |
+| Implicit | `flock(LOCK_EX\|LOCK_NB)` on `.locks/<id>` | `LOCK_UN` on unfocus; kernel on process death | Transient — retry (exit 3) |
 | Sticky | `locked_by` in frontmatter | A human, explicitly | Durable — escalate (exit 4) |
 
 The implicit lock is held by the TUI for exactly as long as a cassette is **focused**.
 Agents may write any other cassette in a live session — that is the collaborative case.
+
+Unfocusing releases by issuing an explicit `LOCK_UN`, not by closing the anchor file and
+leaving the rest to the kernel. `flock` attaches to the open file *description*, so a
+`fork()` while the lock is held gives the child a duplicate that keeps the lock alive past
+our `close()` until the child `exec`s; `LOCK_UN` acts on the description and so releases
+that copy too. Death still releases everything — the kernel closes what a `SIGKILL`ed
+process leaves behind — but that is now the **backstop** beneath a deliberate release, not
+the whole mechanism. It is what keeps "no reaper, no pid file, no `--force-unlock`" true.
+See `docs/superpowers/specs/2026-09-14-lock-protocol-design.md` for the full reasoning.
 
 ### Why the lock is a sidecar and not the cassette file
 

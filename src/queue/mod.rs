@@ -22,7 +22,7 @@ pub mod view;
 pub mod write;
 
 pub use edit::Placement;
-pub use write::write;
+pub use write::{write, Side, WriteMode};
 
 use crate::store::{writers, Store};
 
@@ -158,7 +158,7 @@ pub enum StatusFilter {
 /// Render a `resolve_writer` failure as the exit code it deserves.
 /// `resolve` declares no kind and always auto-creates, so `EmptyName` is its
 /// only usage error (2) and everything else is `Io` (1).
-fn resolve_error_to_queue_error(e: writers::ResolveError) -> QueueError {
+pub(crate) fn resolve_error_to_queue_error(e: writers::ResolveError) -> QueueError {
     match e {
         writers::ResolveError::EmptyName => QueueError::Usage(e.to_string()),
         writers::ResolveError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
@@ -168,7 +168,7 @@ fn resolve_error_to_queue_error(e: writers::ResolveError) -> QueueError {
 /// Render a `require_writer` failure as the exit code it deserves.
 /// `EmptyName` and `Unregistered` are usage errors (2): both are about what
 /// the caller asked for, not a system failure.
-fn require_error_to_queue_error(e: writers::RequireError) -> QueueError {
+pub(crate) fn require_error_to_queue_error(e: writers::RequireError) -> QueueError {
     match e {
         writers::RequireError::EmptyName => QueueError::Usage(e.to_string()),
         writers::RequireError::Unregistered(_) => QueueError::Usage(e.to_string()),

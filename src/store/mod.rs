@@ -256,6 +256,7 @@ impl Store {
             &anchor,
             &lock::Attribution::for_now(&m.created_by, &m.created_by),
             lock::Blocking::No,
+            Some(session),
         )
         .map_err(io::Error::from)?;
         guard.write(m, body)?;
@@ -340,6 +341,8 @@ impl Store {
             &anchor,
             &lock::Attribution::for_now("registry", "registry"),
             lock::Blocking::Yes,
+            // Not session-scoped, so nothing for `Store::holds` to bookkeep.
+            None,
         )
         .map_err(io::Error::from)
     }
@@ -437,7 +440,28 @@ impl Store {
             }
         };
         let anchor_path = self.locks_dir(session).join(id);
-        lock::acquire(id, path, &anchor_path, as_writer, lock::Blocking::No)
+        lock::acquire(
+            id,
+            path,
+            &anchor_path,
+            as_writer,
+            lock::Blocking::No,
+            Some(session),
+        )
+    }
+
+    /// Whether *this process* currently holds `id`'s lock in `session` — a
+    /// live `LockGuard` it has not yet dropped.
+    ///
+    /// Answered from in-process bookkeeping (`store::lock`'s `HELD` set),
+    /// never by probing the anchor: `flock` cannot tell our own lock apart
+    /// from another process's, so a second `try_lock` on an anchor we
+    /// already hold reports `Busy` exactly as it would for a stranger — that
+    /// would only answer "is this locked", which is trivially always true
+    /// while we hold it, not "do *we* hold it", which is what callers like
+    /// the TUI need in order to skip re-acquiring a lock they already have.
+    pub fn holds(&self, session: &str, id: &str) -> bool {
+        lock::is_held(session, id)
     }
 
     /// Whether `id`'s lock is free right now. A snapshot, not a claim: the
@@ -1083,6 +1107,30 @@ mod tests {
         assert_eq!(all.writers.len(), 2, "both registrations must survive");
         assert!(writers::lookup_by_name(&all, "joseph").is_some());
         assert!(writers::lookup_by_name(&all, "agent").is_some());
+    }
+
+    #[test]
+    fn holds_is_true_only_while_this_process_guards_the_cassette() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        const ID: &str = "aaa00000000000000000000000";
+        s.add_cassette(&sid, &cassette_meta(ID, 10), "")
+            .expect("add");
+
+        assert!(!s.holds(&sid, ID), "nothing held yet");
+        {
+            let who = lock::Attribution::for_now("writer-1", "joseph");
+            let _guard = s.lock(&sid, ID, &who).expect("acquire");
+            assert!(s.holds(&sid, ID), "we are holding it now");
+            assert!(
+                !s.holds(&sid, "bbb00000000000000000000000"),
+                "a different id"
+            );
+        }
+        assert!(
+            !s.holds(&sid, ID),
+            "the guard dropped, so we no longer hold it"
+        );
     }
 
     #[cfg(unix)]

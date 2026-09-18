@@ -43,6 +43,8 @@ pub enum QueueCmd {
     Write {
         id: String,
         session: String,
+        side: crate::queue::Side,
+        mode: crate::queue::WriteMode,
     },
     List {
         session: String,
@@ -240,13 +242,22 @@ enum QueueAction {
               value_parser = clap::value_parser!(i64).range(1..))]
         priority: Option<i64>,
     },
-    /// replace a cassette's body, read from stdin
+    /// replace (or append to) one side of a cassette's body, read from stdin
     Write {
         #[arg(value_name = "ID")]
         id: String,
         /// session the cassette lives in
         #[arg(long, value_name = "ID")]
         session: String,
+        /// which side to write
+        #[arg(long, value_enum, default_value = "a")]
+        side: SideArg,
+        /// append to the side instead of replacing it
+        #[arg(long, conflicts_with = "replace")]
+        append: bool,
+        /// replace the side's content (default)
+        #[arg(long, conflicts_with = "append")]
+        replace: bool,
     },
     /// list a session's cassettes in queue order
     List {
@@ -402,6 +413,25 @@ impl From<StatusArg> for crate::queue::StatusFilter {
     }
 }
 
+/// `--side`'s clap-facing type, same shape as `StatusArg`/`WriterKindArg`
+/// above: `queue::Side` stays clap-free, and `cli.rs` alone reads the
+/// command line. `a`/`b` are the value-enum's default kebab-case spellings
+/// of the variant names, so no explicit `#[value(name = ...)]` is needed.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum SideArg {
+    A,
+    B,
+}
+
+impl From<SideArg> for crate::queue::Side {
+    fn from(s: SideArg) -> crate::queue::Side {
+        match s {
+            SideArg::A => crate::queue::Side::A,
+            SideArg::B => crate::queue::Side::B,
+        }
+    }
+}
+
 impl Cli {
     fn into_args(self) -> Args {
         let mut args = Args {
@@ -453,7 +483,26 @@ impl Cli {
                             placement,
                         }
                     }
-                    QueueAction::Write { id, session } => QueueCmd::Write { id, session },
+                    QueueAction::Write {
+                        id,
+                        session,
+                        side,
+                        append,
+                        replace: _,
+                    } => QueueCmd::Write {
+                        id,
+                        session,
+                        side: side.into(),
+                        // No flag at all means the default: replace, which is
+                        // `queue write`'s behaviour from before `--side` and
+                        // `--append` existed — see the module doc on why that
+                        // default must never change under `tests/lock.rs`.
+                        mode: if append {
+                            crate::queue::WriteMode::Append
+                        } else {
+                            crate::queue::WriteMode::Replace
+                        },
+                    },
                     QueueAction::List {
                         session,
                         status,

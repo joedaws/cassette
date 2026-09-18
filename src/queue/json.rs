@@ -72,9 +72,10 @@ pub struct Listing {
 /// dropped, matching the "no headings at all" case below.
 ///
 /// When no `## Side A` heading appears anywhere, the whole body is
-/// `side_a` and `side_b` is empty. That is the common case today: nothing
-/// in the store writes sides yet, `queue write` replaces the whole body
-/// with flat text, and this must not lose it.
+/// `side_a` and `side_b` is empty. The TUI writes the headings
+/// (`output::cassette_body`), but `queue write` still replaces the whole
+/// body with the flat text it was handed, so a cassette an agent wrote last
+/// has no headings at all — and this must not lose it.
 pub fn split_sides(body: &str) -> (String, String) {
     const HEADING_A: &str = "## Side A";
     const HEADING_B: &str = "## Side B";
@@ -144,9 +145,9 @@ mod tests {
 
     #[test]
     fn a_body_with_no_headings_is_all_side_a() {
-        // Nothing writes sides yet — `queue write` replaces the whole body
-        // with flat text — so this is the common case today, and the one
-        // that must not silently lose the text.
+        // `queue write` replaces the whole body with the flat text it was
+        // handed, so any cassette an agent wrote last looks like this —
+        // headings or not, the text must not silently go missing.
         let (a, b) = split_sides("just prose an agent wrote\n");
         assert_eq!(a.trim(), "just prose an agent wrote");
         assert_eq!(b, "");
