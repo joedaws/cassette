@@ -726,4 +726,22 @@ mod tests {
         assert_eq!(app.visible_cassette_count(), 1);
         assert_eq!(app.cassette_scroll, 5);
     }
+
+    #[test]
+    fn read_only_ignores_text_keys_but_allows_leaving() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.read_only = true;
+        let before = app.cassettes[app.focus_idx].side_a_text();
+
+        app.modify_focused(|c| c.insert('x'));
+        assert_eq!(
+            app.cassettes[app.focus_idx].side_a_text(),
+            before,
+            "a keystroke must never reach a cassette this process does not hold"
+        );
+        assert!(
+            !app.cassettes[app.focus_idx].dirty,
+            "and it must not be marked dirty"
+        );
+    }
 }

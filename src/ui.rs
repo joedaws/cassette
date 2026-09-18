@@ -96,6 +96,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         let c = &app.cassettes[app.focus_idx];
         let (ln, col) = c.cursor_line_col();
         let mode_str = match app.mode {
+            _ if app.read_only => "-- READ ONLY --",
             Mode::Insert if app.record => "-- RECORD --",
             Mode::Insert => "-- INSERT --",
             Mode::Normal => "-- NORMAL --",
@@ -120,6 +121,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(status).style(info_style), chunks[n + 3]);
 
     let help = match app.mode {
+        _ if app.read_only => {
+            "keys ignored: another writer holds this cassette's lock  Tab:next  ^N:new  ^C:quit & save"
+        }
         Mode::Insert if app.record => {
             "type:the tape only rolls forward  Enter:newline  ^T:topic  ^B:flip side  Tab:next  ^N:new  ^C:quit & save"
         }
