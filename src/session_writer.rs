@@ -317,6 +317,7 @@ mod tests {
     use super::*;
     use crate::cassette::Cassette;
     use crate::store::meta::{CassetteMeta, Status};
+    use std::io::Write;
 
     /// One store session holding `n` empty cassettes, plus an `App` whose
     /// `session` and per-cassette `id`s point at them. The ids are the store's
@@ -425,6 +426,159 @@ mod tests {
         assert_eq!(
             scan.cassettes[0].meta.created_by, "w",
             "creation is not re-attributed"
+        );
+    }
+
+    #[test]
+    fn moving_focus_flushes_the_cassette_being_left() {
+        // Text typed into cassette 0 must reach disk when focus moves to 1,
+        // not wait for the next 30-second autosave. `acquire` *is* the
+        // "focus" entry point: called with a different index than the one
+        // currently held, it flushes the outgoing cassette through its
+        // guard, drops that guard, and only then takes the new one — see
+        // its doc comment. There is no separate `focus` method to test.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 2);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        w.acquire(&mut app, 0).expect("acquire 0");
+
+        app.focus_idx = 0;
+        app.modify_focused(|c| c.insert_str("typed into zero"));
+
+        w.acquire(&mut app, 1).expect("move focus to 1");
+
+        let scan = store.scan_session(&session).expect("scan");
+        let zero = scan
+            .cassettes
+            .iter()
+            .find(|c| c.meta.id == app.cassettes[0].id)
+            .expect("found");
+        assert!(
+            zero.body.contains("typed into zero"),
+            "blur must flush before the guard is dropped: {}",
+            zero.body
+        );
+        assert!(
+            !app.cassettes[0].dirty,
+            "and the cassette is clean afterwards"
+        );
+    }
+
+    /// Locate the `cassette` binary Cargo built alongside this test binary.
+    ///
+    /// `CARGO_BIN_EXE_cassette` — what `tests/lock.rs` uses — is only set for
+    /// integration tests; Cargo does not define it for a bin crate's own
+    /// unit tests (confirmed directly: the same `env!` there fails to
+    /// compile from inside this module). This crate has no `src/lib.rs`, so
+    /// `tests/lock.rs` cannot link `SessionWriter` either — the cross-process
+    /// test below has to live here instead, and locate the binary itself:
+    /// the test binary runs from `target/<profile>/deps/`, and the plain
+    /// binary Cargo builds alongside it (so integration tests have one to
+    /// exec) sits one directory up, exactly as `CARGO_BIN_EXE_cassette`
+    /// would resolve.
+    fn bin_path() -> std::path::PathBuf {
+        let mut path = std::env::current_exe().expect("current test exe");
+        path.pop(); // drop the test binary's own file name
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        path.push("cassette");
+        path
+    }
+
+    /// Cross-process proof that the guard `SessionWriter::acquire` holds for
+    /// the focused cassette is a real `flock`, binding on another process,
+    /// and that it is released the moment focus moves.
+    ///
+    /// Driving the actual TUI end-to-end needs a pty (`.claude/skills/verify`);
+    /// a pty harness for a `cargo test` is a heavier, flakier dependency than
+    /// this phase needs, so — as the task allows — this holds the lock with
+    /// an in-process `SessionWriter` standing in for "the TUI has focus",
+    /// exercising the real `acquire` code path, and spawns the real
+    /// `cassette` binary's `queue write` as the contending agent. The
+    /// contention itself is still genuinely cross-process: two OS processes
+    /// racing the same on-disk `flock`.
+    ///
+    /// Unlike `tests/lock.rs`'s `contend`, there is no start-order race to
+    /// eliminate here: the in-process guard is acquired synchronously, by a
+    /// blocking Rust call that has already returned `Ok` before the agent
+    /// process is even spawned, so the agent's denial is deterministic, not
+    /// a race outcome. Its proof is still exactly what the module doc
+    /// demands — output written *after* the child's own lock attempt, never
+    /// the parent's successful write to its stdin: `queue write` acquires
+    /// the lock before it ever reads stdin (see `queue/write.rs`'s doc
+    /// comment), so the denied child's exit code 3 and stderr are produced
+    /// by, and only by, its own failed acquisition.
+    #[test]
+    fn an_agents_write_is_denied_the_cassette_the_tui_has_focused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        let store = Store::new(root.clone());
+        let (mut app, session) = fixture(&store, 2);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        w.acquire(&mut app, 0)
+            .expect("acquire 0: the TUI focuses cassette 0");
+        let held_id = app.cassettes[0].id.clone();
+
+        // The lock is already held, deterministically, before this child is
+        // even spawned: its failure is not a race outcome.
+        let denied = std::process::Command::new(bin_path())
+            .args(["queue", "write", &held_id, "--session", &session])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "agent")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn denied write")
+            .wait_with_output()
+            .expect("wait denied write");
+        assert_eq!(
+            denied.status.code(),
+            Some(3),
+            "an agent must be denied the cassette the TUI has focused: {denied:?}"
+        );
+        let err = String::from_utf8_lossy(&denied.stderr);
+        assert!(err.contains("is open by"), "{err}");
+        assert!(err.contains("try again later"), "{err}");
+
+        // Focus moves to cassette 1: `acquire` flushes and drops cassette
+        // 0's guard, through the guard, before taking the new one.
+        w.acquire(&mut app, 1).expect("move focus to 1");
+
+        let mut allowed = std::process::Command::new(bin_path())
+            .args(["queue", "write", &held_id, "--session", &session])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "agent")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn allowed write");
+        allowed
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"the agent's words\n")
+            .expect("write body");
+        let allowed = allowed.wait_with_output().expect("wait allowed write");
+        assert_eq!(
+            allowed.status.code(),
+            Some(0),
+            "the cassette must be writable once focus has moved off it: {allowed:?}"
+        );
+
+        let scan = store.scan_session(&session).expect("scan");
+        let zero = scan
+            .cassettes
+            .iter()
+            .find(|c| c.meta.id == held_id)
+            .expect("found");
+        assert!(
+            zero.body.contains("the agent's words"),
+            "body: {}",
+            zero.body
         );
     }
 
