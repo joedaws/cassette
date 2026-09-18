@@ -618,9 +618,22 @@ phases, each independently testable and each leaving the tool working.
    **`cassette sessions` — the interactive picker ("15 recent, 'a' = all") — moves to
    Phase 5.** It is an interactive UI, not a CLI command, and belongs with the TUI work
    rather than with the scriptable surface an agent drives.
-5. **TUI integration.** Per-cassette autosave, flush-on-blur, live-sync polling and
-   `merge_external`, read-only banner for busy cassettes, priority ordering, the collapsed
-   closed row, sticky-lock indicators.
+5. **TUI integration**, split into three sub-phases the way Phase 4 was, because as
+   specified it is four subsystems plus four inherited items and restructures how the TUI
+   persists anything:
+
+   - **5a — The TUI writes the store.** Session and cassette identity in `App`, the
+     focused-cassette lock, per-cassette autosave, flush-on-blur, minimal read-only for busy
+     cassettes, `Store::holds`, `queue write --side/--append/--replace`, and repointing
+     `stats`/`find`. Spec: `2026-09-17-tui-writes-the-store-design.md`.
+   - **5b — The TUI reads what others write.** Live-sync polling, `merge_external`, the
+     read-only banner with per-tick retry, sticky-lock indicators.
+   - **5c — Queue-shaped display.** Priority ordering, the collapsed closed row,
+     `MAX_CASSETTES` applying to open cassettes only, damaged cassettes as error rows, the
+     `cassette sessions` picker.
+
+   `stats` and `find` move from Phase 6 into 5a so there is never a window where the TUI
+   writes the store while the reporting commands read the old notes directory.
 6. **Repoint and remove.** `stats`, `find`, `today`, `resume`, `export`; delete the
    append/draft/conflict-rename machinery listed under Deletions; `0700` data dir; the
    cloud-sync warning; man page and completions.
