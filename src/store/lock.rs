@@ -7,15 +7,63 @@
 //! *existence* carries no meaning: lockedness is kernel state, tested by
 //! attempting acquisition.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use fs4::FileExt;
 
 use crate::store::meta;
 use crate::store::meta::CassetteMeta;
 use crate::store::StoredCassette;
+
+/// The cassettes (`"<session>/<id>"`) this *process* currently holds a
+/// [`LockGuard`] for.
+///
+/// `Store::holds` exists to answer "do we hold this lock?", and `flock`
+/// itself has no way to answer that: a second `try_lock` from the same
+/// process on an anchor it already holds fails exactly as it would for a
+/// genuinely different process (`flock` is per open-file-description, not
+/// per-process), so probing the anchor can only ever tell you "is this
+/// locked at all" — which is trivially always true once we hold it. The
+/// question `holds` actually needs answered is not visible to the kernel, so
+/// it is tracked here instead: `acquire` inserts the key once a lock is
+/// genuinely won, and `LockGuard::drop` removes it, so the set exactly
+/// mirrors the guards this process is currently holding. Process-global
+/// (not a per-`Store` field) because that is the true granularity of the
+/// question — two `Store` values over the same root, or a lock acquired
+/// through a clone, are still the same process holding the same flock.
+static HELD: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn held_key(session: &str, id: &str) -> String {
+    format!("{session}/{id}")
+}
+
+/// Record that this process now holds `session`/`id`'s lock. Called only
+/// from `acquire`, only after the `flock` is genuinely won.
+fn record_held(session: &str, id: &str) {
+    HELD.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(held_key(session, id));
+}
+
+/// The inverse of `record_held`, called from `LockGuard::drop`.
+fn clear_held(session: &str, id: &str) {
+    HELD.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&held_key(session, id));
+}
+
+/// Whether this process's bookkeeping says it holds `session`/`id` right
+/// now. See the `HELD` doc comment for why this is a registry lookup and
+/// never a probe of the anchor itself.
+pub(crate) fn is_held(session: &str, id: &str) -> bool {
+    HELD.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(&held_key(session, id))
+}
 
 /// Who holds a lock. Written into the anchor after acquiring — an ordering the
 /// lock itself serializes — and read by a blocked writer for its message.
@@ -157,15 +205,32 @@ impl From<LockError> for io::Error {
 #[derive(Debug)]
 pub struct LockGuard {
     id: String,
+    /// `Some(session)` for an ordinary cassette lock, so `Drop` knows the
+    /// `HELD` key to clear; `None` for the one lock that is not
+    /// session-scoped, the writer registry (`Store::lock_registry`) — that
+    /// guard is never exposed past `ensure_writer`/`resolve_writer`, and
+    /// `Store::holds` only ever asks about cassettes, so there is nothing
+    /// for the registry lock to bookkeep.
+    session: Option<String>,
     /// The cassette file. Resolved once at acquisition: the slug is frozen at
     /// creation, so this path cannot be derived from a (possibly retopicked)
     /// `CassetteMeta`.
     path: PathBuf,
     /// Holding the `File` IS holding the lock: dropping it closes the fd and
-    /// the kernel releases. No `Drop` impl needed, and none should be added —
-    /// an explicit `unlock()` before close would be redundant and would give a
-    /// future reader the impression that release is our responsibility.
+    /// the kernel releases — that part needs no `Drop` impl. The `Drop` impl
+    /// below exists only to clear this guard's `HELD` bookkeeping (see the
+    /// module-level `HELD` doc comment); it must never attempt to release
+    /// the flock itself, which remains the kernel's job via `_anchor`'s own
+    /// drop.
     _anchor: File,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        if let Some(session) = &self.session {
+            clear_held(session, &self.id);
+        }
+    }
 }
 
 impl LockGuard {
@@ -232,12 +297,19 @@ pub(crate) enum Blocking {
 /// predating this phase — is still lockable. Two processes creating it race
 /// benignly: `create(true)` on the same path yields the same inode, because no
 /// `rename` is involved.
+///
+/// `session` is `Some` for every ordinary cassette lock and `None` only for
+/// the writer registry (`Store::lock_registry`), which is not session-scoped.
+/// It is threaded through purely for the `HELD` bookkeeping `Store::holds`
+/// reads — see the module doc comment — and plays no part in the `flock`
+/// itself.
 pub(crate) fn acquire(
     id: &str,
     path: PathBuf,
     anchor_path: &Path,
     as_writer: &Attribution,
     blocking: Blocking,
+    session: Option<&str>,
 ) -> Result<LockGuard, LockError> {
     if let Some(parent) = anchor_path.parent() {
         crate::store::ensure_private_dir(parent)?;
@@ -287,8 +359,13 @@ pub(crate) fn acquire(
     writeln!(anchor, "{}", as_writer.render())?;
     anchor.flush()?;
 
+    if let Some(session) = session {
+        record_held(session, id);
+    }
+
     Ok(LockGuard {
         id: id.to_string(),
+        session: session.map(str::to_string),
         path,
         _anchor: anchor,
     })

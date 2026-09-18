@@ -197,12 +197,17 @@ fn main() -> io::Result<()> {
             // The only queue command that writes an existing cassette, so
             // it's the only one that needs a writer identity to attribute the
             // write to.
-            cli::QueueCmd::Write { id, session } => {
+            cli::QueueCmd::Write {
+                id,
+                session,
+                side,
+                mode,
+            } => {
                 let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
                     Ok(w) => w,
                     Err(msg) => exit_usage(&msg, args.json),
                 };
-                match queue::write(&store, id, session, &who_name, writer_source) {
+                match queue::write(&store, id, session, *side, *mode, &who_name, writer_source) {
                     Ok(()) => exit_queue_ok(None),
                     Err(e) => exit_queue_err(&e, args.json),
                 }

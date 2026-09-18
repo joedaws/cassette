@@ -6,9 +6,28 @@
 //! ever acquired for writing.
 
 use super::{require_error_to_queue_error, resolve_error_to_queue_error, QueueError, WriterSource};
+use crate::queue::json;
 use crate::store;
 use crate::store::writers::Kind;
 use crate::store::Store;
+
+/// Which side of a cassette `queue write` targets. Mirrors `Cassette`'s two
+/// sides in `src/cassette.rs` — `A` is the default, matching every existing
+/// caller's behaviour before `--side` existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    A,
+    B,
+}
+
+/// How `queue write` combines the incoming text with what is already on the
+/// named side. `Replace` is the default, matching `queue write`'s behaviour
+/// before `--append` existed: the whole side is overwritten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    Append,
+    Replace,
+}
 
 /// Whether `kind` may write over a cassette whose `locked_by` is set.
 ///
@@ -19,13 +38,64 @@ use crate::store::Store;
 /// prevent. A human may always proceed — blocked by their own or another
 /// human's lock, they can always `queue unlock` first, so refusing them here
 /// would only let one terminal lock a person out of their own work.
-fn write_permitted(kind: Kind, locked_by: Option<&str>) -> Result<(), QueueError> {
+///
+/// `store` resolves `locked_by`'s writer id to a display name for the
+/// message, the same lookup `queue::view::build_view` does for its
+/// `sticky_lock` field — falling back to the raw id when the registry does
+/// not know it (a damaged store, or a registry `store.writers()` itself
+/// could not read), the same stance `build_view` takes rather than erroring
+/// the whole write out over a cosmetic lookup.
+fn write_permitted(store: &Store, kind: Kind, locked_by: Option<&str>) -> Result<(), QueueError> {
     match (kind, locked_by) {
-        (Kind::Agent, Some(holder)) => Err(QueueError::Sticky(format!(
-            "cassette is locked by '{holder}' — only a human may write it"
-        ))),
+        (Kind::Agent, Some(holder)) => {
+            let name = store
+                .writers()
+                .ok()
+                .and_then(|w| w.writers.get(holder).map(|w| w.name.clone()))
+                .unwrap_or_else(|| holder.to_string());
+            Err(QueueError::Sticky(format!(
+                "cassette is locked by '{name}' — only a human may write it"
+            )))
+        }
         _ => Ok(()),
     }
+}
+
+/// Rebuild a cassette body in canonical form from its two sides: `## Side A`
+/// always, `## Side B` only when non-empty. The write-side counterpart of
+/// `json::split_sides`, which reads this same shape back apart — the two
+/// must never disagree about what a side is.
+fn build_body(side_a: &str, side_b: &str) -> String {
+    let mut out = format!("## Side A\n\n{}\n", side_a.trim());
+    if !side_b.trim().is_empty() {
+        out.push_str(&format!("## Side B\n\n{}\n", side_b.trim()));
+    }
+    out
+}
+
+/// Compute the new body for `current` after writing `incoming` to `side`
+/// under `mode`. Splits `current` via `json::split_sides` (the same parser
+/// `--json` reads a body with), replaces or appends to the named side, and
+/// rebuilds through `build_body` — the other side is carried through
+/// untouched either way.
+fn apply_write(current: &str, incoming: &str, side: Side, mode: WriteMode) -> String {
+    let (mut side_a, mut side_b) = json::split_sides(current);
+    let target = match side {
+        Side::A => &mut side_a,
+        Side::B => &mut side_b,
+    };
+    *target = match mode {
+        WriteMode::Replace => incoming.to_string(),
+        WriteMode::Append => {
+            let mut joined = target.trim_end_matches('\n').to_string();
+            if !joined.is_empty() {
+                joined.push('\n');
+            }
+            joined.push_str(incoming);
+            joined
+        }
+    };
+    build_body(&side_a, &side_b)
 }
 
 /// Resolve `who_name`/`source` into `(writer, kind)`, matching `close`'s
@@ -84,10 +154,14 @@ fn acquire(
 /// Reading `locked_by` here — only after the guard is held — is what makes
 /// the check race-free: reading it from an unlocked scan would race a
 /// concurrent `queue lock` setting it in between the check and the write.
+#[allow(clippy::too_many_arguments)]
 fn read_check_and_write(
+    store: &Store,
     guard: &store::lock::LockGuard,
     id: &str,
-    body: &str,
+    incoming: &str,
+    side: Side,
+    mode: WriteMode,
     writer: String,
     kind: Kind,
 ) -> Result<(), QueueError> {
@@ -95,12 +169,13 @@ fn read_check_and_write(
         Ok(c) => c,
         Err(e) => return Err(QueueError::Io(format!("cannot read '{id}': {e}"))),
     };
-    write_permitted(kind, current.meta.locked_by.as_deref())?;
+    write_permitted(store, kind, current.meta.locked_by.as_deref())?;
 
+    let body = apply_write(&current.body, incoming, side, mode);
     let mut m = current.meta;
     m.last_writer = writer;
     m.updated_at = store::meta::now_utc();
-    if let Err(e) = guard.write(&m, body) {
+    if let Err(e) = guard.write(&m, &body) {
         return Err(QueueError::Io(format!("cannot write '{id}': {e}")));
     }
     Ok(())
@@ -127,6 +202,8 @@ pub fn write(
     store: &Store,
     id: &str,
     session: &str,
+    side: Side,
+    mode: WriteMode,
     who_name: &str,
     source: WriterSource,
 ) -> Result<(), QueueError> {
@@ -145,7 +222,7 @@ pub fn write(
         return Err(QueueError::Io(format!("cannot read stdin: {e}")));
     }
 
-    read_check_and_write(&guard, id, &body, writer, kind)
+    read_check_and_write(store, &guard, id, &body, side, mode, writer, kind)
 }
 
 /// The lock-read-modify-write core, with the body already in hand.
@@ -157,18 +234,21 @@ pub fn write(
 /// tests that already have a body in hand and no stdin to provide. Gated on
 /// `cfg(test)` since it has no production caller.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn write_body(
     store: &Store,
     session: &str,
     id: &str,
     body: &str,
+    side: Side,
+    mode: WriteMode,
     who_name: &str,
     source: WriterSource,
 ) -> Result<(), QueueError> {
     let (writer, kind) = resolve(store, who_name, source)?;
     let who = store::lock::Attribution::for_now(&writer, who_name);
     let guard = acquire(store, session, id, &who)?;
-    read_check_and_write(&guard, id, body, writer, kind)
+    read_check_and_write(store, &guard, id, body, side, mode, writer, kind)
 }
 
 #[cfg(test)]
@@ -214,6 +294,8 @@ mod tests {
             &sid,
             &id,
             "agent prose\n",
+            Side::A,
+            WriteMode::Replace,
             "bot",
             WriterSource::Flag,
         ) {
@@ -243,11 +325,185 @@ mod tests {
             &sid,
             &id,
             "human prose\n",
+            Side::A,
+            WriteMode::Replace,
             "joseph",
             WriterSource::Flag,
         )
         .expect("a human may write over a sticky lock");
         let scan = store.scan_session(&sid).expect("scan");
         assert!(scan.cassettes[0].body.contains("human prose"));
+    }
+
+    #[test]
+    fn the_sticky_refusal_names_the_holder_by_name_not_raw_ulid() {
+        // Step 5: the message used to read "cassette is locked by
+        // '01OTHERWRITER...'" — a raw ULID nobody but the store can act on.
+        // `queue::view::build_view` already resolves the same field to a
+        // name for `--json`'s `sticky_lock`; the prose path must do the same.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = store
+            .create_session(&crate::store::session::SessionMeta {
+                alias: None,
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session");
+        let holder_id = store
+            .ensure_writer("beyonce", Kind::Human)
+            .expect("register the holder");
+        let id = "aaa00000000000000000000000".to_string();
+        let m = CassetteMeta {
+            id: id.clone(),
+            topic: Some("claimed".to_string()),
+            priority: 10,
+            status: Status::Open,
+            locked_by: Some(holder_id.clone()),
+            created_by: "w".to_string(),
+            last_writer: "w".to_string(),
+            updated_at: "2026-09-16T09:00:00Z".to_string(),
+        };
+        store.add_cassette(&sid, &m, "original\n").expect("add");
+        store.ensure_writer("bot", Kind::Agent).expect("agent");
+
+        match write_body(
+            &store,
+            &sid,
+            &id,
+            "agent prose\n",
+            Side::A,
+            WriteMode::Replace,
+            "bot",
+            WriterSource::Flag,
+        ) {
+            Err(QueueError::Sticky(msg)) => {
+                assert!(msg.contains("beyonce"), "must name the holder: {msg}");
+                assert!(
+                    !msg.contains(&holder_id),
+                    "must not leak the raw ulid: {msg}"
+                );
+            }
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sticky_holder_unknown_to_the_registry_falls_back_to_the_raw_id() {
+        // Same stance as `build_view`: a `locked_by` id the registry does not
+        // know (a damaged store) must not turn a sticky refusal into some
+        // other kind of error — degrade to the raw id instead.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (sid, id) = sticky_cassette(&store);
+        store.ensure_writer("bot", Kind::Agent).expect("agent");
+
+        match write_body(
+            &store,
+            &sid,
+            &id,
+            "agent prose\n",
+            Side::A,
+            WriteMode::Replace,
+            "bot",
+            WriterSource::Flag,
+        ) {
+            Err(QueueError::Sticky(msg)) => {
+                assert!(msg.contains("01OTHERWRITER00000000000AB"), "{msg}");
+            }
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writing_side_b_leaves_side_a_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = store
+            .create_session(&crate::store::session::SessionMeta {
+                alias: None,
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session");
+        let id = "aaa00000000000000000000000";
+        let m = CassetteMeta {
+            id: id.to_string(),
+            topic: Some("sides".to_string()),
+            priority: 10,
+            status: Status::Open,
+            locked_by: None,
+            created_by: "w".to_string(),
+            last_writer: "w".to_string(),
+            updated_at: "2026-09-17T09:00:00Z".to_string(),
+        };
+        store
+            .add_cassette(&sid, &m, "## Side A\n\nfront\n")
+            .expect("add");
+        store.ensure_writer("joseph", Kind::Human).expect("human");
+
+        write_body(
+            &store,
+            &sid,
+            id,
+            "back\n",
+            Side::B,
+            WriteMode::Replace,
+            "joseph",
+            WriterSource::Flag,
+        )
+        .expect("write side b");
+
+        let body = &store.scan_session(&sid).expect("scan").cassettes[0].body;
+        assert!(body.contains("front"), "side A must survive: {body}");
+        assert!(body.contains("## Side B"), "side B heading written: {body}");
+        assert!(body.contains("back"), "{body}");
+    }
+
+    #[test]
+    fn append_adds_to_a_side_rather_than_replacing_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = store
+            .create_session(&crate::store::session::SessionMeta {
+                alias: None,
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session");
+        let id = "aaa00000000000000000000000";
+        let m = CassetteMeta {
+            id: id.to_string(),
+            topic: Some("sides".to_string()),
+            priority: 10,
+            status: Status::Open,
+            locked_by: None,
+            created_by: "w".to_string(),
+            last_writer: "w".to_string(),
+            updated_at: "2026-09-17T09:00:00Z".to_string(),
+        };
+        store
+            .add_cassette(&sid, &m, "## Side A\n\nfirst\n")
+            .expect("add");
+        store.ensure_writer("joseph", Kind::Human).expect("human");
+
+        write_body(
+            &store,
+            &sid,
+            id,
+            "second\n",
+            Side::A,
+            WriteMode::Append,
+            "joseph",
+            WriterSource::Flag,
+        )
+        .expect("append");
+
+        let body = &store.scan_session(&sid).expect("scan").cassettes[0].body;
+        assert!(body.contains("first"), "the original text survives: {body}");
+        assert!(body.contains("second"), "{body}");
     }
 }

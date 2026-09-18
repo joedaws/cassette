@@ -22,7 +22,7 @@ pub mod view;
 pub mod write;
 
 pub use edit::Placement;
-pub use write::write;
+pub use write::{write, Side, WriteMode};
 
 use crate::store::{writers, Store};
 
