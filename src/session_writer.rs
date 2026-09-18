@@ -18,6 +18,13 @@
 //! **Any flush happens through the guard that is held, before that guard is
 //! dropped.** Dropping first would either lose the text or force a
 //! re-acquire `flock` may refuse.
+//!
+//! **Every acquire re-reads.** The other half of the parent spec's
+//! invariant 1 — "every cassette you do not hold, you re-read from disk" —
+//! is `refresh_from_disk`, run the instant the lock is won. While a cassette
+//! is unfocused the TUI holds nothing and an agent may rewrite it; without
+//! the re-read, one keystroke after tabbing back would republish the stale
+//! in-memory copy over the agent's words and warn nobody.
 
 use std::io;
 
@@ -173,7 +180,72 @@ impl<'a> SessionWriter<'a> {
             "re-acquiring a lock this process already holds would report Busy against itself"
         );
         let guard = self.store.lock(&self.session, &id, &self.attribution())?;
+        // The lock is ours; the in-memory copy may not be. Re-read before
+        // anything can be written back through this guard.
+        self.refresh_from_disk(app, idx, &guard)?;
         self.guard = Some((idx, guard));
+        Ok(())
+    }
+
+    /// Refresh `app.cassettes[idx]` from the file whose lock was just won.
+    ///
+    /// The parent spec's invariant 1 is "you may only write a cassette whose
+    /// lock you hold; every cassette you do not hold, you re-read from
+    /// disk". Between losing focus and regaining it the TUI holds nothing,
+    /// so any agent may have run `queue write` on that cassette — and
+    /// `flush_held` writes the body straight out of memory. Without this
+    /// step, tabbing back and typing one character republishes the stale
+    /// copy over the agent's words, reverts `last_writer`, and warns nobody.
+    ///
+    /// This is not 5b's `merge_external`: nothing is merged. An unfocused
+    /// cassette can never be dirty — `modify_focused` only ever touches the
+    /// focused one, and `acquire` flushes the outgoing cassette through its
+    /// own guard before the guard moves (the `debug_assert!` in `flush_held`
+    /// states exactly that) — so the in-memory copy holds no keystrokes the
+    /// disk lacks, and adopting the disk's version loses nothing. The
+    /// `dirty` guard below is a belt to that brace: if the invariant ever
+    /// breaks, unwritten words are kept rather than silently discarded.
+    ///
+    /// The refresh is skipped when the disk agrees with memory, which is the
+    /// overwhelmingly common case (nobody else wrote). That keeps the
+    /// cursor, the undo stack and the active side across an ordinary
+    /// Tab-away-and-back; only genuinely changed text resets them, the same
+    /// state `resume` starts a loaded cassette with.
+    fn refresh_from_disk(
+        &self,
+        app: &mut App,
+        idx: usize,
+        guard: &LockGuard,
+    ) -> Result<(), LockError> {
+        let Some(c) = app.cassettes.get(idx) else {
+            return Ok(());
+        };
+        debug_assert!(
+            !c.dirty,
+            "a cassette whose lock we do not hold cannot have unsaved edits: \
+             `acquire` flushes the outgoing cassette before the guard moves"
+        );
+        if c.dirty {
+            return Ok(());
+        }
+        let stored = guard.read()?;
+        let (disk_a, disk_b) = crate::queue::json::split_sides(&stored.body);
+        let (disk_a, disk_b) = (disk_a.trim(), disk_b.trim());
+        if disk_a == c.side_a_text().trim()
+            && disk_b == c.side_b_text().trim()
+            && stored.meta.topic == c.topic
+        {
+            return Ok(());
+        }
+        let id = c.id.clone();
+        let mut fresh = crate::cassette::Cassette::from_sides(
+            disk_a.to_string(),
+            disk_b.to_string(),
+            stored.meta.topic,
+        );
+        fresh.id = id;
+        app.cassettes[idx] = fresh;
+        app.clear_dirty(idx);
         Ok(())
     }
 
@@ -193,6 +265,12 @@ impl<'a> SessionWriter<'a> {
     /// queue commands, and an agent that reprioritized or closed a cassette
     /// while the human was writing in it must not have that undone by the
     /// next autosave.
+    ///
+    /// The *body* is written from memory, and that is safe only because the
+    /// lock has been held continuously since `acquire` re-read it
+    /// (`refresh_from_disk`): nobody else can have written this file in
+    /// between. Every window in which somebody could have is a window in
+    /// which this guard did not exist.
     fn flush_held(&mut self, app: &mut App) -> Result<(), LockError> {
         let Some((idx, guard)) = self.guard.as_ref() else {
             return Ok(());
@@ -630,6 +708,120 @@ mod tests {
             zero.body.contains("the agent's words"),
             "body: {}",
             zero.body
+        );
+    }
+
+    /// The reviewer's data-loss reproduction, end to end: the TUI must not
+    /// republish a stale in-memory body over words another writer put on
+    /// disk while the cassette was unfocused.
+    ///
+    /// Two cassettes; focus starts on 0, moves to 1 (which releases 0's
+    /// lock), the real `cassette queue write` binary rewrites 0 from another
+    /// process, focus returns to 0 and the human types one character. Before
+    /// `refresh_from_disk` the final file was the human's stale text plus
+    /// that character, with the agent's words gone and nobody warned.
+    #[test]
+    fn regaining_focus_re_reads_a_cassette_another_writer_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        let store = Store::new(root.clone());
+        let (mut app, session) = fixture(&store, 2);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+
+        // The human writes on cassette 0 …
+        w.acquire(&mut app, 0).expect("acquire 0");
+        app.focus_idx = 0;
+        app.modify_focused(|c| c.insert_str("the human's first draft"));
+        let zero_id = app.cassettes[0].id.clone();
+
+        // … then tabs to cassette 1, which flushes and releases 0.
+        w.acquire(&mut app, 1).expect("focus 1");
+        app.focus_idx = 1;
+
+        // An agent rewrites cassette 0 behind the TUI's back.
+        let mut agent = std::process::Command::new(bin_path())
+            .args(["queue", "write", &zero_id, "--session", &session])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "agent")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn agent write");
+        agent
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"words the agent wrote\n")
+            .expect("write body");
+        let agent = agent.wait_with_output().expect("wait agent write");
+        assert_eq!(
+            agent.status.code(),
+            Some(0),
+            "the unfocused cassette must be writable: {agent:?}"
+        );
+
+        // The human tabs back and types one character.
+        w.acquire(&mut app, 0).expect("focus 0 again");
+        app.focus_idx = 0;
+        app.modify_focused(|c| c.insert_str("!"));
+        w.flush_focused(&mut app).expect("flush");
+
+        let scan = store.scan_session(&session).expect("scan");
+        let zero = scan
+            .cassettes
+            .iter()
+            .find(|c| c.meta.id == zero_id)
+            .expect("cassette 0");
+        assert!(
+            zero.body.contains("words the agent wrote"),
+            "the external writer's words must survive the human's next keystroke: {}",
+            zero.body
+        );
+        assert!(
+            !zero.body.contains("the human's first draft"),
+            "and the stale in-memory copy must not come back: {}",
+            zero.body
+        );
+        assert!(
+            zero.body.contains('!'),
+            "the keystroke lands: {}",
+            zero.body
+        );
+    }
+
+    #[test]
+    fn regaining_focus_keeps_cursor_and_undo_when_nothing_changed_on_disk() {
+        // The re-read must not cost the writer their place on every Tab: an
+        // unchanged file leaves the in-memory cassette — cursor, undo stack
+        // and active side — exactly as it was.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 2);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        w.acquire(&mut app, 0).expect("acquire 0");
+        app.focus_idx = 0;
+        app.modify_focused(|c| {
+            c.snapshot(); // what entering insert mode does
+            c.insert_str("hello world");
+            c.move_word_back();
+        });
+        let cursor = app.cassettes[0].cursor_pos();
+
+        w.acquire(&mut app, 1).expect("focus 1");
+        w.acquire(&mut app, 0).expect("focus 0 again");
+
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            cursor,
+            "an unchanged file must not reset the cursor"
+        );
+        app.focus_idx = 0;
+        app.modify_focused(|c| c.undo());
+        assert_eq!(
+            app.cassettes[0].text(),
+            "",
+            "and the undo stack must survive the round trip"
         );
     }
 

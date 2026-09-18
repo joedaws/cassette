@@ -2069,3 +2069,174 @@ fn stats_and_find_read_a_session_written_through_the_store() {
         "{find_out}"
     );
 }
+
+/// The discovery→reopen loop, end to end: whatever `find` prints and
+/// whatever it lets you search by must both lead back into the session.
+///
+/// `find`'s query used to be matched against the session id and the cassette
+/// bodies only, so a row that printed `— gratitude` was missed by `cassette
+/// find gratitude`, and the id every row printed was rejected by `resume`,
+/// which matched aliases alone.
+#[test]
+fn find_matches_the_alias_and_topic_it_prints_and_resume_takes_the_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let aliased = Command::new(bin())
+        .args(["session", "alias", &sid, "morning-pages"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(aliased.status.code(), Some(0), "{}", stderr(&aliased));
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let write = write_stdin(
+        &["queue", "write", &cid, "--session", &sid],
+        &root,
+        b"nothing here repeats the topic\n",
+    );
+    assert_eq!(write.status.code(), Some(0), "{}", stderr(&write));
+
+    for query in ["gratitude", "morning-pages", sid.as_str()] {
+        let out = Command::new(bin())
+            .args(["find", query])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains(&sid),
+            "'cassette find {query}' must find the session whose row shows it: {text}"
+        );
+    }
+
+    // And the id that listing prints is openable. Driving the TUI itself
+    // needs a pty (`.claude/skills/verify`), so this asserts on the one
+    // thing that can be seen without one: resolution happens before the
+    // terminal is touched, so a rejected name exits 2 with "no session
+    // named" and an accepted one gets as far as failing to enter raw mode
+    // on a pipe.
+    let opened = Command::new(bin())
+        .args(["resume", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert!(
+        !stderr(&opened).contains("no session named"),
+        "the id `find` printed must resolve: {}",
+        stderr(&opened)
+    );
+    assert_ne!(
+        opened.status.code(),
+        Some(2),
+        "and it must not be a usage error: {}",
+        stderr(&opened)
+    );
+
+    let unknown = Command::new(bin())
+        .args(["resume", "01K5GQ2R8V3XQZ0000000000AB"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(unknown.status.code(), Some(2), "{}", stderr(&unknown));
+    assert!(
+        stderr(&unknown).contains("no session named"),
+        "{}",
+        stderr(&unknown)
+    );
+}
+
+/// `-o` prints this sitting to stdout and persists nothing, so it names no
+/// store session — which used to mean `cassette -o resume` opened a blank
+/// editor and silently dropped the subcommand the user typed.
+#[test]
+fn print_stdout_refuses_the_subcommands_that_name_a_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    for args in [
+        vec!["-o", "resume"],
+        vec!["-o", "today"],
+        vec!["-o", "new", "somename"],
+    ] {
+        let out = Command::new(bin())
+            .args(&args)
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("persists nothing"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+    assert!(
+        !root.exists(),
+        "a refused combination must not create a store"
+    );
+}
+
+/// `-T` seeds one cassette per topic into a *new* session. On a day that
+/// already has one, `load_cassettes` replaces everything `apply_topics`
+/// built, so the topics were silently discarded; `resume` + `-T` already
+/// refuses rather than discard them, and `today` now matches.
+#[test]
+fn today_refuses_a_template_once_the_day_already_has_a_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let xdg = dir.path().join("xdg");
+    std::fs::create_dir_all(xdg.join("cassette")).expect("mkdir");
+    std::fs::write(
+        xdg.join("cassette").join("config.toml"),
+        "[templates]\nmorning = [\"gratitude\", \"priorities\"]\n",
+    )
+    .expect("config");
+
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let aliased = Command::new(bin())
+        .args(["session", "alias", &sid, &today])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(aliased.status.code(), Some(0), "{}", stderr(&aliased));
+
+    let out = Command::new(bin())
+        .args(["-T", "morning", "today"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("USER", "joseph")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("already exists"),
+        "the discarded topics must be reported, not dropped: {}",
+        stderr(&out)
+    );
+}

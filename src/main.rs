@@ -331,6 +331,35 @@ fn main() -> io::Result<()> {
         die("'resume' cannot be combined with '-T'");
     }
 
+    // `-o` prints to stdout and persists nothing, so it opens no store
+    // session at all — which makes every subcommand that *names* one
+    // meaningless under it. Silently ignoring the subcommand is what this
+    // used to do: `cassette -o resume` opened a blank editor and printed
+    // only what was typed in that sitting, with the resumed words nowhere.
+    // Honouring them instead is not available: `new` and `today` have to
+    // create a session when none exists, which is exactly the persistence
+    // `-o` promises not to do, and honouring only `resume` would make one
+    // flag mean two things. So the combination is refused, in one rule, the
+    // way `resume` + `-T` already is.
+    if args.print_stdout {
+        let named = if args.resume.is_some() {
+            Some("resume")
+        } else if args.daily {
+            Some("today")
+        } else if args.note_name.is_some() {
+            Some("new")
+        } else {
+            None
+        };
+        if let Some(named) = named {
+            die(&format!(
+                "'-o' persists nothing, so it cannot be combined with '{named}' — drop '-o' \
+                 to write to the store, or drop '{named}' to print this sitting \
+                 to stdout"
+            ));
+        }
+    }
+
     // Resolve the store session, build the app and take the focused
     // cassette's lock before the terminal is touched, so anything that goes
     // wrong here dies cleanly onto a normal shell.
@@ -569,11 +598,28 @@ fn resolve_session(
 
     if let Some(name) = &args.resume {
         let id = match name {
-            Some(alias) => by_alias(alias).unwrap_or_else(|| {
-                die(&format!(
-                    "no session named '{alias}' — `cassette session list` shows what exists"
-                ))
-            }),
+            // An alias first, then the id itself. `cassette find` prints
+            // session ids, and an id it printed that `resume` then rejected
+            // would be a discovery loop that closes on nothing. 4b's
+            // "sessions are named by ULID only, an alias never resolves"
+            // governs `--session` on the queue commands, where an ambiguous
+            // name would be resolved silently by a machine; `resume` is the
+            // human entry point the 5a spec defines as "the most recent
+            // session, or the one with that alias", and accepting the
+            // printed id there adds an opening, never an ambiguity: aliases
+            // are checked first, and a ULID-shaped alias would have to be
+            // typed deliberately.
+            Some(alias) => by_alias(alias)
+                .or_else(|| {
+                    store::ids::is_valid_id(alias)
+                        .then(|| store.session_meta(alias).ok().map(|_| alias.clone()))
+                        .flatten()
+                })
+                .unwrap_or_else(|| {
+                    die(&format!(
+                        "no session named '{alias}' — `cassette session list` shows what exists"
+                    ))
+                }),
             None => store
                 .list_sessions()
                 .unwrap_or_else(|e| die_with(1, &format!("cannot list sessions: {e}")))
@@ -587,6 +633,21 @@ fn resolve_session(
 
     if let Some(date) = daily_name {
         if let Some(id) = by_alias(date) {
+            // `-T` seeds one cassette per topic into a *new* session;
+            // `load_cassettes` then replaces everything `apply_topics`
+            // built, so on a day that already has a session the topics were
+            // silently discarded. `resume` + `-T` already dies rather than
+            // discard them, and this is the same situation: the flag cannot
+            // be honoured, so it is refused instead of ignored. On the first
+            // launch of a day there is nothing to open and `-T` works
+            // normally.
+            if args.template.is_some() {
+                die(&format!(
+                    "today's session ('{date}') already exists, so '-T' has nothing to seed \
+                     — drop '-T' to continue today's session, or start a \
+                     separate one with 'cassette -T <template>'"
+                ));
+            }
             return open(id);
         }
         return (create_session(store, args, Some(date)), true, None);
@@ -1328,6 +1389,58 @@ mod tests {
         for c in s.chars() {
             handle_key(app, key(KeyCode::Char(c), KeyModifiers::NONE));
         }
+    }
+
+    /// A store session, optionally aliased, for the `resolve_session` tests.
+    fn seeded_session(store: &store::Store, alias: Option<&str>) -> String {
+        store
+            .create_session(&store::session::SessionMeta {
+                alias: alias.map(|a| a.to_string()),
+                created: store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session")
+    }
+
+    #[test]
+    fn resume_opens_a_session_by_the_id_find_prints() {
+        // `cassette find` lists session ids; an id it printed that `resume`
+        // then rejected would be a discovery loop that closes on nothing.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let id = seeded_session(&store, None);
+
+        let args = cli::Args {
+            resume: Some(Some(id.clone())),
+            ..Default::default()
+        };
+        let (session, created_here, loaded) = resolve_session(&store, &args, None);
+
+        assert_eq!(session, id, "the printed id opens the session it names");
+        assert!(
+            !created_here,
+            "an opened session is not this run's to delete"
+        );
+        assert!(loaded.is_some(), "and its cassettes are loaded");
+    }
+
+    #[test]
+    fn resume_still_prefers_an_alias_over_an_id() {
+        // Aliases remain the documented form ("the most recent session, or
+        // the one with that alias"); accepting an id adds an opening rather
+        // than taking one away.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let _other = seeded_session(&store, None);
+        let aliased = seeded_session(&store, Some("monday"));
+
+        let args = cli::Args {
+            resume: Some(Some("monday".to_string())),
+            ..Default::default()
+        };
+        let (session, _, _) = resolve_session(&store, &args, None);
+        assert_eq!(session, aliased);
     }
 
     #[test]

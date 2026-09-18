@@ -172,13 +172,17 @@ One session per day, however many sittings it takes:
 
 ```
 cassette today                # opens (or continues) the session aliased 2026-07-03
-cassette today -T morning     # morning pages, straight into today's session
+cassette today -T morning     # the day's first launch, seeded with topics
 ```
 
 The first `today` launch of the day creates a session aliased with the
 date; later launches the same day find it by that alias and resume it —
 cassettes, topics, both sides, cursor at the end of the text. Set
 `daily_format` in the config to change the alias's date format.
+
+`-T` seeds a *new* session, so it pairs with the first `today` of the day;
+once the day has a session there is nothing to seed and `today -T` says so
+rather than opening the day's work with the topics quietly dropped.
 
 Your history is queryable straight from the session store:
 
@@ -207,13 +211,14 @@ cassette find                 # browse recent sessions, newest first
 cassette find gratitude       # …filtered by alias, topic, or content
 cassette resume               # continue the most recently created session
 cassette resume myjournal     # continue the session aliased myjournal
+cassette resume 01K5GQ2R8V…   # …or by the id `find` printed
 cassette new myjournal        # start a *new* session aliased myjournal
 ```
 
 `find` lists what's in the session store — date, word count, topics, and the
 first line of the highest-priority cassette — so you can spot the session to
 resume without opening anything. Each row shows the session's id, ready to
-paste into `--session`.
+paste into `--session` or straight back into `resume`.
 
 `new <NAME>` always starts a fresh session; it does not look for an existing
 alias by that name the way the old flat-note `new` used to resume a
@@ -269,6 +274,10 @@ Print to stdout instead of the store, writing nothing at all:
 ```
 cassette -o
 ```
+
+Because `-o` persists nothing, it names no session: combining it with
+`resume`, `new` or `today` is a usage error rather than a silently ignored
+subcommand.
 
 After every session, a recap prints to the terminal — words, duration, pace
 (for sessions over 30 seconds), and a per-cassette breakdown when you used
@@ -644,8 +653,8 @@ The help text above still says "note" throughout (`new`, `today`, `resume`,
 (clap generates it straight from `src/cli.rs`'s doc comments), but the
 behavior underneath it is store-backed: `new NAME` creates a session
 aliased `NAME`, `today` opens or creates the session aliased with today's
-date, `resume [ALIAS]` loads a session back into the TUI (default: the most
-recently created session), and `find [TEXT]` lists recent sessions
+date, `resume [NAME]` loads a session back into the TUI by alias or by id
+(default: the most recently created session), and `find [TEXT]` lists recent sessions
 newest-first (date, words, topics, first line of the top cassette),
 filtered by `TEXT` when given. A bare `cassette` (no subcommand) starts a
 fresh, unaliased session. `stats` reads streak/weekly/monthly totals from

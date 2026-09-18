@@ -5,9 +5,9 @@ use crate::store::{Store, StoredCassette};
 
 /// One session as `cassette find` shows it.
 pub struct NoteEntry {
-    /// Openable form shown in the listing: the session id. Queries match
-    /// this and the session's own content, never a directory part — there
-    /// is none any more.
+    /// Openable form shown in the listing: the session id, which
+    /// `cassette resume <id>` accepts as-is. Queries match this, the
+    /// session's alias, its topics and its content — see `build_haystack`.
     pub path: String,
     pub date: NaiveDateTime,
     pub words: usize,
@@ -113,11 +113,39 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>, unreadable: usize) -> 
             matched.len() - MAX_LISTED
         ));
     }
-    out.push_str("\nresume one: cassette resume <name>");
+    out.push_str("\nresume one: cassette resume <id>");
     if unreadable > 0 {
         out.push_str(&format!("\n{unreadable} unreadable"));
     }
     out
+}
+
+/// Everything a `find` query is matched against, lowercased once here so
+/// `render` can compare against a lowercased query.
+///
+/// The session **id**, its **alias**, its cassettes' **topics** and their
+/// **bodies** — every string the listing itself can print. A row that prints
+/// `— gratitude, priorities` and is then missed by `cassette find gratitude`
+/// is a discovery loop that closes on nothing, which is exactly what this
+/// indexed before aliases and topics were added to it.
+///
+/// `scan_store` and the unit fixtures both build their haystacks through
+/// this one function on purpose: a fixture that assembles the field by hand
+/// tests a shape the real scanner never produces, and every gap in the real
+/// one survives the suite.
+fn build_haystack(id: &str, alias: Option<&str>, topics: &[String], bodies: &str) -> String {
+    let mut out = String::from(id);
+    if let Some(alias) = alias {
+        out.push('\n');
+        out.push_str(alias);
+    }
+    for topic in topics {
+        out.push('\n');
+        out.push_str(topic);
+    }
+    out.push('\n');
+    out.push_str(bodies);
+    out.to_lowercase()
 }
 
 /// One `NoteEntry` per session in the store — the session id as its openable
@@ -156,15 +184,17 @@ pub fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize) {
         unreadable += scan.unreadable;
         let (topics, preview) = topics_and_preview(&scan.cassettes);
         let words = session_word_count(&scan.cassettes);
-        let haystack = format!(
-            "{id}\n{}",
-            scan.cassettes
+        let haystack = build_haystack(
+            &id,
+            meta.alias.as_deref(),
+            &topics,
+            &scan
+                .cassettes
                 .iter()
                 .map(|c| c.body.as_str())
                 .collect::<Vec<_>>()
-                .join("\n")
-        )
-        .to_lowercase();
+                .join("\n"),
+        );
         entries.push(NoteEntry {
             path: id,
             date,
@@ -191,16 +221,34 @@ mod tests {
     /// A fixture entry for exercising `render` directly, bypassing
     /// `scan_store` (and so the store entirely) the way `NoteMeta`'s test
     /// fixtures in `stats.rs` do.
-    fn entry(path: &str, date: &str, words: usize) -> NoteEntry {
+    ///
+    /// The haystack goes through `build_haystack`, the same function
+    /// `scan_store` uses. It used to be assembled here by hand as
+    /// `path\npreview` — a shape the real scanner never produced — and that
+    /// is precisely why the suite could not see that aliases and topics were
+    /// never indexed. A fixture that invents its own shape tests the
+    /// fixture.
+    fn entry_with(
+        path: &str,
+        date: &str,
+        words: usize,
+        alias: Option<&str>,
+        topics: &[&str],
+    ) -> NoteEntry {
         let preview = format!("body of {path}");
+        let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
         NoteEntry {
             path: path.to_string(),
             date: dt(date),
             words,
-            topics: Vec::new(),
-            haystack: format!("{path}\n{preview}").to_lowercase(),
+            haystack: build_haystack(path, alias, &topics, &preview),
+            topics,
             preview,
         }
+    }
+
+    fn entry(path: &str, date: &str, words: usize) -> NoteEntry {
+        entry_with(path, date, words, None, &[])
     }
 
     #[test]
@@ -272,6 +320,45 @@ mod tests {
     }
 
     #[test]
+    fn scan_store_indexes_the_alias_and_the_topics() {
+        // Against a real store, not a hand-built fixture: `cassette find
+        // gratitude` must return the session whose row prints `— gratitude`,
+        // and `cassette find morning-pages` the one aliased that way.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = store
+            .create_session(&SessionMeta {
+                alias: Some("morning-pages".to_string()),
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session");
+        let m = CassetteMeta {
+            id: crate::store::ids::new_id(),
+            topic: Some("gratitude".to_string()),
+            priority: 10,
+            status: Status::Open,
+            locked_by: None,
+            created_by: "w".to_string(),
+            last_writer: "w".to_string(),
+            updated_at: crate::store::meta::now_utc(),
+        };
+        store
+            .add_cassette(&sid, &m, "## Side A\n\nsomething else entirely\n")
+            .expect("add");
+
+        let (entries, _) = scan_store(&store);
+        for q in ["gratitude", "morning-pages", &sid.to_lowercase()] {
+            assert!(
+                render(&entries, Some(q), 0).contains(&sid),
+                "query '{q}' must match: {}",
+                render(&entries, Some(q), 0)
+            );
+        }
+    }
+
+    #[test]
     fn scan_store_surfaces_unreadable_cassettes_rather_than_dropping_them() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
@@ -337,15 +424,39 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("    body of new.md"), "{out}");
-        assert!(out.ends_with("resume one: cassette resume <name>"), "{out}");
+        assert!(out.ends_with("resume one: cassette resume <id>"), "{out}");
     }
 
     #[test]
     fn render_shows_topics() {
-        let mut e = entry("d.md", "2026-07-13T09:12:00", 5);
-        e.topics = vec!["gratitude".to_string()];
+        let e = entry_with("d.md", "2026-07-13T09:12:00", 5, None, &["gratitude"]);
         let out = render(std::slice::from_ref(&e), None, 0);
         assert!(out.contains("d.md — gratitude"), "{out}");
+    }
+
+    #[test]
+    fn a_query_matches_the_alias_and_the_topics_the_row_prints() {
+        // The row prints `— gratitude, priorities`; a reader who types one
+        // of those words back must land on this session. Same for the alias
+        // they named it with.
+        let e = entry_with(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "2026-07-13T09:12:00",
+            5,
+            Some("morning-pages"),
+            &["gratitude", "priorities"],
+        );
+        let entries = std::slice::from_ref(&e);
+        for q in ["gratitude", "PRIORITIES", "morning-pages", "01arz3ndek"] {
+            assert!(
+                render(entries, Some(q), 0).contains("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+                "query '{q}' must find the session whose listing row shows it"
+            );
+        }
+        assert_eq!(
+            render(entries, Some("nothing-like-this"), 0),
+            "no notes match 'nothing-like-this'"
+        );
     }
 
     #[test]
@@ -393,24 +504,16 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_the_full_path() {
-        let mut e = entry("new.md", "2026-07-13T09:12:00", 412);
-        e.path = "~/.local/share/cassette/notes/new.md".into();
+    fn render_shows_the_session_id_the_reader_can_resume() {
+        // The listed form is the whole point of the listing: it is what
+        // `cassette resume <id>` takes, so it is printed verbatim and the
+        // footer names it.
+        let e = entry("01ARZ3NDEKTSV4RRFFQ69G5FAV", "2026-07-13T09:12:00", 412);
         let out = render(std::slice::from_ref(&e), None, 0);
         assert!(
-            out.contains("2026-07-13 09:12    412 words  ~/.local/share/cassette/notes/new.md"),
+            out.contains("2026-07-13 09:12    412 words  01ARZ3NDEKTSV4RRFFQ69G5FAV"),
             "{out}"
         );
-    }
-
-    #[test]
-    fn filter_ignores_the_directory_part() {
-        let mut e = entry("morning.md", "2026-07-13T09:12:00", 10);
-        e.path = "~/.local/share/cassette/notes/morning.md".into();
-        let out = render(std::slice::from_ref(&e), Some("notes"), 0);
-        assert_eq!(
-            out, "no notes match 'notes'",
-            "directory names must not satisfy queries"
-        );
+        assert!(out.ends_with("resume one: cassette resume <id>"), "{out}");
     }
 }

@@ -128,11 +128,37 @@ No new verbs. The existing surface acquires session meanings:
 | `cassette` | a new session |
 | `cassette new <NAME>` | a new session aliased `<NAME>` |
 | `cassette today` | the session aliased with today's date, created if absent |
-| `cassette resume [NAME]` | the most recent session, or the one with that alias |
+| `cassette resume [NAME]` | the most recent session, the one with that alias, or the one with that **id** |
 | `cassette -T <template>` | a new session with one cassette per topic |
+
+`resume` accepts a session id as well as an alias (aliases first). `find` prints ids, and an id
+it printed that `resume` rejected would be a discovery loop closing on nothing. 4b's "sessions
+are named by ULID only, an alias never resolves" governs `--session` on the queue commands,
+where a machine would have to resolve an ambiguous name silently; `resume` is the human entry
+point, and accepting the printed id adds an opening rather than an ambiguity.
+
+`-o` persists nothing and so names no session: combined with `resume`, `new` or `today` it is a
+usage error (exit 2), not a silently dropped subcommand. Same for `-T` with a `today` whose day
+already has a session — `load_cassettes` would replace everything `apply_topics` built.
 
 `Ctrl+N` calls `Store::add_cassette` at runtime, so a cassette created mid-session is a store
 cassette like any other.
+
+## Focus means held — and every acquire re-reads
+
+Taking the lock is only half of the parent spec's invariant 1 ("you may only write a cassette
+whose lock you hold; every cassette you do not hold, you re-read from disk"). The other half is
+that `SessionWriter::acquire` re-reads the cassette the instant the lock is won
+(`refresh_from_disk`), adopting the disk's body and topic when they differ from memory. While a
+cassette is unfocused the TUI holds nothing and an agent may `queue write` it; without the
+re-read, one keystroke after tabbing back republishes the stale in-memory copy over the agent's
+words and warns nobody — the silent text loss decision 2 says this phase must not have.
+
+Nothing is merged — that is 5b's `merge_external` — and nothing is lost: an unfocused cassette
+can never be dirty (`modify_focused` only touches the focused one, and `acquire` flushes the
+outgoing cassette through its own guard before the guard moves), so adopting the disk's version
+discards no keystrokes. An unchanged file is skipped, so an ordinary Tab away and back keeps the
+cursor, undo stack and active side.
 
 ## What changes in the code
 
