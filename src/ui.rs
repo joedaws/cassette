@@ -548,7 +548,12 @@ mod tests {
     /// filler sits between the cassette stack and the footer, not below it.
     #[test]
     fn footer_pins_to_window_bottom() {
-        let mut app = App::new(None, None, Some(5));
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(80, 24);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
@@ -585,12 +590,22 @@ mod tests {
                 .collect()
         };
 
-        let mut app = App::new(None, None, Some(5));
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(80, 24);
         let row = stats_row(&app);
         assert!(!row.contains(bars), "no goal, no timer: no bars");
 
-        let mut app = App::new(None, Some(100), Some(5));
+        let mut app = App::new(
+            None,
+            Some(100),
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(80, 24);
         let row = stats_row(&app);
         assert!(row.contains(bars), "word goal set: bars render");
@@ -601,7 +616,12 @@ mod tests {
     /// keys bold in `help_key`, descriptions in the dimmer `help_text`.
     #[test]
     fn help_line_styles_keys_and_descriptions() {
-        let mut app = App::new(None, None, Some(5));
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(100, 24);
         let theme = crate::theme::resolve(Some("gruvbox"), &std::collections::HashMap::new())
             .expect("gruvbox is built in");
@@ -634,7 +654,12 @@ mod tests {
     /// tag and gutter, side B the dark gray.
     #[test]
     fn side_accents_are_swapped() {
-        let mut app = App::new(None, None, Some(5));
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(80, 24);
         app.modify_focused(|c| c.insert('x'));
 
@@ -667,7 +692,12 @@ mod tests {
     fn themed_render_paints_focused_cassette() {
         let theme = crate::theme::resolve(Some("gruvbox"), &std::collections::HashMap::new())
             .expect("gruvbox is built in");
-        let mut app = App::new(None, None, Some(5));
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(40, 20);
         app.modify_focused(|c| {
             for ch in "hi".chars() {
@@ -713,7 +743,12 @@ mod tests {
             (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect()
         };
 
-        let mut app = App::new(None, None, Some(5));
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(80, 24);
         assert!(row_text(&app, 0).contains("╡ SIDE A ╞"));
 
@@ -741,7 +776,12 @@ mod tests {
     /// still be brightest at the cursor, not at the middle of the cassette.
     #[test]
     fn fade_follows_cursor_when_scroll_clamps() {
-        let mut app = App::new(None, None, Some(5));
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(40, 20);
         app.modify_focused(|c| {
             for ch in "a\nb\nc\nd\ne\nf\ng".chars() {

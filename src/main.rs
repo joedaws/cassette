@@ -487,7 +487,12 @@ fn main() -> io::Result<()> {
 
     let size = terminal.size()?;
     let visible_lines = args.visible_lines.or(cfg.visible_lines);
-    let mut app = App::new(args.timer_secs, args.word_goal, visible_lines);
+    // Placeholder session id: Task 3 wires real store session resolution
+    // (create for a bare session, open for `resume`, find-or-create for
+    // `today`). `App` stays pure, so `main.rs` is the only place a session
+    // id can be minted or looked up.
+    let session = store::ids::new_id();
+    let mut app = App::new(args.timer_secs, args.word_goal, visible_lines, session);
     app.record = args.record;
     app.resize(size.width, size.height);
     if let Some(topics) = &template_topics {
@@ -748,13 +753,18 @@ fn run(
 
         // Crash safety: flush dirty text to the note file every AUTOSAVE_SECS.
         if let Some(s) = sink.as_deref_mut() {
-            if app.dirty
+            if !app.dirty_indices().is_empty()
                 && !app.is_empty()
                 && last_autosave.elapsed() >= Duration::from_secs(AUTOSAVE_SECS)
             {
                 if save_note(app, s, true).is_ok() {
                     s.wrote = true;
-                    app.dirty = false;
+                    // save_note writes the whole session in one file, so a
+                    // successful save clears every cassette's dirty flag —
+                    // not just the focused one.
+                    for idx in 0..app.cassettes.len() {
+                        app.clear_dirty(idx);
+                    }
                 }
                 last_autosave = Instant::now();
             }
@@ -780,7 +790,9 @@ fn suspend_session(
     if let Some(s) = sink {
         if !app.is_empty() && save_note(app, s, true).is_ok() {
             s.wrote = true;
-            app.dirty = false;
+            for idx in 0..app.cassettes.len() {
+                app.clear_dirty(idx);
+            }
         }
     }
     restore_terminal();
@@ -1309,7 +1321,7 @@ mod tests {
 
     #[test]
     fn ctrl_b_flips_side_and_ctrl_f_does_not() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert_eq!(app.cassettes[0].side, Side::B);
         handle_key(&mut app, key(KeyCode::Char('f'), KeyModifiers::CONTROL));
@@ -1320,7 +1332,7 @@ mod tests {
 
     #[test]
     fn topic_prompt_sets_edits_and_clears() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE)); // -> normal
 
         // Set a topic.
@@ -1351,7 +1363,7 @@ mod tests {
 
     #[test]
     fn ctrl_t_opens_topic_prompt_from_both_modes_and_returns() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         // From insert mode: Ctrl+T opens the prompt, Enter returns to insert.
         assert_eq!(app.mode, Mode::Insert);
         handle_key(&mut app, key(KeyCode::Char('t'), KeyModifiers::CONTROL));
@@ -1372,7 +1384,7 @@ mod tests {
 
     #[test]
     fn record_mode_only_rolls_forward() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         app.record = true;
         type_str(&mut app, "no going back");
         // Deletions and mode switches are ignored.
@@ -1392,7 +1404,7 @@ mod tests {
 
     #[test]
     fn record_mode_keeps_flip_topic_and_quit() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         app.record = true;
         handle_key(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert_eq!(app.cassettes[0].side, Side::B, "flipping is not editing");
@@ -1410,7 +1422,7 @@ mod tests {
 
     #[test]
     fn paste_inserts_chunk_normalizes_newlines_one_undo() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         type_str(&mut app, "start ");
         handle_paste(&mut app, "one\r\ntwo\rthree");
         assert_eq!(app.cassettes[0].text(), "start one\ntwo\nthree");
@@ -1422,7 +1434,7 @@ mod tests {
 
     #[test]
     fn paste_into_topic_prompt_stays_one_line() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         handle_key(&mut app, key(KeyCode::Char('t'), KeyModifiers::CONTROL));
         handle_paste(&mut app, "two\nlines");
         handle_key(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
@@ -1432,7 +1444,7 @@ mod tests {
 
     #[test]
     fn paste_allowed_in_record_mode() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         app.record = true;
         handle_paste(&mut app, "quoted material\n");
         assert_eq!(app.cassettes[0].text(), "quoted material\n");
@@ -1440,7 +1452,12 @@ mod tests {
 
     #[test]
     fn keypress_resets_idle_counter() {
-        let mut app = App::new(Some(60), None, None);
+        let mut app = App::new(
+            Some(60),
+            None,
+            None,
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         for _ in 0..App::IDLE_NUDGE_SECS {
             app.tick_idle();
         }
@@ -1451,7 +1468,7 @@ mod tests {
 
     #[test]
     fn session_summary_counts_only_words_added_after_resume() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         app.load_cassettes(vec![cassette::Cassette::from_sides(
             "five old words sit here".into(),
             String::new(),
@@ -1469,7 +1486,7 @@ mod tests {
 
     #[test]
     fn session_summary_reports_words_and_breakdown() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         assert!(session_summary(&app).is_none(), "empty session: no summary");
         app.modify_focused(|c| {
             for ch in "one two three".chars() {
@@ -1492,7 +1509,7 @@ mod tests {
 
     #[test]
     fn topic_prompt_esc_cancels_without_change() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         app.cassettes[0].topic = Some("keep me".into());
         handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE)); // -> normal
         type_str(&mut app, "toverwrite");
@@ -1504,7 +1521,7 @@ mod tests {
 
     #[test]
     fn topic_prompt_captures_tab_and_letters_as_text() {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         app.add_cassette();
         app.focus_idx = 0;
         handle_key(&mut app, key(KeyCode::Esc, KeyModifiers::NONE)); // -> normal

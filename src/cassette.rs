@@ -25,6 +25,16 @@ pub struct Cassette {
     undo: Vec<(String, String)>,
     /// Undo snapshots of the side currently flipped away.
     back_undo: Vec<(String, String)>,
+    /// This cassette's store identity (a `store::ids` ULID). Empty for a
+    /// cassette that has no store counterpart yet — assigning a real id is
+    /// the caller's job (`Cassette` itself does no id generation and no I/O).
+    // Nothing reads this field yet: Task 3's `session_writer` is its first
+    // consumer. Remove this allow once that lands.
+    #[allow(dead_code)]
+    pub id: String,
+    /// Set on any edit; cleared once the caller has persisted this cassette.
+    /// `App::modify_focused` sets it, `App::clear_dirty` clears it.
+    pub dirty: bool,
 }
 
 /// Maximum undo snapshots kept per cassette side.
@@ -413,6 +423,15 @@ mod tests {
         }
         c.set_cursor(cursor);
         c
+    }
+
+    #[test]
+    fn new_cassette_has_no_store_identity_and_is_clean() {
+        // Id assignment and dirty tracking are the caller's job (App / the
+        // store writer); a bare Cassette starts with neither.
+        let c = Cassette::new();
+        assert_eq!(c.id, "");
+        assert!(!c.dirty);
     }
 
     #[test]

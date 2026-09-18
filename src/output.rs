@@ -257,7 +257,7 @@ mod tests {
     use super::*;
 
     fn app_with_text(text: &str) -> App {
-        let mut app = App::new(None, None, None);
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         app.modify_focused(|c| {
             for ch in text.chars() {
                 c.insert(ch);

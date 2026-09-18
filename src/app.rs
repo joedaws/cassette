@@ -60,8 +60,13 @@ pub struct App {
     pub baseline_words: usize,
     /// Seconds since the last keypress; drives the idle nudge.
     pub idle_secs: u32,
-    /// Set on any cassette mutation; cleared by the autosaver in `main.rs`.
-    pub dirty: bool,
+    /// The store session this app's cassettes belong to (`store::ids` ULID).
+    /// Plain data here — resolving or creating the session against a `Store`
+    /// is `main.rs`'s job, not `App`'s.
+    // Nothing reads this field yet: Task 3's `session_writer` is its first
+    // consumer. Remove this allow once that lands.
+    #[allow(dead_code)]
+    pub session: String,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
     /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
@@ -80,6 +85,7 @@ impl App {
         timer_secs: Option<u32>,
         word_goal: Option<usize>,
         visible_lines: Option<usize>,
+        session: String,
     ) -> Self {
         Self {
             cassettes: vec![Cassette::new()],
@@ -103,7 +109,7 @@ impl App {
             record: false,
             baseline_words: 0,
             idle_secs: 0,
-            dirty: false,
+            session,
             bell: false,
             suspend: false,
             status_ticks: None,
@@ -241,7 +247,6 @@ impl App {
         }
         self.cassettes.push(Cassette::new());
         self.focus_idx = self.cassettes.len() - 1;
-        self.dirty = true;
         self.clear_status();
         self.ensure_focus_visible();
     }
@@ -263,7 +268,25 @@ impl App {
     pub fn modify_focused<F: FnOnce(&mut Cassette)>(&mut self, f: F) {
         if let Some(c) = self.cassettes.get_mut(self.focus_idx) {
             f(c);
-            self.dirty = true;
+            c.dirty = true;
+        }
+    }
+
+    /// Indices of cassettes with unsaved edits, in list order. An autosave
+    /// writes only these — not every cassette in the session.
+    pub fn dirty_indices(&self) -> Vec<usize> {
+        self.cassettes
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.dirty)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Mark cassette `idx` as saved. Out-of-range indices are a no-op.
+    pub fn clear_dirty(&mut self, idx: usize) {
+        if let Some(c) = self.cassettes.get_mut(idx) {
+            c.dirty = false;
         }
     }
 
@@ -354,7 +377,12 @@ mod tests {
     /// 14-row terminal, 5-line focused cassette: 14 - 4 overhead = 10 rows;
     /// focused takes 6, leaving 4 for two minimized cassettes → 3 visible.
     fn test_app() -> App {
-        let mut app = App::new(None, None, Some(VISIBLE_LINES));
+        let mut app = App::new(
+            None,
+            None,
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.resize(80, 14);
         app
     }
@@ -403,7 +431,12 @@ mod tests {
 
     #[test]
     fn session_stats_ignore_resumed_words() {
-        let mut app = App::new(None, Some(10), Some(VISIBLE_LINES));
+        let mut app = App::new(
+            None,
+            Some(10),
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.load_cassettes(vec![Cassette::from_sides(
             "twelve resumed words already on the tape from a previous session sit here".into(),
             String::new(),
@@ -435,7 +468,12 @@ mod tests {
 
     #[test]
     fn tape_ratio_tracks_words_against_goal() {
-        let mut app = App::new(None, Some(10), Some(VISIBLE_LINES));
+        let mut app = App::new(
+            None,
+            Some(10),
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         assert_eq!(app.tape_ratio(), Some(0.0));
         app.modify_focused(|c| {
             for ch in "one two three four five".chars() {
@@ -447,7 +485,12 @@ mod tests {
 
     #[test]
     fn tape_ratio_clamps_at_full() {
-        let mut app = App::new(None, Some(2), Some(VISIBLE_LINES));
+        let mut app = App::new(
+            None,
+            Some(2),
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.modify_focused(|c| {
             for ch in "a b c d".chars() {
                 c.insert(ch);
@@ -462,7 +505,12 @@ mod tests {
 
     #[test]
     fn tape_ratio_follows_timer_when_no_goal() {
-        let mut app = App::new(Some(4), None, Some(VISIBLE_LINES));
+        let mut app = App::new(
+            Some(4),
+            None,
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         assert_eq!(app.tape_ratio(), Some(0.0));
         app.tick_timer();
         app.tick_timer();
@@ -471,13 +519,23 @@ mod tests {
 
     #[test]
     fn tape_ratio_absent_without_goal_or_timer() {
-        let app = App::new(None, None, Some(VISIBLE_LINES));
+        let app = App::new(
+            None,
+            None,
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         assert_eq!(app.tape_ratio(), None, "no goal, no timer: no bar");
     }
 
     #[test]
     fn timer_expiry_flashes_status_and_bell_once() {
-        let mut app = App::new(Some(2), None, Some(VISIBLE_LINES));
+        let mut app = App::new(
+            Some(2),
+            None,
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.tick_timer();
         assert!(app.status_msg.is_none());
         app.tick_timer(); // 1 -> 0
@@ -491,7 +549,12 @@ mod tests {
 
     #[test]
     fn goal_reached_announces_once() {
-        let mut app = App::new(None, Some(3), Some(VISIBLE_LINES));
+        let mut app = App::new(
+            None,
+            Some(3),
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.modify_focused(|c| {
             for ch in "one two three".chars() {
                 c.insert(ch);
@@ -509,7 +572,12 @@ mod tests {
 
     #[test]
     fn transient_status_clears_after_countdown() {
-        let mut app = App::new(Some(1), None, Some(VISIBLE_LINES));
+        let mut app = App::new(
+            Some(1),
+            None,
+            Some(VISIBLE_LINES),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.tick_timer(); // fires the flash
         assert!(app.status_msg.is_some());
         for _ in 0..20 {
@@ -534,9 +602,25 @@ mod tests {
     #[test]
     fn modify_focused_marks_dirty() {
         let mut app = test_app();
-        assert!(!app.dirty);
+        assert!(!app.cassettes[0].dirty);
         app.modify_focused(|c| c.insert('a'));
-        assert!(app.dirty);
+        assert!(app.cassettes[0].dirty);
+    }
+
+    #[test]
+    fn editing_marks_only_the_focused_cassette_dirty() {
+        // The whole point of per-cassette dirty: an autosave must write the one
+        // cassette that changed, not rewrite every cassette in the session.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.add_cassette();
+        assert_eq!(app.dirty_indices(), Vec::<usize>::new(), "clean to start");
+
+        app.focus_idx = 1;
+        app.modify_focused(|c| c.insert('x'));
+        assert_eq!(app.dirty_indices(), vec![1], "only the focused one");
+
+        app.clear_dirty(1);
+        assert_eq!(app.dirty_indices(), Vec::<usize>::new(), "cleared");
     }
 
     #[test]
@@ -549,7 +633,12 @@ mod tests {
         assert!(!app.idle_nudge());
 
         // Timed session: nudged after the threshold.
-        let mut app = App::new(Some(60), None, None);
+        let mut app = App::new(
+            Some(60),
+            None,
+            None,
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         for _ in 0..App::IDLE_NUDGE_SECS {
             app.tick_idle();
         }
@@ -568,7 +657,12 @@ mod tests {
 
     #[test]
     fn timer_expiry_message_matches_record_mode() {
-        let mut app = App::new(Some(1), None, None);
+        let mut app = App::new(
+            Some(1),
+            None,
+            None,
+            "01JTESTSESSN00000000000000".to_string(),
+        );
         app.record = true;
         app.tick_timer();
         assert!(app.status_msg.as_deref().unwrap().contains("^C to save"));
