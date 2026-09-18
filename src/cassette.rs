@@ -151,6 +151,32 @@ impl Cassette {
         }
     }
 
+    /// Rebuild a cassette from saved text with the cursor at a specific character offset
+    /// into side A. The offset is a character count (not a byte offset), and is clamped
+    /// to the length of side A. Side A is active with the given cursor position, side B
+    /// is stored, no undo history.
+    #[allow(dead_code)]
+    pub fn from_sides_with_cursor(
+        side_a: String,
+        side_b: String,
+        topic: Option<String>,
+        cursor: usize,
+    ) -> Self {
+        // Split side_a at the character offset, clamping to the length.
+        let chars: Vec<char> = side_a.chars().collect();
+        let split_pos = cursor.min(chars.len());
+        let left = chars[..split_pos].iter().collect::<String>();
+        let right = chars[split_pos..].iter().collect::<String>();
+
+        Self {
+            left,
+            right,
+            back_left: side_b,
+            topic,
+            ..Self::default()
+        }
+    }
+
     pub fn text(&self) -> String {
         format!("{}{}", self.left, self.right)
     }
@@ -776,5 +802,27 @@ mod tests {
         c.open_above();
         assert_eq!(c.text(), "one\n\ntwo");
         assert_eq!(c.cursor_pos(), 4);
+    }
+
+    #[test]
+    fn from_sides_with_cursor_splits_side_a_at_a_character_offset() {
+        let c = Cassette::from_sides_with_cursor("hello world".to_string(), String::new(), None, 5);
+        assert_eq!(c.cursor_pos(), 5);
+        assert_eq!(c.side_a_text(), "hello world");
+    }
+
+    #[test]
+    fn from_sides_with_cursor_clamps_past_the_end() {
+        let c = Cassette::from_sides_with_cursor("short".to_string(), String::new(), None, 999);
+        assert_eq!(c.cursor_pos(), 5, "an offset past the end lands at the end");
+    }
+
+    #[test]
+    fn from_sides_with_cursor_counts_characters_not_bytes() {
+        // Multi-byte text is the case a byte offset gets wrong, and the crate
+        // counts characters everywhere else (`cursor_pos` is chars().count()).
+        let c = Cassette::from_sides_with_cursor("héllo".to_string(), String::new(), None, 2);
+        assert_eq!(c.cursor_pos(), 2);
+        assert_eq!(c.side_a_text(), "héllo");
     }
 }
