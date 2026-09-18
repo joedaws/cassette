@@ -355,9 +355,10 @@ fn main() -> io::Result<()> {
         app.load_cassettes(cassettes);
     }
 
-    let mut writer = store
-        .as_ref()
-        .map(|s| session_writer::SessionWriter::open(s, &app.session, created_here));
+    let mut writer = store.as_ref().map(|s| {
+        let (writer_id, writer_name) = resolve_tui_writer(s, &args);
+        session_writer::SessionWriter::open(s, &app.session, created_here, &writer_id, &writer_name)
+    });
     if let Some(w) = writer.as_mut() {
         // Every cassette on screen is a store cassette — the ones a template
         // seeded and the single empty one a bare launch starts with alike.
@@ -499,6 +500,37 @@ fn finish_session(app: &App, session: Option<&str>) {
         return;
     }
     eprintln!("cassette: saved to session {session}");
+}
+
+/// The writer identity a TUI session attributes its work to, resolved
+/// exactly the way every queue command resolves it: `--writer`, else
+/// `$CASSETTE_WRITER`, else `$USER` (`resolve_writer_name`), then through
+/// the registry — auto-registering a bare `$USER` as a human, and requiring
+/// that an explicitly named writer already exist, so a typo'd `--writer` is
+/// exit 2 here as it is for `queue write`.
+///
+/// It is not cosmetic. The returned id lands in each cassette's
+/// `last_writer`, and the name is stamped into the lock anchor another
+/// writer reads when it is told who holds a cassette — so a TUI that
+/// resolved this differently would attribute the same session to a
+/// different writer than the CLI does.
+///
+/// Returns `(writer id, display name)`.
+fn resolve_tui_writer(store: &store::Store, args: &cli::Args) -> (String, String) {
+    let (name, source) = resolve_writer_name(args.writer.as_deref())
+        .unwrap_or_else(|msg| exit_usage(&msg, args.json));
+    let resolved = match source {
+        queue::WriterSource::Env => store
+            .resolve_writer(&name)
+            .map_err(queue::resolve_error_to_queue_error),
+        queue::WriterSource::Flag => store
+            .require_writer(&name)
+            .map_err(queue::require_error_to_queue_error),
+    };
+    match resolved {
+        Ok((id, _kind)) => (id, name),
+        Err(e) => exit_queue_err(&e, args.json),
+    }
 }
 
 /// The store session this launch writes to, per the spec's entry-point

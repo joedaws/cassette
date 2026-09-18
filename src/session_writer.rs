@@ -46,35 +46,26 @@ pub struct SessionWriter<'a> {
     guard: Option<(usize, LockGuard)>,
 }
 
-/// The writer identity a TUI session attributes its work to:
-/// `$CASSETTE_WRITER`, else `$USER`, resolved through the registry (which
-/// registers an unseen name as a human on first sight — a person at a
-/// terminal is exactly that).
-///
-/// Falls back to using the bare name as its own id when the registry cannot
-/// be read. Attribution strings are not the words: a freewriting session
-/// must not refuse to start because `writers.toml` has the wrong
-/// permissions, and `Store::add_cassette` already takes the same stance for
-/// the same reason.
-fn identity(store: &Store) -> (String, String) {
-    let name = std::env::var("CASSETTE_WRITER")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|| "cassette".to_string());
-    let writer = store
-        .resolve_writer(&name)
-        .map(|(id, _kind)| id)
-        .unwrap_or_else(|_| name.clone());
-    (writer, name)
-}
-
 impl<'a> SessionWriter<'a> {
     /// Bind a writer to an existing store session. `created_here` says
     /// whether this run created it — see `finish`.
-    pub fn open(store: &'a Store, session: &str, created_here: bool) -> Self {
-        let (writer, name) = identity(store);
+    ///
+    /// `writer` is the registry id and `name` the display name, both
+    /// resolved by the caller through the same path every queue command
+    /// uses (`main.rs`'s `resolve_tui_writer`). They are not cosmetic: the
+    /// id lands in each cassette's `last_writer`, and the name is stamped
+    /// into the lock anchor another writer reads when it is told who holds a
+    /// cassette. Resolving them here instead would either re-implement that
+    /// precedence — dropping `--writer` and its rule that an explicitly
+    /// named writer must already be registered — or make `open` fallible.
+    pub fn open(
+        store: &'a Store,
+        session: &str,
+        created_here: bool,
+        writer: &str,
+        name: &str,
+    ) -> Self {
+        let (writer, name) = (writer.to_string(), name.to_string());
         SessionWriter {
             store,
             session: session.to_string(),
@@ -229,21 +220,87 @@ impl<'a> SessionWriter<'a> {
         Ok(())
     }
 
+    /// Whether the **store** agrees this session holds nothing — the
+    /// question `finish` has to answer before it deletes a directory.
+    ///
+    /// `App::is_empty` cannot answer it. `App` only ever knows the cassettes
+    /// the TUI itself created, and this whole phase exists because other
+    /// writers touch the same session concurrently: an agent that found the
+    /// session through `session list` and ran `queue new` + `queue write`
+    /// is completely invisible in `app.cassettes`. Judging from memory and
+    /// then calling `remove_dir_all` destroyed its words and its live lock
+    /// anchor along with the directory.
+    ///
+    /// So the store is re-scanned, and every one of these blocks removal:
+    ///
+    /// - a cassette with text on either side;
+    /// - a cassette id `app.cassettes` has never seen, **even when it is
+    ///   empty** — somebody else created it and may be about to write it;
+    /// - a file the scanner could not parse, which is still a file somebody
+    ///   wrote;
+    /// - a lock anchor somebody currently holds;
+    /// - any I/O error at all. A store we cannot read is a store we must not
+    ///   delete from, so every failure below answers "not empty".
+    fn store_is_empty(&self, app: &App) -> bool {
+        let Ok(scan) = self.store.scan_session(&self.session) else {
+            return false;
+        };
+        if scan.unreadable > 0 {
+            return false;
+        }
+        for stored in &scan.cassettes {
+            let (side_a, side_b) = crate::queue::json::split_sides(&stored.body);
+            if !side_a.trim().is_empty() || !side_b.trim().is_empty() {
+                return false;
+            }
+            if !app.cassettes.iter().any(|c| c.id == stored.meta.id) {
+                return false;
+            }
+        }
+        // Anchors are named by cassette id, so the directory listing is the
+        // id list `Store::is_free` wants — including ids `scan_session`
+        // never saw, which is exactly the case that matters.
+        match std::fs::read_dir(self.store.locks_dir(&self.session)) {
+            Ok(entries) => {
+                for entry in entries {
+                    let Ok(entry) = entry else { return false };
+                    let name = entry.file_name();
+                    let Some(id) = name.to_str() else {
+                        return false;
+                    };
+                    if !self.store.is_free(&self.session, id).unwrap_or(false) {
+                        return false;
+                    }
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+        true
+    }
+
     /// Final flush, release the guard, and clean up after a session that
     /// recorded nothing.
     ///
     /// An empty session has always written nothing; the store equivalent is
     /// removing the session directory, so a mistaken launch does not litter
-    /// `session list`. Only a session **this run created** qualifies — one
-    /// that was opened holds a human's earlier work, whatever it currently
-    /// contains. The guard is dropped before the directory goes, so the
-    /// anchor it holds is not unlinked out from under it.
+    /// `session list`. Three things must all agree first:
+    ///
+    /// 1. **this run created the session** — one that was merely *opened*
+    ///    holds a human's earlier work, whatever it currently contains;
+    /// 2. **the TUI wrote nothing** (`App::is_empty`);
+    /// 3. **the store holds nothing either** (`store_is_empty`) — see its
+    ///    doc comment; without this a concurrent writer's cassettes go with
+    ///    the directory.
+    ///
+    /// The guard is dropped before the directory goes, so the anchor it
+    /// holds is not unlinked out from under it.
     pub fn finish(&mut self, app: &mut App) -> io::Result<()> {
         let flushed = self.flush_held(app).map_err(io::Error::from);
         self.guard = None;
         flushed?;
 
-        if self.created_here && app.is_empty() {
+        if self.created_here && app.is_empty() && self.store_is_empty(app) {
             let dir = self.store.session_dir(&self.session);
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => {}
@@ -302,7 +359,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
         w.finish(&mut app).expect("finish");
         assert!(
             store.list_sessions().expect("list").is_empty(),
@@ -316,7 +373,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, false);
+        let mut w = SessionWriter::open(&store, &session, false, "w", "w");
         w.finish(&mut app).expect("finish");
         assert_eq!(store.list_sessions().expect("list").len(), 1);
     }
@@ -326,7 +383,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("words that must survive quit"));
 
@@ -357,7 +414,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("text"));
         w.flush_focused(&mut app).expect("flush");
@@ -378,7 +435,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
         w.acquire(&mut app, 0).expect("acquire");
         w.acquire(&mut app, 0)
             .expect("re-acquiring the held cassette must not fail");
@@ -392,7 +449,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let w = SessionWriter::open(&store, &session, true);
+        let w = SessionWriter::open(&store, &session, true, "w", "w");
         app.add_cassette();
         assert!(app.cassettes[1].id.is_empty(), "pure code mints no ids");
 
@@ -414,10 +471,96 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("something"));
         w.finish(&mut app).expect("finish");
         assert_eq!(store.list_sessions().expect("list").len(), 1);
+    }
+
+    /// A cassette added to the store behind the TUI's back, as a concurrent
+    /// agent's `queue new` + `queue write` would leave it.
+    fn add_behind_the_tuis_back(store: &Store, session: &str, body: &str) -> String {
+        let id = crate::store::ids::new_id();
+        let m = CassetteMeta {
+            id: id.clone(),
+            topic: Some("agentwork".to_string()),
+            priority: 900,
+            status: Status::Open,
+            locked_by: None,
+            created_by: "agent".to_string(),
+            last_writer: "agent".to_string(),
+            updated_at: crate::store::meta::now_utc(),
+        };
+        store.add_cassette(session, &m, body).expect("add");
+        id
+    }
+
+    #[test]
+    fn finish_never_removes_a_session_another_writer_has_written_into() {
+        // The reproduction: a bare launch creates session S; an agent finds
+        // S through `session list` and runs `queue new` + `queue write`; the
+        // user quits without typing. Judging emptiness from `App` — which
+        // only ever knows the cassettes the TUI itself created — deleted the
+        // directory, taking the agent's words and its lock anchor with it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 1);
+        let agent_id =
+            add_behind_the_tuis_back(&store, &session, "## Side A\n\nwords the agent wrote\n");
+
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        w.finish(&mut app).expect("finish");
+
+        assert_eq!(
+            store.list_sessions().expect("list").len(),
+            1,
+            "a session another writer has written into is not this run's to delete"
+        );
+        let scan = store.scan_session(&session).expect("scan");
+        assert!(
+            scan.cassettes
+                .iter()
+                .any(|c| c.meta.id == agent_id && c.body.contains("words the agent wrote")),
+            "and the agent's cassette survives intact"
+        );
+    }
+
+    #[test]
+    fn finish_never_removes_a_session_holding_a_cassette_the_tui_never_saw() {
+        // Empty today is not empty tomorrow: the agent created it and may be
+        // about to write it. `session_writer` has no way to tell the two
+        // moments apart, so an unknown id blocks removal on its own.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 1);
+        add_behind_the_tuis_back(&store, &session, "");
+
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        w.finish(&mut app).expect("finish");
+
+        assert_eq!(store.list_sessions().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn finish_never_removes_a_session_with_a_live_lock_anchor() {
+        // `remove_dir_all` takes `.locks/` with it, so a held anchor would be
+        // unlinked out from under whoever is holding it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 1);
+        let held = store
+            .lock(
+                &session,
+                &app.cassettes[0].id.clone(),
+                &Attribution::for_now("other", "other"),
+            )
+            .expect("another holder takes the lock");
+
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        w.finish(&mut app).expect("finish");
+
+        assert_eq!(store.list_sessions().expect("list").len(), 1);
+        drop(held);
     }
 }
