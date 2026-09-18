@@ -2006,3 +2006,66 @@ fn an_unknown_side_value_exits_two() {
     ]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
+
+#[test]
+fn stats_and_find_read_a_session_written_through_the_store() {
+    // Phase 5a: `stats` and `find` read only the session store, not the
+    // legacy notes dir. A session created and written through the same
+    // primitives the TUI now uses must show up in both commands.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let write = write_stdin(
+        &["queue", "write", &cid, "--session", &sid],
+        &root,
+        b"five whole words right here\n",
+    );
+    assert_eq!(
+        write.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&write.stderr)
+    );
+
+    let stats = Command::new(bin())
+        .args(["stats"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(stats.status.code(), Some(0), "{}", stderr(&stats));
+    let stats_out = String::from_utf8_lossy(&stats.stdout);
+    assert!(
+        stats_out.contains("1 note") && stats_out.contains("5 words"),
+        "{stats_out}"
+    );
+
+    let find = Command::new(bin())
+        .args(["find"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(find.status.code(), Some(0), "{}", stderr(&find));
+    let find_out = String::from_utf8_lossy(&find.stdout);
+    assert!(find_out.contains(&sid), "{find_out}");
+    assert!(find_out.contains("gratitude"), "{find_out}");
+    assert!(
+        find_out.contains("five whole words right here"),
+        "{find_out}"
+    );
+}

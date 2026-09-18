@@ -1,110 +1,70 @@
-use std::path::Path;
-
 use chrono::NaiveDateTime;
 
-use crate::output;
+use crate::queue::json::split_sides;
+use crate::store::{Store, StoredCassette};
 
-/// One saved note as `cassette find` shows it.
+/// One session as `cassette find` shows it.
 pub struct NoteEntry {
-    /// Openable form shown in the listing: the ~-abbreviated full path when
-    /// scanned from disk, the bare name otherwise. Queries match the bare
-    /// name only, never the directory part.
+    /// Openable form shown in the listing: the session id. Queries match
+    /// this and the session's own content, never a directory part — there
+    /// is none any more.
     pub path: String,
     pub date: NaiveDateTime,
     pub words: usize,
     pub topics: Vec<String>,
     pub preview: String,
-    pub draft: bool,
     haystack: String,
 }
 
 const PREVIEW_CHARS: usize = 72;
 
-/// Frontmatter `date:` with or without a time part; anything else is None.
-fn parse_date(v: &str) -> Option<NaiveDateTime> {
-    let v = v.trim();
-    NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M:%S")
-        .ok()
-        .or_else(|| {
-            chrono::NaiveDate::parse_from_str(v.get(..10)?, "%Y-%m-%d")
-                .ok()?
-                .and_hms_opt(0, 0, 0)
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// A session's total words, summed across its cassettes the same way
+/// `Cassette::word_count` does — see `stats::session_word_count`, which this
+/// deliberately matches so the two commands never disagree about a
+/// session's length.
+fn session_word_count(cassettes: &[StoredCassette]) -> usize {
+    cassettes
+        .iter()
+        .map(|c| {
+            let (side_a, side_b) = split_sides(&c.body);
+            side_a.split_whitespace().count() + side_b.split_whitespace().count()
         })
+        .sum()
 }
 
-/// Build a note's listing entry from its content; `fallback` (the file's
-/// mtime) stands in when the frontmatter has no parseable date, so notes the
-/// writer didn't produce still browse.
-pub fn parse_entry(name: &str, content: &str, fallback: NaiveDateTime) -> NoteEntry {
-    let mut date = None;
-    let mut words = 0;
-    let mut in_frontmatter = content.lines().next() == Some("---");
-    let mut past_opening = false;
-    let mut topics = Vec::new();
-    let mut preview = String::new();
-    for line in content.lines() {
-        if in_frontmatter {
-            if !past_opening {
-                past_opening = true;
-                continue;
-            }
-            if line == "---" {
-                in_frontmatter = false;
-            } else if let Some(v) = line.strip_prefix("date:") {
-                date = parse_date(v);
-            } else if let Some(v) = line.strip_prefix("word_count:") {
-                words = v.trim().parse().unwrap_or(0);
-            }
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("# Cassette") {
-            if let Some((_, topic)) = rest.split_once(" — ") {
-                topics.push(topic.trim().to_string());
-            }
-        } else if preview.is_empty() && !line.trim().is_empty() && !line.starts_with('#') {
-            preview = truncate(line.trim(), PREVIEW_CHARS);
-        }
-    }
-    NoteEntry {
-        path: name.to_string(),
-        date: date.unwrap_or(fallback),
-        words,
-        topics,
-        preview,
-        draft: output::is_draft(content),
-        haystack: format!("{}\n{}", name, content).to_lowercase(),
-    }
+/// The first non-blank, non-heading line of a cassette's body, truncated for
+/// the listing.
+fn first_body_line(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| truncate(l, PREVIEW_CHARS))
+        .unwrap_or_default()
 }
 
-/// Read every `.md` note in the notes dir (non-recursive, like the writer),
-/// using each file's mtime as the date fallback.
-pub fn scan_notes_dir(dir: &Path) -> Vec<NoteEntry> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let home = dirs::home_dir();
-    entries
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
-        .filter_map(|e| {
-            let content = std::fs::read_to_string(e.path()).ok()?;
-            let mtime: chrono::DateTime<chrono::Local> =
-                e.metadata().and_then(|m| m.modified()).ok()?.into();
-            let name = e.file_name().to_string_lossy().into_owned();
-            let mut entry = parse_entry(&name, &content, mtime.naive_local());
-            entry.path = display_path(&e.path(), home.as_deref());
-            Some(entry)
-        })
-        .collect()
-}
-
-/// The path as the listing shows it: under the home dir it starts with `~`,
-/// anywhere else it stays absolute.
-fn display_path(path: &Path, home: Option<&Path>) -> String {
-    match home.and_then(|h| path.strip_prefix(h).ok()) {
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
+/// A session's topics (each cassette's, in queue order) and its preview,
+/// drawn from the highest-priority cassette. `Store::scan_session` already
+/// returns cassettes in queue order — open by ascending priority, closed
+/// last — so the first cassette in the slice is that one.
+fn topics_and_preview(cassettes: &[StoredCassette]) -> (Vec<String>, String) {
+    let topics = cassettes
+        .iter()
+        .filter_map(|c| c.meta.topic.clone())
+        .collect();
+    let preview = cassettes
+        .first()
+        .map(|c| first_body_line(&c.body))
+        .unwrap_or_default();
+    (topics, preview)
 }
 
 const MAX_LISTED: usize = 10;
@@ -135,9 +95,6 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>) -> String {
             e.words,
             e.path
         ));
-        if e.draft {
-            out.push_str(" (draft)");
-        }
         if !e.topics.is_empty() {
             out.push_str(&format!(" — {}", e.topics.join(", ")));
         }
@@ -156,96 +113,141 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>) -> String {
     out
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max).collect();
-    out.push('…');
-    out
+/// One `NoteEntry` per session in the store: the session id as its openable
+/// form, its date from `session.toml`'s `created` (local time), words and
+/// topics summed/collected across its cassettes, and a preview from the
+/// highest-priority one.
+///
+/// The legacy notes dir is deliberately not consulted — see the design's
+/// decision 7. A session whose `created` timestamp fails to parse is
+/// skipped, the same treatment `Store::list_sessions` gives a `session.toml`
+/// that fails to parse at all.
+pub fn scan_store(store: &Store) -> Vec<NoteEntry> {
+    let Ok(sessions) = store.list_sessions() else {
+        return Vec::new();
+    };
+    sessions
+        .into_iter()
+        .filter_map(|(id, meta)| {
+            let date = chrono::DateTime::parse_from_rfc3339(&meta.created)
+                .ok()?
+                .with_timezone(&chrono::Local)
+                .naive_local();
+            let scan = store.scan_session(&id).ok()?;
+            let (topics, preview) = topics_and_preview(&scan.cassettes);
+            let words = session_word_count(&scan.cassettes);
+            let haystack = format!(
+                "{id}\n{}",
+                scan.cassettes
+                    .iter()
+                    .map(|c| c.body.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+            .to_lowercase();
+            Some(NoteEntry {
+                path: id,
+                date,
+                words,
+                topics,
+                preview,
+                haystack,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::meta::{CassetteMeta, Status};
+    use crate::store::session::SessionMeta;
     use chrono::NaiveDateTime;
 
     fn dt(s: &str) -> NaiveDateTime {
         NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").unwrap()
     }
 
-    const NOTE: &str = "---\n\
-        date: 2026-07-13T09:12:00\n\
-        word_count: 412\n\
-        cassettes: 2\n\
-        ---\n\
-        # Cassette 1 — gratitude\n\n\
-        ## Side A\n\n\
-        woke up thinking about the demo\n\n\
-        # Cassette 2 — priorities\n\n\
-        ## Side A\n\n\
-        ship the find command\n";
-
-    #[test]
-    fn parse_entry_reads_frontmatter_topics_and_preview() {
-        let e = parse_entry("2026-07-13.md", NOTE, dt("2000-01-01T00:00:00"));
-        assert_eq!(e.path, "2026-07-13.md");
-        assert_eq!(e.date, dt("2026-07-13T09:12:00"));
-        assert_eq!(e.words, 412);
-        assert_eq!(e.topics, vec!["gratitude", "priorities"]);
-        assert_eq!(e.preview, "woke up thinking about the demo");
-        assert!(!e.draft);
+    /// A fixture entry for exercising `render` directly, bypassing
+    /// `scan_store` (and so the store entirely) the way `NoteMeta`'s test
+    /// fixtures in `stats.rs` do.
+    fn entry(path: &str, date: &str, words: usize) -> NoteEntry {
+        let preview = format!("body of {path}");
+        NoteEntry {
+            path: path.to_string(),
+            date: dt(date),
+            words,
+            topics: Vec::new(),
+            haystack: format!("{path}\n{preview}").to_lowercase(),
+            preview,
+        }
     }
 
     #[test]
-    fn parse_entry_draft_and_date_only() {
-        let note = "---\ndate: 2026-07-11\ndraft: true\nword_count: 188\n---\n\
-                    # Cassette 1\n\n## Side A\n\ncan't sleep again\n";
-        let e = parse_entry("late-night.md", note, dt("2000-01-01T00:00:00"));
-        assert!(e.draft);
+    fn first_body_line_skips_blanks_and_headings() {
         assert_eq!(
-            e.date,
-            dt("2026-07-11T00:00:00"),
-            "date-only lands on midnight"
+            first_body_line("## Side A\n\n\nreal first line\nmore\n"),
+            "real first line"
         );
-        assert!(e.topics.is_empty());
+        assert_eq!(first_body_line("## Side A\n\n"), "");
     }
 
     #[test]
-    fn parse_entry_falls_back_to_mtime_and_skips_headings() {
-        let e = parse_entry(
-            "loose.md",
-            "# just a heading\n\nreal first line\n",
-            dt("2026-07-01T08:00:00"),
-        );
-        assert_eq!(
-            e.date,
-            dt("2026-07-01T08:00:00"),
-            "no frontmatter date → fallback"
-        );
-        assert_eq!(e.words, 0);
-        assert_eq!(
-            e.preview, "real first line",
-            "headings never become previews"
-        );
+    fn first_body_line_truncates_long_previews() {
+        let long = "x".repeat(100);
+        assert_eq!(first_body_line(&long).chars().count(), 73, "72 + ellipsis");
+        assert!(first_body_line(&long).ends_with('…'));
     }
 
     #[test]
-    fn parse_entry_truncates_long_previews() {
-        let long = format!("---\ndate: 2026-07-13T09:12:00\n---\n{}\n", "x".repeat(100));
-        let e = parse_entry("n.md", &long, dt("2000-01-01T00:00:00"));
-        assert_eq!(e.preview.chars().count(), 73, "72 chars + ellipsis");
-        assert!(e.preview.ends_with('…'));
-    }
+    fn a_session_becomes_one_find_entry_with_topics_and_preview() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = store
+            .create_session(&SessionMeta {
+                alias: None,
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session");
+        for (body, priority, topic) in [
+            ("first thing to say", 10, "gratitude"),
+            ("second cassette body", 20, "priorities"),
+        ] {
+            let m = CassetteMeta {
+                id: crate::store::ids::new_id(),
+                topic: Some(topic.to_string()),
+                priority,
+                status: Status::Open,
+                locked_by: None,
+                created_by: "w".to_string(),
+                last_writer: "w".to_string(),
+                updated_at: crate::store::meta::now_utc(),
+            };
+            store
+                .add_cassette(&sid, &m, &format!("## Side A\n\n{body}\n"))
+                .expect("add");
+        }
 
-    fn entry(name: &str, date: &str, words: usize) -> NoteEntry {
-        parse_entry(
-            name,
-            &format!(
-                "---\ndate: {date}\nword_count: {words}\n---\n# Cassette 1\n\n## Side A\n\nbody of {name}\n"
-            ),
-            dt("2000-01-01T00:00:00"),
-        )
+        let entries = scan_store(&store);
+        assert_eq!(
+            entries.len(),
+            1,
+            "one session is one entry, not one per cassette"
+        );
+        let e = &entries[0];
+        assert_eq!(e.path, sid);
+        assert_eq!(e.words, 7, "words sum across the session's cassettes");
+        assert_eq!(
+            e.topics,
+            vec!["gratitude".to_string(), "priorities".to_string()],
+            "topics come from every cassette, in queue order"
+        );
+        assert_eq!(
+            e.preview, "first thing to say",
+            "preview comes from the highest-priority (first-in-queue) cassette"
+        );
     }
 
     #[test]
@@ -267,14 +269,11 @@ mod tests {
     }
 
     #[test]
-    fn render_marks_drafts_and_topics() {
-        let e = parse_entry(
-            "d.md",
-            "---\ndate: 2026-07-13T09:12:00\ndraft: true\nword_count: 5\n---\n# Cassette 1 — gratitude\n\n## Side A\n\nhi\n",
-            dt("2000-01-01T00:00:00"),
-        );
+    fn render_shows_topics() {
+        let mut e = entry("d.md", "2026-07-13T09:12:00", 5);
+        e.topics = vec!["gratitude".to_string()];
         let out = render(std::slice::from_ref(&e), None);
-        assert!(out.contains("d.md (draft) — gratitude"), "{out}");
+        assert!(out.contains("d.md — gratitude"), "{out}");
     }
 
     #[test]
@@ -322,27 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn display_path_abbreviates_home() {
-        assert_eq!(
-            display_path(
-                Path::new("/home/me/.local/share/cassette/notes/a.md"),
-                Some(Path::new("/home/me")),
-            ),
-            "~/.local/share/cassette/notes/a.md"
-        );
-        assert_eq!(
-            display_path(Path::new("/srv/notes/a.md"), Some(Path::new("/home/me"))),
-            "/srv/notes/a.md",
-            "paths outside home stay as-is"
-        );
-        assert_eq!(
-            display_path(Path::new("/srv/notes/a.md"), None),
-            "/srv/notes/a.md",
-            "no home dir → path as-is"
-        );
-    }
-
-    #[test]
     fn render_shows_the_full_path() {
         let mut e = entry("new.md", "2026-07-13T09:12:00", 412);
         e.path = "~/.local/share/cassette/notes/new.md".into();
@@ -362,15 +340,5 @@ mod tests {
             out, "no notes match 'notes'",
             "directory names must not satisfy queries"
         );
-    }
-
-    #[test]
-    fn parse_entry_no_body_text_means_no_preview() {
-        let e = parse_entry(
-            "n.md",
-            "---\ndate: 2026-07-13T09:12:00\n---\n# Cassette 1\n\n## Side A\n\n\n",
-            dt("2000-01-01T00:00:00"),
-        );
-        assert_eq!(e.preview, "");
     }
 }

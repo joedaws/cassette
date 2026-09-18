@@ -7,6 +7,12 @@ use crate::theme::ThemeSpec;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
+    /// The old flat notes-dir override. No longer read anywhere: `stats`
+    /// and `find` moved to reading the session store instead of this
+    /// directory. Kept, allowed dead, so an existing config file that still
+    /// sets `notes_dir` continues to parse rather than erroring; deleting it
+    /// outright belongs to a cleanup pass, not this task.
+    #[allow(dead_code)]
     pub notes_dir: Option<PathBuf>,
     /// Text rows shown per cassette; overridden by the `-l` CLI flag.
     pub visible_lines: Option<usize>,
@@ -58,6 +64,11 @@ pub fn load_config() -> Result<Config, String> {
         .map_err(|e| format!("invalid config '{}':\n{}", config_path.display(), e))
 }
 
+/// No longer called: `stats` and `find` used this to resolve the legacy
+/// notes dir before they moved to reading the session store. Left in place
+/// rather than deleted, since removing it is a cleanup this task's brief
+/// doesn't ask for.
+#[allow(dead_code)]
 pub fn default_notes_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("cassette").join("notes"))
 }

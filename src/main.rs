@@ -75,13 +75,14 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    let notes_dir = cfg.notes_dir.clone().or_else(config::default_notes_dir);
-
+    // `stats` and `find` read only the session store — the legacy notes dir
+    // (`cfg.notes_dir` / `config::default_notes_dir`) is deliberately not
+    // consulted here. See the design's decision 7: existing notes stop
+    // appearing in these two commands, on purpose, with no fallback and no
+    // migration; the files themselves are untouched.
     if args.stats {
-        let metas = notes_dir
-            .as_deref()
-            .map(stats::scan_notes_dir)
-            .unwrap_or_default();
+        let store = store::Store::new(store_root(args.json));
+        let metas = stats::scan_store(&store);
         println!(
             "{}",
             stats::render(&metas, chrono::Local::now().date_naive())
@@ -90,10 +91,8 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(words) = &args.find {
-        let entries = notes_dir
-            .as_deref()
-            .map(find::scan_notes_dir)
-            .unwrap_or_default();
+        let store = store::Store::new(store_root(args.json));
+        let entries = find::scan_store(&store);
         let query = (!words.is_empty()).then(|| words.join(" "));
         println!("{}", find::render(&entries, query.as_deref()));
         return Ok(());
