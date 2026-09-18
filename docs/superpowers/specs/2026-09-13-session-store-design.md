@@ -636,7 +636,10 @@ phases, each independently testable and each leaving the tool working.
      cassettes, `Store::holds`, `queue write --side/--append/--replace`, and repointing
      `stats`/`find`. Spec: `2026-09-17-tui-writes-the-store-design.md`.
    - **5b — The TUI reads what others write.** Live-sync polling, `merge_external`, the
-     read-only banner with per-tick retry, sticky-lock indicators.
+     read-only banner with per-tick retry, sticky-lock indicators. Spec:
+     `2026-09-18-tui-reads-others-design.md`. Note 5a already landed `refresh_from_disk`
+     inside `acquire` (a Critical its final review caught), so 5b builds on that rather than
+     repeating it.
    - **5c — Queue-shaped display.** Priority ordering, the collapsed closed row,
      `MAX_CASSETTES` applying to open cassettes only, damaged cassettes as error rows, the
      `cassette sessions` picker.
