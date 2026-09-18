@@ -225,12 +225,23 @@ impl From<LockError> for io::Error {
 #[derive(Debug)]
 struct Anchor(File);
 
+impl Anchor {
+    /// Release the flock. Idempotent — `LOCK_UN` on a description that no
+    /// longer holds a lock succeeds and changes nothing — so `LockGuard` may
+    /// call this early to fix its own drop ordering and still let
+    /// `Anchor::drop` be the one place every other path releases through.
+    ///
+    /// Best effort: a failed `LOCK_UN` leaves exactly the close-only release
+    /// this used to rely on, and the callers are `Drop` impls with nobody to
+    /// report to. UFCS for the same reason as `lock`/`try_lock` below.
+    fn release(&self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 impl Drop for Anchor {
     fn drop(&mut self) {
-        // Best effort: a failed `LOCK_UN` leaves exactly the close-only
-        // release this used to rely on, and a `Drop` has nobody to report to.
-        // UFCS for the same reason as `lock`/`try_lock` below.
-        let _ = FileExt::unlock(&self.0);
+        self.release();
     }
 }
 
@@ -253,16 +264,26 @@ pub struct LockGuard {
     /// creation, so this path cannot be derived from a (possibly retopicked)
     /// `CassetteMeta`.
     path: PathBuf,
-    /// Holding the locked `Anchor` IS holding the lock, and dropping it
-    /// releases — see [`Anchor`] for why that release is an explicit
-    /// `LOCK_UN` and not just a `close()`. The `Drop` impl below adds only
-    /// this guard's `HELD` bookkeeping (see the module-level `HELD` doc
-    /// comment); the flock itself is `Anchor`'s business, not its.
+    /// Holding the locked `Anchor` IS holding the lock — see [`Anchor`] for
+    /// why releasing it is an explicit `LOCK_UN` and not just a `close()`.
+    /// The `Drop` impl below releases it by hand before clearing this guard's
+    /// `HELD` bookkeeping (see the module-level `HELD` doc comment), so that
+    /// the kernel and the registry never disagree about who holds what.
     _anchor: Anchor,
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
+        // Release BEFORE clearing the bookkeeping, not after. Fields drop
+        // after the body runs, so clearing first would leave a window — short,
+        // but real — in which `Store::holds` answers "no" about a lock this
+        // process is still holding, and a second thread acting on that answer
+        // would try to acquire and be told `Busy` by us. `HELD` exists
+        // precisely because `flock` cannot tell our own lock from a stranger's
+        // (see its doc comment), so the two must never disagree about the same
+        // instant. `Anchor::release` is idempotent, so `_anchor`'s own drop
+        // below is still free to be the general release path.
+        self._anchor.release();
         if let Some(session) = &self.session {
             clear_held(session, &self.id);
         }
