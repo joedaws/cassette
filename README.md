@@ -32,19 +32,27 @@ them.
   (`t`), or start from a template: define `morning = ["gratitude",
   "priorities", "loose thoughts"]` in your config and `cassette -T morning`
   opens a labeled cassette for each.
-- **A daily practice** — `cassette today` keeps one note per day and appends
-  each sitting as its own session; `cassette stats` reads your streak and
-  weekly/monthly word counts straight out of the notes' frontmatter. Left a
-  thought unfinished? `cassette resume` loads the note back onto the tape.
+- **A daily practice** — `cassette today` opens (or continues) the session
+  aliased with today's date, so every sitting the same day lands in one
+  place; `cassette stats` reads your streak and weekly/monthly word counts
+  straight out of the session store. Left a thought unfinished? `cassette
+  resume` loads the most recent session back onto the tape.
 - **Mini vim** — insert and normal modes, `hjkl`/`w`/`b`/`0`/`$`/`gg`/`G`
   motions, `x`/`dd`, and undo. Enough vim to feel at home, not enough to
   tempt you into editing when you should be writing.
-- **Your words are safe** — dirty sessions autosave every 30 seconds; the
+- **Your words are safe** — dirty cassettes autosave every 30 seconds; the
   terminal is restored and the session saved on crashes, `kill`, and a
   closed terminal window alike; Ctrl+Z suspends cleanly with your words
-  already flushed; and if a session dies before finishing, the next launch
-  offers to resume the draft. Quitting writes clean markdown with YAML
-  frontmatter — ready for your notes vault. Empty sessions write nothing.
+  already flushed. Each cassette is its own file with YAML frontmatter,
+  written straight to the session store as you write — nothing waits for
+  quit. Empty sessions leave no trace.
+- **Shared with agents** — cassette writes into the same session store its
+  `queue`/`session`/`writer` commands already read, so a human at the
+  keyboard and one or more agents working the queue can write different
+  cassettes of the same session side by side, each seeing the other's words.
+  The focused cassette's lock is held for as long as it stays focused; if
+  another writer already holds it, it opens read-only instead of losing your
+  keystrokes.
 - **Themes** — six built-ins (gruvbox, nord, dracula, solarized…), full
   custom themes from the config file, and a ghostty-style `cassette themes`
   listing with color swatches. The default stays true to your terminal's own
@@ -99,6 +107,16 @@ sheet that follows the current mode.
 
 ¹ on terminals with the kitty keyboard protocol (kitty, ghostty, foot, …).
 
+**Focusing a cassette holds its lock**, for as long as it stays focused —
+there is no idle timeout, so tabbing away or leaving cassette open overnight
+does not give it back on its own. If an agent (or another `cassette`
+process) is already holding it, the cassette opens **read-only**: the info
+line shows `-- READ ONLY --`, the help row says why, and every keystroke is
+silently dropped rather than lost at the next flush. Since agents drive the
+queue entirely through the CLI and never need the TUI running, the norm is
+to close a session when you're done with it rather than leave the tape
+loaded — that's what actually releases the lock.
+
 Undo is per side, per cassette, and entering insert mode takes one snapshot —
 so a single `u` takes back the whole burst you just typed. Pasting works the
 same way: a bracketed paste lands as one edit, so one `u` takes back the
@@ -150,20 +168,19 @@ when they *can* fix a stray typo; the default session leaves editing alone.
 
 ## A daily practice
 
-One note per day, however many sittings it takes:
+One session per day, however many sittings it takes:
 
 ```
-cassette today                # opens (or continues) 2026-07-03.md
-cassette today -T morning     # morning pages, straight into today's note
+cassette today                # opens (or continues) the session aliased 2026-07-03
+cassette today -T morning     # morning pages, straight into today's session
 ```
 
-The first `today` session of the day creates a note named after the date in
-the notes dir. Later sessions the same day append to it as their own
-`## Session 2 — 14:30` section — nothing is renamed, nothing overwritten —
-and the note's frontmatter word count keeps the running total. Set
-`daily_format` in the config to change the filename pattern.
+The first `today` launch of the day creates a session aliased with the
+date; later launches the same day find it by that alias and resume it —
+cassettes, topics, both sides, cursor at the end of the text. Set
+`daily_format` in the config to change the alias's date format.
 
-Your history is queryable from the frontmatter alone:
+Your history is queryable straight from the session store:
 
 ```
 $ cassette stats
@@ -173,72 +190,85 @@ this month:  11 notes · 4907 words
 total:       48 notes · 22410 words · since 2026-05-02
 ```
 
-The streak counts consecutive days with at least one note and doesn't break
-until a full day is missed — an unwritten *today* is still yours to write.
+The streak counts consecutive days with at least one session and doesn't
+break until a full day is missed — an unwritten *today* is still yours to
+write. **`stats` and `find` read only the session store**: a session's words
+count from the moment it's created there, and totals started fresh when the
+TUI moved onto the store. Notes written before that move, still sitting in
+`~/.local/share/cassette/notes/`, are no longer counted by either command —
+they were not migrated in, on purpose — but nothing about them changed: the
+files are untouched, still on disk, and still plain markdown you can open,
+grep, or paste into an editor same as always.
 
 ### Picking a thought back up
 
 ```
-cassette find                 # browse recent notes, newest first
-cassette find gratitude       # …filtered by name, topic, or content
-cassette resume               # continue the most recently modified note
-cassette resume myjournal     # continue a specific note
-cassette new myjournal        # same: an existing name always resumes
+cassette find                 # browse recent sessions, newest first
+cassette find gratitude       # …filtered by alias, topic, or content
+cassette resume               # continue the most recently created session
+cassette resume myjournal     # continue the session aliased myjournal
+cassette new myjournal        # start a *new* session aliased myjournal
 ```
 
-`find` lists what's in the notes dir — date, word count, topics, and the
-first line of each note — so you can spot the one to resume without opening
-anything. Each row shows the note's full path (`~`-abbreviated), ready to
-paste into an editor.
+`find` lists what's in the session store — date, word count, topics, and the
+first line of the highest-priority cassette — so you can spot the session to
+resume without opening anything. Each row shows the session's id, ready to
+paste into `--session`.
 
-Resume loads a saved note back into the TUI — cassettes, topics, both sides,
-cursor at the end of the text — and keeps writing to the same file. The note
-keeps its original date (streaks don't care when you edit), and the session's
-stats start from zero: the word-goal reel and the closing recap count only
-what you write this sitting (`12 new words in 4:10 (773 total)`). And if a
-session dies without finishing (power loss, a killed terminal), its autosave
-still carries a `draft: true` marker, so the next launch notices and offers
-to resume it.
+`new <NAME>` always starts a fresh session; it does not look for an existing
+alias by that name the way the old flat-note `new` used to resume a
+same-named file. To continue earlier work, reach for `resume <name>`
+instead — aliases aren't unique, so it picks the most recently created
+session carrying that alias.
+
+Resume loads a session back into the TUI — cassettes, topics, both sides,
+cursor at the end of the last one, all still individually lockable by
+whichever writer opens them — and keeps writing to the same session. The
+session's stats start from zero on resume: the word-goal reel and the
+closing recap count only what you write this sitting (`12 new words in 4:10
+(773 total)`).
 
 ## Saving
 
-On quit, the session is written as markdown. By default it goes to
-`~/.local/share/cassette/notes/` with a timestamp filename:
+Cassette does not batch your session into one file at the end. Each
+cassette is its own file in the session store: the focused one autosaves
+every 30 seconds while you write, and the moment you `Tab`/`Shift+Tab`
+away, the cassette you're leaving is flushed and its lock released *before*
+the next one's is taken — so nothing waits on the 30-second timer to reach
+disk when you move on. The saved-on-crash guarantee covers more than
+panics: SIGTERM and a
+closed terminal window (SIGHUP) both flush the focused cassette and restore
+the terminal on the way out, and Ctrl+Z flushes before handing control back
+to the shell. Sessions with no words leave no trace: a session this run
+created, into which nothing was written by this process or by anyone else,
+is removed rather than littering `session list`.
 
-```
-~/.local/share/cassette/notes/2026-05-31T10-30-00.md
-```
-
-Each cassette becomes a `# Cassette n — topic` section with `## Side A` and
-(when used) `## Side B` under it, prefixed by YAML frontmatter:
+Each cassette file carries YAML frontmatter — its id, topic, queue
+priority, status, sticky lock, who created and last wrote it, and when —
+over a body with `## Side A` and (when used) `## Side B`:
 
 ```markdown
 ---
-date: 2026-05-31T10:30:00
-timer: 10m
-word_goal: 500
-word_count: 347
-cassettes: 2
+id: 01M2QSSJG751F2KCGP17K9GQVY
+topic: morning pages
+priority: 10
+status: open
+locked_by:
+created_by: 01M2QSSJFSWSZ7BW9J4XT7FKD6
+last_writer: 01M2QSSJFSWSZ7BW9J4XT7FKD6
+updated_at: 2026-09-17T13:44:43Z
 ---
+
+## Side A
+
+writing about the morning
 ```
 
-`timer` and `word_goal` appear only when those flags were passed.
-
-Name the file, write to a path, or print to stdout instead:
+Print to stdout instead of the store, writing nothing at all:
 
 ```
-cassette new myjournal            # ~/.local/share/cassette/notes/myjournal.md
-cassette new ~/Documents/draft.md # any path (anything containing a /)
-cassette -o                       # print to stdout, write no file
+cassette -o
 ```
-
-If the name already exists, cassette resumes that note — your words load
-back onto the tape and the session keeps writing to the same file, nothing
-is overwritten. Sessions with no words write no file at all. While you write,
-dirty sessions autosave every 30 seconds, and the saved-on-crash guarantee
-covers more than panics: SIGTERM and a closed terminal window (SIGHUP) both
-save the session and restore the terminal on the way out, and Ctrl+Z flushes
-your words to disk before handing control back to the shell.
 
 After every session, a recap prints to the terminal — words, duration, pace
 (for sessions over 30 seconds), and a per-cassette breakdown when you used
@@ -249,13 +279,30 @@ more than one:
   gratitude: 120 · cassette 2: 227
 ```
 
-## The session store (in progress)
+## The session store
 
-Cassette is growing a second way to hold your writing: a **session store**, where
-each cassette is its own file, so you and one or more agents can write different
-cassettes in the same session without overwriting each other. It is being built
-in phases and is not yet wired into the TUI — today it is reached only through
-the `queue`, `writer`, and `session` subcommands.
+The TUI and the `queue`/`writer`/`session` subcommands write into the same
+**session store**, where each cassette is its own file, so a human at the
+keyboard and one or more agents can write different cassettes of the same
+session without overwriting each other.
+
+**Focus means held.** While a cassette is focused in the TUI, its lock is
+held — the same `.locks/<id>` flock `queue write` takes, just kept open for
+as long as focus stays there rather than acquired-and-released per write.
+There is no idle timeout: leaving the TUI open on a cassette holds it
+indefinitely, so the norm is to close a session (quit) once you're done
+with it rather than leave it running in a background tab. Agents never need
+this to change — they drive the queue entirely through the CLI, which
+acquires each cassette's lock only for the moment it writes and never holds
+one across commands. Tabbing to a different cassette flushes and releases the one you're leaving
+before taking the next one's lock; if that next cassette's lock is already
+held live by someone else — another `cassette` process, most likely — it
+opens **read-only** instead of refusing to focus it at all: the info line
+shows `-- READ ONLY --`, the help row explains why, and keystrokes are
+dropped rather than typed into a buffer that can't be saved. This is the
+live `.locks/<id>` flock, not a `queue lock` sticky claim — a sticky lock
+only ever restricts an agent's writes through the CLI, never the human at
+the keyboard.
 
 **There is no active session.** Cassette never remembers which session you were
 last using: every `queue` command takes an explicit `--session <id>`, and if
@@ -263,7 +310,13 @@ you've lost track of one, `cassette session list` prints every session's id
 (and its alias, if it has one) so you can pass it again. An **alias** (set with
 `session new --alias <name>` or `session alias <id> <name>`) is a display label
 shown next to the id in `session list` — it is never accepted in place of an id
-anywhere, including `--session` itself; sessions are named by id only.
+anywhere, including `--session` itself; sessions are named by id only. The
+TUI is the one exception to "always pass `--session`": launching `cassette`
+resolves or creates a session for you (a bare launch or `new <NAME>` always
+starts a new one; `today` creates or finds one by date alias; `resume`
+finds an existing one) and holds it only for that process's lifetime — it
+still never becomes some persistent "current session" the CLI picks up
+afterwards.
 
 Every command that takes a session id (`queue …`, `session alias`) checks it
 before touching the store: it must be a well-formed 26-character ULID naming a
@@ -310,7 +363,9 @@ queue new <TOPIC> --session <ID> [--first|--last|--priority <N>]
 queue list --session <ID> [--status open|closed|all] [--since <TIME>]
 queue show <ID> --session <ID>
 queue next --session <ID>                            # id of the next open, unlocked cassette
-queue write <ID> --session <ID>                      # replace a cassette's body, read from stdin
+queue write <ID> --session <ID> [--side a|b] [--append|--replace]
+                                                      # write one side of a cassette's body, read from stdin
+                                                      # (side: a, default; write mode: replace, default)
 queue close <ID> --session <ID> [-m <TEXT>]
 queue reopen <ID> --session <ID>
 queue move <ID> --session <ID> (--before|--after) <ID>
@@ -403,8 +458,8 @@ whether the cassette's advisory lock is currently held by a live writer;
 when there is none. `waiting_on` is the inverse of `last_writer`'s kind
 (`"human"` wrote last → `"agent"` is up next), or `null` when the last writer
 can't be resolved against `writers.toml`. `side_a`/`side_b` split the body on
-the `## Side A`/`## Side B` headings the TUI writes; nothing writes side B
-through `queue write` yet, so it is `""` until Phase 5.
+the `## Side A`/`## Side B` headings both the TUI and `queue write --side b`
+write; `side_b` is `""` for a cassette nobody has written to on that side.
 
 Once a cassette carries a sticky lock, `sticky_lock` is populated and an
 agent's write against it fails through the same envelope:
@@ -487,15 +542,18 @@ mkdir -p ~/.config/cassette
 $EDITOR ~/.config/cassette/config.toml
 ```
 
-Every key is optional:
+Every key is optional. `notes_dir` (from before the session store) still
+parses if you have it set, but nothing reads it any more — `stats`, `find`,
+and every session cassette now live under `$CASSETTE_DATA_DIR`/the XDG data
+default instead:
 
 ```toml
-# Where session notes are saved (default: ~/.local/share/cassette/notes).
-notes_dir = "/home/you/notes/cassette"
-
-# Filename pattern for `cassette today`, in chrono strftime syntax
-# (default: %Y-%m-%d, e.g. 2026-07-03.md).
+# Alias pattern for `cassette today`'s session, in chrono strftime syntax
+# (default: %Y-%m-%d, e.g. today's session is aliased 2026-07-03).
 daily_format = "%Y-%m-%d"
+
+# Most cassettes one session may hold open at once (default: 36).
+max_open = 36
 
 # Visible text rows per cassette, 2-40 (default: 5). The -l flag overrides this.
 visible_lines = 8
@@ -579,17 +637,20 @@ Options:
 ```
 
 `queue`, `writer`, and `session` are the session-store commands — see
-"The session store (in progress)" below for the full command surface.
+"The session store" above for the full command surface.
 
-Two defaults aren't spelled out in the help text above: a bare `cassette`
-(no subcommand) defaults to a timestamped file in the notes dir, and
-`resume` without a `[FILE]` resumes the most recently modified note.
-`today`, `stats`, `find`, and `themes` don't take a note name — a later
-session the same day appends to `today`'s note as a new `## Session`
-section, `stats` reads streak/weekly/monthly totals from the frontmatter
-of everything in the notes dir, and `find [TEXT]` lists recent notes
-newest-first (date, words, topics, first line), filtered by `TEXT` when
-given.
+The help text above still says "note" throughout (`new`, `today`, `resume`,
+`find`) — that wording predates the session store and hasn't caught up
+(clap generates it straight from `src/cli.rs`'s doc comments), but the
+behavior underneath it is store-backed: `new NAME` creates a session
+aliased `NAME`, `today` opens or creates the session aliased with today's
+date, `resume [ALIAS]` loads a session back into the TUI (default: the most
+recently created session), and `find [TEXT]` lists recent sessions
+newest-first (date, words, topics, first line of the top cassette),
+filtered by `TEXT` when given. A bare `cassette` (no subcommand) starts a
+fresh, unaliased session. `stats` reads streak/weekly/monthly totals from
+the session store, not from any note file — see "A daily practice" above
+for what that means for notes written before the store existed.
 
 ## For maintainers
 
