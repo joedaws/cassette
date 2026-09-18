@@ -197,6 +197,43 @@ impl From<LockError> for io::Error {
     }
 }
 
+/// A locked anchor file, whose `flock` is explicitly released *before* the
+/// descriptor is closed.
+///
+/// Closing the last descriptor **this process** holds is not enough, and the
+/// difference is only visible once something forks. `flock` lives on the open
+/// file *description*, not on the descriptor: any `fork()` that happens while
+/// the lock is held hands the child a second descriptor onto the very same
+/// description, and `flock(2)` says such a lock is released "either by an
+/// explicit `LOCK_UN` on any of these duplicate file descriptors, or when all
+/// such file descriptors have been closed". Our descriptors are `O_CLOEXEC`,
+/// so the child's copy does go away — but not until it reaches `execve`.
+/// Between our `close()` and the child's `exec` the description, and the lock
+/// on it, outlive the guard that owned them, and the next acquisition of that
+/// same anchor is told `WouldBlock` by a lock nobody holds any more.
+///
+/// `LOCK_UN` acts on the description itself, so unlocking here releases the
+/// lock for every descriptor sharing it, the not-yet-`exec`'d child's
+/// included. That makes release synchronous with dropping the guard, which is
+/// what every caller already assumes — `SessionWriter::acquire` drops one
+/// guard and takes the next in the same breath, and `store_is_empty` probes an
+/// anchor microseconds after releasing it.
+///
+/// This costs one syscall on a path that was already closing a file, and it
+/// matters to any process that forks with a lock held: `cargo test` is merely
+/// the one that does it often enough to notice.
+#[derive(Debug)]
+struct Anchor(File);
+
+impl Drop for Anchor {
+    fn drop(&mut self) {
+        // Best effort: a failed `LOCK_UN` leaves exactly the close-only
+        // release this used to rely on, and a `Drop` has nobody to report to.
+        // UFCS for the same reason as `lock`/`try_lock` below.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 /// A held cassette lock. The only way to write an existing cassette.
 ///
 /// The lock is released when this value is dropped, and by the kernel if the
@@ -216,13 +253,12 @@ pub struct LockGuard {
     /// creation, so this path cannot be derived from a (possibly retopicked)
     /// `CassetteMeta`.
     path: PathBuf,
-    /// Holding the `File` IS holding the lock: dropping it closes the fd and
-    /// the kernel releases — that part needs no `Drop` impl. The `Drop` impl
-    /// below exists only to clear this guard's `HELD` bookkeeping (see the
-    /// module-level `HELD` doc comment); it must never attempt to release
-    /// the flock itself, which remains the kernel's job via `_anchor`'s own
-    /// drop.
-    _anchor: File,
+    /// Holding the locked `Anchor` IS holding the lock, and dropping it
+    /// releases — see [`Anchor`] for why that release is an explicit
+    /// `LOCK_UN` and not just a `close()`. The `Drop` impl below adds only
+    /// this guard's `HELD` bookkeeping (see the module-level `HELD` doc
+    /// comment); the flock itself is `Anchor`'s business, not its.
+    _anchor: Anchor,
 }
 
 impl Drop for LockGuard {
@@ -350,14 +386,18 @@ pub(crate) fn acquire(
         }
     }
 
+    // The lock is ours from here, so hand the file to `Anchor` immediately:
+    // every `?` below then unwinds through `Anchor::drop` and releases with
+    // `LOCK_UN` rather than a bare `close()`.
+    let mut anchor = Anchor(anchor);
+
     // Stamp the holder AFTER acquiring — the lock serializes this write, so
     // two holders can never interleave their lines.
     use std::io::{Seek, Write};
-    let mut anchor = anchor;
-    anchor.set_len(0)?;
-    anchor.rewind()?;
-    writeln!(anchor, "{}", as_writer.render())?;
-    anchor.flush()?;
+    anchor.0.set_len(0)?;
+    anchor.0.rewind()?;
+    writeln!(anchor.0, "{}", as_writer.render())?;
+    anchor.0.flush()?;
 
     if let Some(session) = session {
         record_held(session, id);
@@ -394,7 +434,13 @@ pub(crate) fn probe(anchor_path: &Path) -> io::Result<bool> {
     // this toolchain's `std::fs::File` has an inherent `try_lock` that would
     // otherwise shadow fs4's trait method.
     match FileExt::try_lock(&anchor) {
-        Ok(()) => Ok(true), // released when `anchor` drops
+        Ok(()) => {
+            // `LOCK_UN` before the close, not the close alone — see `Anchor`.
+            // A probe releases immediately, so it is the acquisition most
+            // likely to be re-run the instant after it answers.
+            drop(Anchor(anchor));
+            Ok(true)
+        }
         Err(fs4::TryLockError::WouldBlock) => Ok(false),
         Err(fs4::TryLockError::Error(e)) => Err(e),
     }
@@ -585,6 +631,45 @@ mod tests {
             let _g = s.lock(&sid, ID, &who).expect("acquire");
         }
         s.lock(&sid, ID, &who).expect("must be free after drop");
+    }
+
+    #[test]
+    fn dropping_the_guard_releases_a_descriptor_duplicated_out_of_this_process() {
+        // Regression. `flock` lives on the open file *description*, and
+        // `fork(2)` hands the child a second descriptor onto the same one, so
+        // closing ours releases nothing while that copy is open. Our
+        // descriptors are `O_CLOEXEC`, so the child's does go — but only when
+        // it reaches `execve`, and until then the next acquisition of that
+        // anchor is refused by a lock nobody holds any more. `cargo test` runs
+        // the whole suite in one process and forks for every subprocess test,
+        // which made this a ~15% flake across `session_writer`'s `finish_*`
+        // family: `add_cassette` released an anchor and the caller re-took it
+        // microseconds later, inside some other thread's fork-to-exec window.
+        //
+        // `File::try_clone` is `dup(2)`, which shares the description exactly
+        // as `fork(2)` does — the same hazard with no subprocess and no
+        // timing, so this fails deterministically if the release goes back to
+        // a bare `close()`.
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
+        let who = Attribution::for_now("writer-1", "joseph");
+        let anchor_path = s.locks_dir(&sid).join(ID);
+
+        let guard = s.lock(&sid, ID, &who).expect("acquire");
+        let duplicate = guard
+            ._anchor
+            .0
+            .try_clone()
+            .expect("dup the anchor descriptor");
+        drop(guard);
+
+        assert!(
+            probe(&anchor_path).expect("probe"),
+            "the lock must be gone the moment the guard is, even while a \
+             duplicate of its descriptor is still open"
+        );
+        drop(duplicate);
     }
 
     #[test]
