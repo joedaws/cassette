@@ -70,8 +70,12 @@ fn topics_and_preview(cassettes: &[StoredCassette]) -> (Vec<String>, String) {
 const MAX_LISTED: usize = 10;
 
 /// The plain-text `cassette find` listing: newest first, optionally filtered,
-/// capped at `MAX_LISTED` with a "… N more" hint.
-pub fn render(entries: &[NoteEntry], query: Option<&str>) -> String {
+/// capped at `MAX_LISTED` with a "… N more" hint. `unreadable` — the count of
+/// cassette files `scan_store` could not read or parse — is appended as a
+/// trailing `N unreadable` line when nonzero, the same presentation
+/// `queue::view::render_list` uses: never invent a new one for the same
+/// failure mode.
+pub fn render(entries: &[NoteEntry], query: Option<&str>, unreadable: usize) -> String {
     if entries.is_empty() {
         return "no notes yet — the first session starts the count".into();
     }
@@ -110,51 +114,67 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>) -> String {
         ));
     }
     out.push_str("\nresume one: cassette resume <name>");
+    if unreadable > 0 {
+        out.push_str(&format!("\n{unreadable} unreadable"));
+    }
     out
 }
 
-/// One `NoteEntry` per session in the store: the session id as its openable
+/// One `NoteEntry` per session in the store — the session id as its openable
 /// form, its date from `session.toml`'s `created` (local time), words and
 /// topics summed/collected across its cassettes, and a preview from the
-/// highest-priority one.
+/// highest-priority one — plus the total count of cassette files across all
+/// sessions that could not be read or parsed (`SessionScan::unreadable`, see
+/// `Store::scan_session`).
+///
+/// That count must survive to `render`: a damaged cassette silently drops
+/// its words, topics and preview from a session's entry, and a total that is
+/// quietly too low is worse than one that visibly says so — the same
+/// reasoning `queue list`'s `N unreadable` line already acts on
+/// (`queue::view::render_list`).
 ///
 /// The legacy notes dir is deliberately not consulted — see the design's
 /// decision 7. A session whose `created` timestamp fails to parse is
 /// skipped, the same treatment `Store::list_sessions` gives a `session.toml`
 /// that fails to parse at all.
-pub fn scan_store(store: &Store) -> Vec<NoteEntry> {
+pub fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize) {
     let Ok(sessions) = store.list_sessions() else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    sessions
-        .into_iter()
-        .filter_map(|(id, meta)| {
-            let date = chrono::DateTime::parse_from_rfc3339(&meta.created)
-                .ok()?
-                .with_timezone(&chrono::Local)
-                .naive_local();
-            let scan = store.scan_session(&id).ok()?;
-            let (topics, preview) = topics_and_preview(&scan.cassettes);
-            let words = session_word_count(&scan.cassettes);
-            let haystack = format!(
-                "{id}\n{}",
-                scan.cassettes
-                    .iter()
-                    .map(|c| c.body.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-            .to_lowercase();
-            Some(NoteEntry {
-                path: id,
-                date,
-                words,
-                topics,
-                preview,
-                haystack,
-            })
-        })
-        .collect()
+    let mut entries = Vec::new();
+    let mut unreadable = 0usize;
+    for (id, meta) in sessions {
+        let Some(date) = chrono::DateTime::parse_from_rfc3339(&meta.created)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Local).naive_local())
+        else {
+            continue;
+        };
+        let Ok(scan) = store.scan_session(&id) else {
+            continue;
+        };
+        unreadable += scan.unreadable;
+        let (topics, preview) = topics_and_preview(&scan.cassettes);
+        let words = session_word_count(&scan.cassettes);
+        let haystack = format!(
+            "{id}\n{}",
+            scan.cassettes
+                .iter()
+                .map(|c| c.body.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+        .to_lowercase();
+        entries.push(NoteEntry {
+            path: id,
+            date,
+            words,
+            topics,
+            preview,
+            haystack,
+        });
+    }
+    (entries, unreadable)
 }
 
 #[cfg(test)]
@@ -230,7 +250,7 @@ mod tests {
                 .expect("add");
         }
 
-        let entries = scan_store(&store);
+        let (entries, unreadable) = scan_store(&store);
         assert_eq!(
             entries.len(),
             1,
@@ -248,6 +268,58 @@ mod tests {
             e.preview, "first thing to say",
             "preview comes from the highest-priority (first-in-queue) cassette"
         );
+        assert_eq!(unreadable, 0, "no damaged cassettes in this fixture");
+    }
+
+    #[test]
+    fn scan_store_surfaces_unreadable_cassettes_rather_than_dropping_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = store
+            .create_session(&SessionMeta {
+                alias: None,
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session");
+        let m = CassetteMeta {
+            id: crate::store::ids::new_id(),
+            topic: Some("gratitude".to_string()),
+            priority: 10,
+            status: Status::Open,
+            locked_by: None,
+            created_by: "w".to_string(),
+            last_writer: "w".to_string(),
+            updated_at: crate::store::meta::now_utc(),
+        };
+        store
+            .add_cassette(&sid, &m, "## Side A\n\none two three\n")
+            .expect("add");
+        // A cassette file with no parseable frontmatter: `Store::scan_session`
+        // counts it as unreadable rather than erroring the whole scan out.
+        std::fs::write(
+            store.cassettes_dir(&sid).join("damaged.md"),
+            "not a cassette file\n",
+        )
+        .expect("write damaged file");
+
+        let (entries, unreadable) = scan_store(&store);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].words, 3,
+            "the readable cassette's words still count"
+        );
+        assert_eq!(
+            unreadable, 1,
+            "the damaged cassette must be counted, not silently dropped"
+        );
+
+        let out = render(&entries, None, unreadable);
+        assert!(
+            out.contains("1 unreadable"),
+            "the reader must see the count: {out}"
+        );
     }
 
     #[test]
@@ -256,7 +328,7 @@ mod tests {
             entry("old.md", "2026-07-01T08:00:00", 10),
             entry("new.md", "2026-07-13T09:12:00", 412),
         ];
-        let out = render(&entries, None);
+        let out = render(&entries, None, 0);
         let new_pos = out.find("new.md").unwrap();
         let old_pos = out.find("old.md").unwrap();
         assert!(new_pos < old_pos, "{out}");
@@ -272,7 +344,7 @@ mod tests {
     fn render_shows_topics() {
         let mut e = entry("d.md", "2026-07-13T09:12:00", 5);
         e.topics = vec!["gratitude".to_string()];
-        let out = render(std::slice::from_ref(&e), None);
+        let out = render(std::slice::from_ref(&e), None, 0);
         assert!(out.contains("d.md — gratitude"), "{out}");
     }
 
@@ -282,10 +354,10 @@ mod tests {
             entry("morning.md", "2026-07-13T09:12:00", 10),
             entry("evening.md", "2026-07-12T21:00:00", 10),
         ];
-        let out = render(&entries, Some("MORNING"));
+        let out = render(&entries, Some("MORNING"), 0);
         assert!(out.contains("morning.md"), "{out}");
         assert!(!out.contains("evening.md"), "{out}");
-        assert_eq!(render(&entries, Some("zzz")), "no notes match 'zzz'");
+        assert_eq!(render(&entries, Some("zzz"), 0), "no notes match 'zzz'");
     }
 
     #[test]
@@ -299,7 +371,7 @@ mod tests {
                 )
             })
             .collect();
-        let out = render(&entries, None);
+        let out = render(&entries, None, 0);
         assert!(out.contains("n12.md") && out.contains("n03.md"), "{out}");
         assert!(!out.contains("n02.md"), "{out}");
         assert!(
@@ -311,11 +383,11 @@ mod tests {
     #[test]
     fn render_empty_dir_message() {
         assert_eq!(
-            render(&[], None),
+            render(&[], None, 0),
             "no notes yet — the first session starts the count"
         );
         assert_eq!(
-            render(&[], Some("x")),
+            render(&[], Some("x"), 0),
             "no notes yet — the first session starts the count"
         );
     }
@@ -324,7 +396,7 @@ mod tests {
     fn render_shows_the_full_path() {
         let mut e = entry("new.md", "2026-07-13T09:12:00", 412);
         e.path = "~/.local/share/cassette/notes/new.md".into();
-        let out = render(std::slice::from_ref(&e), None);
+        let out = render(std::slice::from_ref(&e), None, 0);
         assert!(
             out.contains("2026-07-13 09:12    412 words  ~/.local/share/cassette/notes/new.md"),
             "{out}"
@@ -335,7 +407,7 @@ mod tests {
     fn filter_ignores_the_directory_part() {
         let mut e = entry("morning.md", "2026-07-13T09:12:00", 10);
         e.path = "~/.local/share/cassette/notes/morning.md".into();
-        let out = render(std::slice::from_ref(&e), Some("notes"));
+        let out = render(std::slice::from_ref(&e), Some("notes"), 0);
         assert_eq!(
             out, "no notes match 'notes'",
             "directory names must not satisfy queries"

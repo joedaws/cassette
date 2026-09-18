@@ -26,32 +26,45 @@ fn session_word_count(cassettes: &[StoredCassette]) -> usize {
         .sum()
 }
 
-/// One `NoteMeta` per session in the store: its day from `session.toml`'s
+/// One `NoteMeta` per session in the store — its day from `session.toml`'s
 /// `created` (RFC3339 UTC, read back in local time so a streak lines up with
-/// the user's calendar day) and its words summed across its cassettes.
+/// the user's calendar day) and its words summed across its cassettes — plus
+/// the total count of cassette files across all sessions that could not be
+/// read or parsed (`SessionScan::unreadable`, see `Store::scan_session`).
+///
+/// That count must survive to `render`: a damaged cassette silently drops
+/// its words from every bucket it would have counted toward, and a streak or
+/// weekly total that is quietly too low is worse than one that visibly says
+/// so — the same reasoning `queue list`'s `N unreadable` line already acts
+/// on (`queue::view::render_list`).
 ///
 /// The legacy notes dir is deliberately not consulted — see the design's
 /// decision 7. A session whose `created` timestamp fails to parse is
 /// skipped, the same treatment `Store::list_sessions` gives a `session.toml`
 /// that fails to parse at all.
-pub fn scan_store(store: &Store) -> Vec<NoteMeta> {
+pub fn scan_store(store: &Store) -> (Vec<NoteMeta>, usize) {
     let Ok(sessions) = store.list_sessions() else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    sessions
-        .into_iter()
-        .filter_map(|(id, meta)| {
-            let date = chrono::DateTime::parse_from_rfc3339(&meta.created)
-                .ok()?
-                .with_timezone(&chrono::Local)
-                .date_naive();
-            let scan = store.scan_session(&id).ok()?;
-            Some(NoteMeta {
-                date,
-                words: session_word_count(&scan.cassettes),
-            })
-        })
-        .collect()
+    let mut metas = Vec::new();
+    let mut unreadable = 0usize;
+    for (id, meta) in sessions {
+        let Some(date) = chrono::DateTime::parse_from_rfc3339(&meta.created)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
+        else {
+            continue;
+        };
+        let Ok(scan) = store.scan_session(&id) else {
+            continue;
+        };
+        unreadable += scan.unreadable;
+        metas.push(NoteMeta {
+            date,
+            words: session_word_count(&scan.cassettes),
+        });
+    }
+    (metas, unreadable)
 }
 
 /// Consecutive days with at least one note, counting back from today —
@@ -104,8 +117,12 @@ fn notes_and_words<'a>(metas: impl Iterator<Item = &'a NoteMeta>) -> String {
     format!("{n} note{plural} · {words} words")
 }
 
-/// The plain-text `cassette stats` screen.
-pub fn render(metas: &[NoteMeta], today: NaiveDate) -> String {
+/// The plain-text `cassette stats` screen. `unreadable` — the count of
+/// cassette files `scan_store` could not read or parse — is appended as a
+/// trailing `N unreadable` line when nonzero, the same presentation
+/// `queue::view::render_list` uses: never invent a new one for the same
+/// failure mode.
+pub fn render(metas: &[NoteMeta], today: NaiveDate, unreadable: usize) -> String {
     if metas.is_empty() {
         return "no notes yet — the first session starts the count".into();
     }
@@ -115,7 +132,7 @@ pub fn render(metas: &[NoteMeta], today: NaiveDate) -> String {
     let week_start = today - chrono::Days::new(u64::from(today.weekday().num_days_from_monday()));
     let first = metas.iter().map(|m| m.date).min().expect("non-empty");
 
-    format!(
+    let mut out = format!(
         "streak:      {days} day{day_plural}\n\
          {}\n\
          this week:   {}\n\
@@ -133,7 +150,11 @@ pub fn render(metas: &[NoteMeta], today: NaiveDate) -> String {
                 .filter(|m| m.date.year() == today.year() && m.date.month() == today.month())
         ),
         notes_and_words(metas.iter()),
-    )
+    );
+    if unreadable > 0 {
+        out.push_str(&format!("\n{unreadable} unreadable"));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -182,7 +203,7 @@ mod tests {
             store.add_cassette(&sid, &m, body).expect("add");
         }
 
-        let metas = scan_store(&store);
+        let (metas, unreadable) = scan_store(&store);
         assert_eq!(
             metas.len(),
             1,
@@ -191,6 +212,60 @@ mod tests {
         assert_eq!(
             metas[0].words, 3,
             "words sum across the session's cassettes"
+        );
+        assert_eq!(unreadable, 0, "no damaged cassettes in this fixture");
+    }
+
+    #[test]
+    fn scan_store_surfaces_unreadable_cassettes_rather_than_dropping_them() {
+        use crate::store::meta::{CassetteMeta, Status};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = store
+            .create_session(&crate::store::session::SessionMeta {
+                alias: None,
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session");
+        let m = CassetteMeta {
+            id: crate::store::ids::new_id(),
+            topic: Some("gratitude".to_string()),
+            priority: 10,
+            status: Status::Open,
+            locked_by: None,
+            created_by: "w".to_string(),
+            last_writer: "w".to_string(),
+            updated_at: crate::store::meta::now_utc(),
+        };
+        store
+            .add_cassette(&sid, &m, "## Side A\n\none two three\n")
+            .expect("add");
+        // A cassette file with no parseable frontmatter: `Store::scan_session`
+        // counts it as unreadable rather than erroring the whole scan out.
+        std::fs::write(
+            store.cassettes_dir(&sid).join("damaged.md"),
+            "not a cassette file\n",
+        )
+        .expect("write damaged file");
+
+        let (metas, unreadable) = scan_store(&store);
+        assert_eq!(metas.len(), 1);
+        assert_eq!(
+            metas[0].words, 3,
+            "the readable cassette's words still count"
+        );
+        assert_eq!(
+            unreadable, 1,
+            "the damaged cassette must be counted, not silently dropped"
+        );
+
+        let out = render(&metas, metas[0].date, unreadable);
+        assert!(
+            out.contains("1 unreadable"),
+            "the reader must see the count: {out}"
         );
     }
 
@@ -216,7 +291,7 @@ mod tests {
             meta("2026-07-02", 300),
             meta("2026-07-03", 400),
         ];
-        let out = render(&metas, d("2026-07-03"));
+        let out = render(&metas, d("2026-07-03"), 0);
         assert!(out.contains("streak:      2 days"), "{out}");
         assert!(out.contains("this week:   3 notes · 900 words"), "{out}");
         assert!(out.contains("this month:  2 notes · 700 words"), "{out}");
@@ -251,7 +326,7 @@ mod tests {
     #[test]
     fn render_includes_last_seven_row() {
         let metas = [meta("2026-07-02", 300), meta("2026-07-03", 400)];
-        let out = render(&metas, d("2026-07-03"));
+        let out = render(&metas, d("2026-07-03"), 0);
         assert!(
             out.contains("last 7:      S S M T W T F\n             ○ ○ ○ ○ ○ ● ●   2/7"),
             "{out}"
@@ -260,6 +335,6 @@ mod tests {
 
     #[test]
     fn render_empty_dir_message() {
-        assert!(render(&[], d("2026-07-03")).contains("no notes yet"));
+        assert!(render(&[], d("2026-07-03"), 0).contains("no notes yet"));
     }
 }

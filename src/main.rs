@@ -82,19 +82,19 @@ fn main() -> io::Result<()> {
     // migration; the files themselves are untouched.
     if args.stats {
         let store = store::Store::new(store_root(args.json));
-        let metas = stats::scan_store(&store);
+        let (metas, unreadable) = stats::scan_store(&store);
         println!(
             "{}",
-            stats::render(&metas, chrono::Local::now().date_naive())
+            stats::render(&metas, chrono::Local::now().date_naive(), unreadable)
         );
         return Ok(());
     }
 
     if let Some(words) = &args.find {
         let store = store::Store::new(store_root(args.json));
-        let entries = find::scan_store(&store);
+        let (entries, unreadable) = find::scan_store(&store);
         let query = (!words.is_empty()).then(|| words.join(" "));
-        println!("{}", find::render(&entries, query.as_deref()));
+        println!("{}", find::render(&entries, query.as_deref(), unreadable));
         return Ok(());
     }
 
