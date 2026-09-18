@@ -47,10 +47,17 @@ pub struct SessionWriter<'a> {
     /// contender sees stamped in the lock anchor.
     writer: String,
     name: String,
-    /// The cassette index the guard belongs to, alongside the guard. `None`
-    /// when nothing is held — before the first `acquire`, after `finish`, or
-    /// when acquiring failed and the session is read-only.
-    guard: Option<(usize, LockGuard)>,
+    /// The guard currently held, if any. `None` when nothing is held —
+    /// before the first `acquire`, after `finish`, or when acquiring failed
+    /// and the session is read-only.
+    ///
+    /// Bound to the cassette's id, not its position in `app.cassettes`: the
+    /// list can grow at arbitrary positions (an agent's `queue new` inserted
+    /// by live sync in priority order), and an index would silently start
+    /// naming a different cassette the moment something is inserted ahead of
+    /// it. `LockGuard::id` is the guard's own id, so wherever a position is
+    /// still needed it is resolved fresh by id rather than cached.
+    guard: Option<LockGuard>,
 }
 
 impl<'a> SessionWriter<'a> {
@@ -88,10 +95,11 @@ impl<'a> SessionWriter<'a> {
         &self.session
     }
 
-    /// The cassette index whose lock is currently held, if any. `main.rs`
-    /// compares it against `App::focus_idx` to notice that focus moved.
-    pub fn held_idx(&self) -> Option<usize> {
-        self.guard.as_ref().map(|(idx, _)| *idx)
+    /// The id of the cassette whose lock is currently held, if any.
+    /// `main.rs` compares it against the focused cassette's id to notice
+    /// that focus moved.
+    pub fn held_id(&self) -> Option<&str> {
+        self.guard.as_ref().map(LockGuard::id)
     }
 
     fn attribution(&self) -> Attribution {
@@ -158,8 +166,9 @@ impl<'a> SessionWriter<'a> {
     /// hold is skipped outright: `flock` is per-open-file-description, so
     /// asking twice reports `Busy` against ourselves.
     pub fn acquire(&mut self, app: &mut App, idx: usize) -> Result<(), LockError> {
-        if let Some((held, _)) = &self.guard {
-            if *held == idx {
+        if let Some(held) = &self.guard {
+            let already_this_one = app.cassettes.get(idx).is_some_and(|c| c.id == held.id());
+            if already_this_one {
                 return Ok(());
             }
             // Flush first, drop second. The write goes through the guard.
@@ -183,7 +192,7 @@ impl<'a> SessionWriter<'a> {
         // The lock is ours; the in-memory copy may not be. Re-read before
         // anything can be written back through this guard.
         self.refresh_from_disk(app, idx, &guard)?;
-        self.guard = Some((idx, guard));
+        self.guard = Some(guard);
         Ok(())
     }
 
@@ -250,15 +259,17 @@ impl<'a> SessionWriter<'a> {
     }
 
     /// Write the focused cassette through the held guard when it has unsaved
-    /// edits. The guard's index *is* the focused index — `acquire` keeps
-    /// them equal — and the write is keyed on the guard's, so a focus change
-    /// that has not yet moved the lock can never write one cassette's words
-    /// into another's file.
+    /// edits. The guard names the focused cassette by id — `acquire` keeps
+    /// them in step — and the write is keyed on the guard's id, so a focus
+    /// change that has not yet moved the lock can never write one cassette's
+    /// words into another's file, and an insertion elsewhere in the list
+    /// cannot repoint the write either.
     pub fn flush_focused(&mut self, app: &mut App) -> io::Result<()> {
         self.flush_held(app).map_err(io::Error::from)
     }
 
-    /// The flush itself, keyed on the guard rather than on `App::focus_idx`.
+    /// The flush itself, keyed on the guard's id rather than on
+    /// `App::focus_idx` or a cached position.
     ///
     /// Frontmatter is re-read under the lock and only the fields the TUI
     /// owns are replaced: `priority`, `status` and `locked_by` belong to the
@@ -272,10 +283,17 @@ impl<'a> SessionWriter<'a> {
     /// between. Every window in which somebody could have is a window in
     /// which this guard did not exist.
     fn flush_held(&mut self, app: &mut App) -> Result<(), LockError> {
-        let Some((idx, guard)) = self.guard.as_ref() else {
+        let Some(guard) = self.guard.as_ref() else {
             return Ok(());
         };
-        let idx = *idx;
+        // A cassette cannot actually be removed from `app.cassettes` today,
+        // so this lookup is not known to ever fail — but the event loop is
+        // the wrong place to discover that assumption was wrong. Treat a
+        // failed lookup as "nothing to flush" rather than panicking or
+        // indexing blindly.
+        let Some(idx) = app.cassettes.iter().position(|c| c.id == guard.id()) else {
+            return Ok(());
+        };
         debug_assert!(
             app.dirty_indices().iter().all(|i| *i == idx),
             "only the cassette whose lock is held can be dirty: nothing edits an \
@@ -836,7 +854,33 @@ mod tests {
         w.acquire(&mut app, 0).expect("acquire");
         w.acquire(&mut app, 0)
             .expect("re-acquiring the held cassette must not fail");
-        assert_eq!(w.held_idx(), Some(0));
+        assert_eq!(w.held_id(), Some(app.cassettes[0].id.as_str()));
+    }
+
+    #[test]
+    fn the_guard_survives_a_cassette_being_inserted_before_it() {
+        // The guard must name a cassette, not a position. An agent creating a
+        // cassette shifts every index after it; a guard bound to an index would
+        // then write the held cassette's text into a different file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 2);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+
+        w.acquire(&mut app, 1).expect("hold cassette 1");
+        let held = app.cassettes[1].id.clone();
+        assert_eq!(w.held_id(), Some(held.as_str()));
+
+        // Something inserts at the front; index 1 is now a different cassette.
+        let mut newcomer = Cassette::new();
+        newcomer.id = "aaa00000000000000000000000".to_string();
+        app.cassettes.insert(0, newcomer);
+
+        assert_eq!(
+            w.held_id(),
+            Some(held.as_str()),
+            "the guard must still name the cassette it locked, not whatever now sits at index 1"
+        );
     }
 
     #[test]

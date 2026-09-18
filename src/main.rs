@@ -869,7 +869,11 @@ fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter
     if let Err(e) = w.create_missing_cassettes(app) {
         app.status_msg = Some(format!("cannot create cassette: {e}"));
     }
-    if w.held_idx() == Some(app.focus_idx) {
+    if app
+        .cassettes
+        .get(app.focus_idx)
+        .is_some_and(|c| Some(c.id.as_str()) == w.held_id())
+    {
         return;
     }
     match w.acquire(app, app.focus_idx) {
