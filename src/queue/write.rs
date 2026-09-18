@@ -65,7 +65,13 @@ fn write_permitted(store: &Store, kind: Kind, locked_by: Option<&str>) -> Result
 /// always, `## Side B` only when non-empty. The write-side counterpart of
 /// `json::split_sides`, which reads this same shape back apart — the two
 /// must never disagree about what a side is.
-fn build_body(side_a: &str, side_b: &str) -> String {
+///
+/// `pub(crate)` because the TUI writes the same store through
+/// `output::cassette_body`, which delegates here. Two writers emitting
+/// subtly different bytes for identical content would make a cassette's
+/// body depend on which one touched it last, so there is one function and
+/// both callers reach it.
+pub(crate) fn build_body(side_a: &str, side_b: &str) -> String {
     let mut out = format!("## Side A\n\n{}\n", side_a.trim());
     if !side_b.trim().is_empty() {
         out.push_str(&format!("## Side B\n\n{}\n", side_b.trim()));

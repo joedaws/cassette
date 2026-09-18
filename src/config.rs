@@ -70,6 +70,10 @@ pub fn default_notes_dir() -> Option<PathBuf> {
 /// If `note_name` contains a `/` or is absolute it is treated as a direct path
 /// (relative paths resolve against cwd). Otherwise the name is joined under
 /// `notes_dir`. `.md` is appended when no extension is present.
+// Flat-note path resolution: the TUI writes the session store as of Phase
+// 5a, so nothing in the non-test build calls these two. Kept, not dead by
+// accident — Phase 6 deletes the flat-note format and takes them with it.
+#[allow(dead_code)]
 pub fn resolve_output_path(
     note_name: Option<&str>,
     started_at: &std::time::SystemTime,
@@ -104,6 +108,7 @@ pub fn resolve_output_path(
 /// Returns `(final_path, conflicted)`.
 /// When `path` already exists, increments the stem until a free name is found:
 /// `myjournal.md` → `myjournal_1.md` → `myjournal_2.md` …
+#[allow(dead_code)]
 pub fn find_available_path(path: &Path) -> (PathBuf, bool) {
     if !path.exists() {
         return (path.to_path_buf(), false);

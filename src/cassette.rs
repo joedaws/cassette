@@ -28,9 +28,8 @@ pub struct Cassette {
     /// This cassette's store identity (a `store::ids` ULID). Empty for a
     /// cassette that has no store counterpart yet — assigning a real id is
     /// the caller's job (`Cassette` itself does no id generation and no I/O).
-    // Nothing reads this field yet: Task 3's `session_writer` is its first
-    // consumer. Remove this allow once that lands.
-    #[allow(dead_code)]
+    /// `session_writer` mints the store cassette and fills this in; an empty
+    /// id at that point is the signal that it still has to.
     pub id: String,
     /// Set on any edit; cleared once the caller has persisted this cassette.
     /// `App::modify_focused` sets it, `App::clear_dirty` clears it.

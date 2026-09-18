@@ -21,6 +21,7 @@ mod find;
 mod output;
 mod queue;
 mod session;
+mod session_writer;
 mod stats;
 mod store;
 mod theme;
@@ -51,63 +52,6 @@ fn install_signal_handlers() -> io::Result<SignalFlags> {
     signal_hook::flag::register(signal_hook::consts::SIGHUP, terminate.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGTSTP, suspend.clone())?;
     Ok(SignalFlags { terminate, suspend })
-}
-
-/// Where the session's markdown goes on quit (and during autosave).
-struct Sink {
-    path: PathBuf,
-    desired: PathBuf,
-    conflicted: bool,
-    /// Whether an autosave has created `path` already.
-    wrote: bool,
-    /// Daily mode: the existing note this session appends to.
-    append: Option<output::AppendBase>,
-    /// A resumed note's original frontmatter `date:`, kept across saves so
-    /// resuming never moves the note to another day in `stats`.
-    note_date: Option<String>,
-}
-
-/// Write the session to the sink: a fresh note, or appended onto the
-/// daily note's existing content. `draft` marks autosaves so a crashed
-/// session's note can be recognized and offered for resume.
-fn save_note(app: &App, sink: &Sink, draft: bool) -> io::Result<()> {
-    match &sink.append {
-        Some(base) => output::write_markdown_appended(app, &sink.path, base, draft),
-        None => output::write_markdown(app, &sink.path, draft, sink.note_date.as_deref()),
-    }
-}
-
-/// Newest `.md` note in the notes dir, optionally only ones whose frontmatter
-/// still carries the autosave `draft: true` marker (i.e. crashed sessions).
-fn newest_note(dir: &std::path::Path, drafts_only: bool) -> Option<PathBuf> {
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "md"))
-        .filter(|p| !drafts_only || std::fs::read_to_string(p).is_ok_and(|c| output::is_draft(&c)))
-        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-}
-
-/// Drop the `draft: true` marker from a declined draft so it isn't offered
-/// again on every launch (`resume <file>` still works on it).
-fn clear_draft_flag(path: &std::path::Path) {
-    if let Ok(content) = std::fs::read_to_string(path) {
-        let mut in_fm = false;
-        let cleaned: String = content
-            .split_inclusive('\n')
-            .enumerate()
-            .filter(|(i, l)| {
-                if l.trim_end() == "---" {
-                    in_fm = *i == 0;
-                    return true;
-                }
-                !(in_fm && l.trim_end() == "draft: true")
-            })
-            .map(|(_, l)| l)
-            .collect();
-        let _ = std::fs::write(path, cleaned);
-    }
 }
 
 /// Best-effort terminal restore; must be safe to call twice and mid-panic.
@@ -384,80 +328,55 @@ fn main() -> io::Result<()> {
         })
     });
 
-    // Resolve resume (or the crashed-draft offer) before touching the
-    // terminal: errors can still die() cleanly and the prompt can read stdin.
-    let mut resume_target: Option<PathBuf> = match &args.resume {
-        Some(_) if args.template.is_some() => die("'resume' cannot be combined with '-T'"),
-        Some(Some(name)) => Some(config::resolve_output_path(
-            Some(name),
-            &std::time::SystemTime::now(),
-            notes_dir.as_deref(),
-        )),
-        Some(None) => Some(
-            notes_dir
-                .as_deref()
-                .and_then(|d| newest_note(d, false))
-                .unwrap_or_else(|| die("no notes to resume in the notes dir")),
-        ),
-        None => None,
+    if args.resume.is_some() && args.template.is_some() {
+        die("'resume' cannot be combined with '-T'");
+    }
+
+    // Resolve the store session, build the app and take the focused
+    // cassette's lock before the terminal is touched, so anything that goes
+    // wrong here dies cleanly onto a normal shell.
+    //
+    // `-o` prints to stdout and persists nothing, so it opens no session at
+    // all: `app.session` stays empty rather than naming a session that was
+    // never created.
+    let store = (!args.print_stdout).then(|| store::Store::new(store_root(args.json)));
+    let (session, created_here, loaded) = match &store {
+        Some(store) => resolve_session(store, &args, daily_name.as_deref()),
+        None => (String::new(), false, None),
     };
-    // A positional name that points at an existing note opens it like
-    // resume — never a silent conflict-rename to `name_1.md`.
-    if resume_target.is_none() && !args.print_stdout && !args.daily {
-        if let Some(name) = &args.note_name {
-            let path = config::resolve_output_path(
-                Some(name),
-                &std::time::SystemTime::now(),
-                notes_dir.as_deref(),
+
+    let visible_lines = args.visible_lines.or(cfg.visible_lines);
+    let mut app = App::new(args.timer_secs, args.word_goal, visible_lines, session);
+    app.record = args.record;
+    if let Some(topics) = &template_topics {
+        app.apply_topics(topics);
+    }
+    if let Some(cassettes) = loaded {
+        app.load_cassettes(cassettes);
+    }
+
+    let mut writer = store
+        .as_ref()
+        .map(|s| session_writer::SessionWriter::open(s, &app.session, created_here));
+    if let Some(w) = writer.as_mut() {
+        // Every cassette on screen is a store cassette — the ones a template
+        // seeded and the single empty one a bare launch starts with alike.
+        if let Err(e) = w.create_missing_cassettes(&mut app) {
+            die_with(
+                1,
+                &format!("cannot create cassettes in session '{}': {e}", app.session),
             );
-            if path.exists() {
-                if args.template.is_some() {
-                    die(&format!(
-                        "'{}' already exists — resuming it cannot combine with '-T'",
-                        path.display()
-                    ));
-                }
-                resume_target = Some(path);
-            }
+        }
+        // Focus means held. A cassette another writer already holds opens
+        // read-only rather than refusing to start: refusing would let a
+        // running agent lock a human out of their own session, and accepting
+        // keystrokes with no guard to write them through would lose them.
+        let focus = app.focus_idx;
+        if let Err(e) = w.acquire(&mut app, focus) {
+            app.read_only = true;
+            eprintln!("cassette: {e} — opening read-only");
         }
     }
-    if resume_target.is_none() && !args.print_stdout && !args.daily {
-        if let Some(draft) = notes_dir.as_deref().and_then(|d| newest_note(d, true)) {
-            if std::io::IsTerminal::is_terminal(&io::stdin()) {
-                eprint!(
-                    "cassette: found a draft from an unfinished session — resume '{}'? [y/N] ",
-                    draft.display()
-                );
-                let mut answer = String::new();
-                let _ = io::stdin().read_line(&mut answer);
-                if answer.trim().eq_ignore_ascii_case("y") {
-                    resume_target = Some(draft);
-                } else {
-                    clear_draft_flag(&draft);
-                }
-            }
-        }
-    }
-    let (resume_path, resume_cassettes, resume_date): (
-        Option<PathBuf>,
-        Option<Vec<cassette::Cassette>>,
-        Option<String>,
-    ) = match resume_target {
-        Some(p) => {
-            let content = std::fs::read_to_string(&p)
-                .unwrap_or_else(|e| die(&format!("cannot read '{}': {e}", p.display())));
-            let cassettes = output::parse_markdown(&content);
-            if cassettes.is_empty() {
-                die(&format!(
-                    "'{}' has no '# Cassette' sections to resume",
-                    p.display()
-                ));
-            }
-            let date = output::frontmatter_date(&content);
-            (Some(p), Some(cassettes), date)
-        }
-        None => (None, None, None),
-    };
 
     // Restore the terminal before the default hook prints, so the panic
     // message is readable and the shell isn't left in raw mode.
@@ -486,75 +405,24 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let size = terminal.size()?;
-    let visible_lines = args.visible_lines.or(cfg.visible_lines);
-    // Placeholder session id: Task 3 wires real store session resolution
-    // (create for a bare session, open for `resume`, find-or-create for
-    // `today`). `App` stays pure, so `main.rs` is the only place a session
-    // id can be minted or looked up.
-    let session = store::ids::new_id();
-    let mut app = App::new(args.timer_secs, args.word_goal, visible_lines, session);
-    app.record = args.record;
     app.resize(size.width, size.height);
-    if let Some(topics) = &template_topics {
-        app.apply_topics(topics);
-    }
-    if let Some(cassettes) = resume_cassettes {
-        app.load_cassettes(cassettes);
-    }
-
-    // Resolve the output file up front so the session can autosave to it.
-    let mut sink = if args.print_stdout {
-        None
-    } else if let Some(path) = resume_path {
-        // Resume writes straight back to the note it loaded.
-        Some(Sink {
-            desired: path.clone(),
-            path,
-            conflicted: false,
-            wrote: false,
-            append: None,
-            note_date: resume_date,
-        })
-    } else {
-        let desired = config::resolve_output_path(
-            daily_name.as_deref().or(args.note_name.as_deref()),
-            &app.started_at,
-            notes_dir.as_deref(),
-        );
-        // Daily mode appends to today's existing note; explicit names keep
-        // the conflict-rename (`_1.md`) behavior.
-        let existing_daily = (args.daily && desired.exists())
-            .then(|| std::fs::read_to_string(&desired).ok())
-            .flatten();
-        let (path, conflicted, append) = match existing_daily {
-            Some(content) => (
-                desired.clone(),
-                false,
-                Some(output::parse_append_base(content)),
-            ),
-            None => {
-                let (path, conflicted) = config::find_available_path(&desired);
-                (path, conflicted, None)
-            }
-        };
-        Some(Sink {
-            path,
-            desired,
-            conflicted,
-            wrote: false,
-            append,
-            note_date: None,
-        })
-    };
 
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        run(&mut terminal, &mut app, sink.as_mut(), &theme)
+        run(&mut terminal, &mut app, writer.as_mut(), &theme)
     }));
 
     restore_terminal();
 
     // Save before propagating any error or panic: the words matter most.
-    finish_session(&app, sink.as_mut());
+    // `finish` flushes through the guard it holds and only then drops it —
+    // dropping first would lose the text or force a re-acquire `flock` may
+    // refuse.
+    if let Some(w) = writer.as_mut() {
+        if let Err(e) = w.finish(&mut app) {
+            eprintln!("cassette: could not save the session: {e}");
+        }
+    }
+    finish_session(&app, writer.as_ref().map(|w| w.session()));
     if let Some(summary) = session_summary(&app) {
         eprintln!("{summary}");
     }
@@ -604,10 +472,12 @@ fn session_summary(app: &App) -> Option<String> {
     Some(line)
 }
 
-/// Deliver the session's words: stdout in `-o` mode, the sink file otherwise.
-/// Empty sessions write nothing (and clean up an autosaved draft).
-fn finish_session(app: &App, sink: Option<&mut Sink>) {
-    let Some(sink) = sink else {
+/// Report where the session's words went. In `-o` mode (`session` is `None`)
+/// nothing was persisted, so they go to stdout here; otherwise
+/// `SessionWriter::finish` has already written them and this only names the
+/// session they landed in.
+fn finish_session(app: &App, session: Option<&str>) {
+    let Some(session) = session else {
         for (i, cassette) in app.cassettes.iter().enumerate() {
             match &cassette.topic {
                 Some(topic) => println!("Words recorded to Cassette {} — {}:\n", i + 1, topic),
@@ -623,43 +493,126 @@ fn finish_session(app: &App, sink: Option<&mut Sink>) {
     };
 
     if app.is_empty() {
-        if sink.wrote {
-            // An empty appending session must put the daily note back as it
-            // was, never delete it.
-            match &sink.append {
-                Some(base) => {
-                    let _ = std::fs::write(&sink.path, &base.content);
-                }
-                None => {
-                    let _ = std::fs::remove_file(&sink.path);
-                }
-            }
-        }
-        eprintln!("cassette: nothing recorded — no file written");
+        // `finish` has already removed a session this run created, so there
+        // is nothing left to point at.
+        eprintln!("cassette: nothing recorded — no session written");
         return;
     }
+    eprintln!("cassette: saved to session {session}");
+}
 
-    if sink.conflicted {
+/// The store session this launch writes to, per the spec's entry-point
+/// table:
+///
+/// | `cassette`               | a new session |
+/// | `cassette new <NAME>`    | a new session aliased `<NAME>` |
+/// | `cassette today`         | the session aliased with today's date, created if absent |
+/// | `cassette resume [NAME]` | the most recent session, or the one with that alias |
+/// | `cassette -T <template>` | a new session with one cassette per topic |
+///
+/// Returns the session id, whether **this run created it** — the only case
+/// in which `SessionWriter::finish` may remove it again — and the cassettes
+/// to load when an existing session was opened.
+///
+/// Aliases are not unique (`Store::set_session_alias` deliberately enforces
+/// nothing), so a name resolves to the **most recent** session carrying it:
+/// `list_sessions` is newest-first, and picking the newest is the only
+/// answer that keeps `cassette today` idempotent across a day.
+fn resolve_session(
+    store: &store::Store,
+    args: &cli::Args,
+    daily_name: Option<&str>,
+) -> (String, bool, Option<Vec<cassette::Cassette>>) {
+    let by_alias = |alias: &str| -> Option<String> {
+        store
+            .list_sessions()
+            .unwrap_or_else(|e| die_with(1, &format!("cannot list sessions: {e}")))
+            .into_iter()
+            .find(|(_, m)| m.alias.as_deref() == Some(alias))
+            .map(|(id, _)| id)
+    };
+    let open = |id: String| -> (String, bool, Option<Vec<cassette::Cassette>>) {
+        let cassettes = load_session_cassettes(store, &id);
+        (id, false, Some(cassettes))
+    };
+
+    if let Some(name) = &args.resume {
+        let id = match name {
+            Some(alias) => by_alias(alias).unwrap_or_else(|| {
+                die(&format!(
+                    "no session named '{alias}' — `cassette session list` shows what exists"
+                ))
+            }),
+            None => store
+                .list_sessions()
+                .unwrap_or_else(|e| die_with(1, &format!("cannot list sessions: {e}")))
+                .into_iter()
+                .next()
+                .map(|(id, _)| id)
+                .unwrap_or_else(|| die("no sessions to resume")),
+        };
+        return open(id);
+    }
+
+    if let Some(date) = daily_name {
+        if let Some(id) = by_alias(date) {
+            return open(id);
+        }
+        return (create_session(store, args, Some(date)), true, None);
+    }
+
+    (
+        create_session(store, args, args.note_name.as_deref()),
+        true,
+        None,
+    )
+}
+
+fn create_session(store: &store::Store, args: &cli::Args, alias: Option<&str>) -> String {
+    store
+        .create_session(&store::session::SessionMeta {
+            alias: alias.map(|a| a.to_string()),
+            created: store::meta::now_utc(),
+            timer_secs: args.timer_secs,
+            word_goal: args.word_goal,
+        })
+        .unwrap_or_else(|e| die_with(1, &format!("cannot create a session: {e}")))
+}
+
+/// Read a session's cassettes back into the editor, in queue order.
+///
+/// Bodies are split with `json::split_sides` — the same parser the JSON
+/// contract reads a cassette with, and the inverse of the `output::
+/// cassette_body` that wrote them — and trimmed, because `cassette_body`
+/// trims on the way out; without it every resume would grow a leading blank
+/// line that the next save silently removed again.
+///
+/// Closed cassettes are loaded too. The TUI has no notion of closed yet
+/// (5c adds the collapsed row), and hiding text a human wrote would look
+/// exactly like losing it.
+fn load_session_cassettes(store: &store::Store, session: &str) -> Vec<cassette::Cassette> {
+    let scan = store
+        .scan_session(session)
+        .unwrap_or_else(|e| die_with(1, &format!("cannot read session '{session}': {e}")));
+    if scan.unreadable > 0 {
         eprintln!(
-            "cassette: '{}' already exists — saved to '{}' instead",
-            sink.desired.display(),
-            sink.path.display()
+            "cassette: {} file(s) in this session could not be read and were skipped",
+            scan.unreadable
         );
     }
-    match save_note(app, sink, false) {
-        Ok(()) => match &sink.append {
-            Some(base) => eprintln!(
-                "cassette: appended session {} to '{}'",
-                base.session_no,
-                sink.path.display()
-            ),
-            None if !sink.conflicted => {
-                eprintln!("cassette: saved to '{}'", sink.path.display())
-            }
-            None => {}
-        },
-        Err(e) => eprintln!("cassette: could not write '{}': {}", sink.path.display(), e),
-    }
+    scan.cassettes
+        .into_iter()
+        .map(|c| {
+            let (side_a, side_b) = queue::json::split_sides(&c.body);
+            let mut loaded = cassette::Cassette::from_sides(
+                side_a.trim().to_string(),
+                side_b.trim().to_string(),
+                c.meta.topic,
+            );
+            loaded.id = c.meta.id;
+            loaded
+        })
+        .collect()
 }
 
 /// Print the `themes` listing: every selectable theme with a color swatch
@@ -693,7 +646,7 @@ fn print_themes(cfg: &config::Config) {
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    mut sink: Option<&mut Sink>,
+    mut writer: Option<&mut session_writer::SessionWriter>,
     theme: &theme::Theme,
 ) -> io::Result<()> {
     let tick_rate = Duration::from_secs(1);
@@ -711,6 +664,7 @@ fn run(
                 Event::Key(key) => {
                     handle_key(app, key);
                     app.check_goal();
+                    follow_focus(app, writer.as_deref_mut());
                 }
                 Event::Paste(text) => {
                     handle_paste(app, &text);
@@ -737,7 +691,7 @@ fn run(
                 app.should_quit = true;
             }
             if signals.suspend.swap(false, Ordering::Relaxed) || std::mem::take(&mut app.suspend) {
-                suspend_session(terminal, app, sink.as_deref_mut())?;
+                suspend_session(terminal, app, writer.as_deref_mut())?;
             }
         }
         #[cfg(not(unix))]
@@ -751,20 +705,17 @@ fn run(
             let _ = out.flush();
         }
 
-        // Crash safety: flush dirty text to the note file every AUTOSAVE_SECS.
-        if let Some(s) = sink.as_deref_mut() {
-            if !app.dirty_indices().is_empty()
-                && !app.is_empty()
-                && last_autosave.elapsed() >= Duration::from_secs(AUTOSAVE_SECS)
-            {
-                if save_note(app, s, true).is_ok() {
-                    s.wrote = true;
-                    // save_note writes the whole session in one file, so a
-                    // successful save clears every cassette's dirty flag —
-                    // not just the focused one.
-                    for idx in 0..app.cassettes.len() {
-                        app.clear_dirty(idx);
-                    }
+        // Crash safety: flush the focused cassette every AUTOSAVE_SECS,
+        // through the guard this process already holds. It must never call
+        // `Store::lock` — `flock` is per-open-file-description, so a second
+        // acquire of a lock we hold reports Busy and blames a phantom
+        // writer. `flush_focused` is a no-op when nothing is dirty, and only
+        // the focused cassette can be: `follow_focus` flushes the one being
+        // left before the guard moves.
+        if let Some(w) = writer.as_deref_mut() {
+            if last_autosave.elapsed() >= Duration::from_secs(AUTOSAVE_SECS) {
+                if let Err(e) = w.flush_focused(app) {
+                    app.status_msg = Some(format!("autosave failed: {e}"));
                 }
                 last_autosave = Instant::now();
             }
@@ -785,14 +736,13 @@ fn run(
 fn suspend_session(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    sink: Option<&mut Sink>,
+    writer: Option<&mut session_writer::SessionWriter>,
 ) -> io::Result<()> {
-    if let Some(s) = sink {
-        if !app.is_empty() && save_note(app, s, true).is_ok() {
-            s.wrote = true;
-            for idx in 0..app.cassettes.len() {
-                app.clear_dirty(idx);
-            }
+    if let Some(w) = writer {
+        // Through the held guard, which stays held across the stop: the
+        // shell may never bring us back.
+        if let Err(e) = w.flush_focused(app) {
+            app.status_msg = Some(format!("could not flush before suspending: {e}"));
         }
     }
     restore_terminal();
@@ -807,6 +757,36 @@ fn suspend_session(
     )?;
     terminal.clear()?;
     Ok(())
+}
+
+/// Restore the two store invariants a keypress can break, in order.
+///
+/// 1. **Every cassette on screen is a store cassette.** `Ctrl+N` pushes one
+///    with no id: the key handlers are pure and cannot reach a `Store`, so
+///    the store counterpart is minted here instead of threading one through
+///    them.
+/// 2. **Focus means held.** When focus has moved, `acquire` flushes the
+///    cassette being left *through the guard that is held* and only then
+///    drops it — dropping first would lose the text or force a re-acquire
+///    `flock` may refuse.
+///
+/// A cassette another writer holds opens read-only rather than swallowing
+/// keystrokes there is no guard to write through.
+fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter>) {
+    let Some(w) = writer else { return };
+    if let Err(e) = w.create_missing_cassettes(app) {
+        app.status_msg = Some(format!("cannot create cassette: {e}"));
+    }
+    if w.held_idx() == Some(app.focus_idx) {
+        return;
+    }
+    match w.acquire(app, app.focus_idx) {
+        Ok(()) => app.read_only = false,
+        Err(e) => {
+            app.read_only = true;
+            app.status_msg = Some(e.to_string());
+        }
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {

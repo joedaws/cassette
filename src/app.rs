@@ -62,11 +62,16 @@ pub struct App {
     pub idle_secs: u32,
     /// The store session this app's cassettes belong to (`store::ids` ULID).
     /// Plain data here — resolving or creating the session against a `Store`
-    /// is `main.rs`'s job, not `App`'s.
-    // Nothing reads this field yet: Task 3's `session_writer` is its first
-    // consumer. Remove this allow once that lands.
-    #[allow(dead_code)]
+    /// is `main.rs`'s job, not `App`'s. Empty only in `-o` mode, which
+    /// persists nothing.
     pub session: String,
+    /// The focused cassette's lock could not be taken — another writer holds
+    /// it. The text is shown but not editable: accepting keystrokes with no
+    /// guard to write them through would lose them at the next flush, and
+    /// refusing to start would let an agent lock a human out of their own
+    /// session. `modify_focused` is the gate; `main.rs` sets the flag when
+    /// `SessionWriter::acquire` fails.
+    pub read_only: bool,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
     /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
@@ -110,6 +115,7 @@ impl App {
             baseline_words: 0,
             idle_secs: 0,
             session,
+            read_only: false,
             bell: false,
             suspend: false,
             status_ticks: None,
@@ -265,7 +271,15 @@ impl App {
         self.ensure_focus_visible();
     }
 
+    /// Apply `f` to the focused cassette and mark it dirty — unless this
+    /// process does not hold its lock, in which case the edit is dropped on
+    /// the floor. A keystroke that never reaches a cassette is visible to
+    /// the writer; one that reaches it and is then discarded at the next
+    /// flush is not.
     pub fn modify_focused<F: FnOnce(&mut Cassette)>(&mut self, f: F) {
+        if self.read_only {
+            return;
+        }
         if let Some(c) = self.cassettes.get_mut(self.focus_idx) {
             f(c);
             c.dirty = true;
