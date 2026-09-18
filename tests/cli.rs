@@ -1846,3 +1846,163 @@ fn malformed_config_toml_without_json_still_prints_prose() {
     assert!(out.stdout.is_empty(), "no JSON without --json");
     assert!(stderr(&out).contains("invalid config"), "{}", stderr(&out));
 }
+
+/// Spawn `queue write` with `body` piped to stdin, waiting for it to finish.
+/// Shared by the `--side`/`--append`/`--replace` wiring tests below.
+fn write_stdin(args: &[&str], root: &std::path::Path, body: &[u8]) -> Output {
+    let mut child = Command::new(bin())
+        .args(args)
+        .env("CASSETTE_DATA_DIR", root)
+        .env("USER", "joseph")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(body)
+        .expect("write");
+    child.wait_with_output().expect("wait")
+}
+
+#[test]
+fn queue_write_defaults_to_side_a() {
+    // `--side` defaults to `a` — the behaviour every caller had before
+    // `--side` existed, and what `tests/lock.rs`'s cross-process cases rely
+    // on staying true.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+
+    let out = write_stdin(
+        &["queue", "write", &cid, "--session", &sid],
+        &root,
+        b"front text\n",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let show = Command::new(bin())
+        .args(["queue", "show", &cid, "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let v: serde_json::Value = serde_json::from_slice(&show.stdout).expect("valid JSON");
+    assert_eq!(v["side_a"].as_str().expect("side_a").trim(), "front text");
+    assert_eq!(v["side_b"], "");
+}
+
+#[test]
+fn queue_write_side_b_targets_side_b_and_leaves_side_a_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "gratitude", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let first = write_stdin(
+        &["queue", "write", &cid, "--session", &sid],
+        &root,
+        b"front text\n",
+    );
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let out = write_stdin(
+        &["queue", "write", &cid, "--session", &sid, "--side", "b"],
+        &root,
+        b"back text\n",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let show = Command::new(bin())
+        .args(["queue", "show", &cid, "--session", &sid, "--json"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let v: serde_json::Value = serde_json::from_slice(&show.stdout).expect("valid JSON");
+    assert_eq!(
+        v["side_a"].as_str().expect("side_a").trim(),
+        "front text",
+        "writing --side b must not touch side A: {v}"
+    );
+    assert_eq!(v["side_b"].as_str().expect("side_b").trim(), "back text");
+}
+
+#[test]
+fn queue_write_append_and_replace_are_mutually_exclusive() {
+    // Neither a real session nor a real cassette is needed: clap's
+    // `conflicts_with` rejects the combination during argument parsing,
+    // before the command ever touches the store or reads stdin.
+    let out = run(&[
+        "queue",
+        "write",
+        "nosuchcassette0000000000AB",
+        "--session",
+        "01K5GQ2R8V3XQZ0000000000AB",
+        "--append",
+        "--replace",
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn an_unknown_side_value_exits_two() {
+    // Same reasoning as the conflict test above: clap's `value_enum` rejects
+    // an unrecognized `--side` before any store I/O happens.
+    let out = run(&[
+        "queue",
+        "write",
+        "nosuchcassette0000000000AB",
+        "--session",
+        "01K5GQ2R8V3XQZ0000000000AB",
+        "--side",
+        "z",
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}

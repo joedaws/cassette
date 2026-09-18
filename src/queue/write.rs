@@ -147,21 +147,30 @@ fn acquire(
     }
 }
 
+/// What to write and where it goes: the text a caller supplied, plus the
+/// side and mode it targets. `incoming`/`side`/`mode` always travel together
+/// from `write`/`write_body` through to `apply_write`, so — unlike `write`'s
+/// and `write_body`'s own parameter lists, pinned verbatim by this task's
+/// brief — `read_check_and_write` (a private helper with no externally fixed
+/// shape) takes them bundled rather than as three more loose parameters.
+struct WriteRequest<'a> {
+    incoming: &'a str,
+    side: Side,
+    mode: WriteMode,
+}
+
 /// Read through `guard`, enforce `write_permitted` against its `locked_by`,
-/// and write `body` back. The last step of both `write` and `write_body`,
-/// once a guard is already held and a body is already in hand.
+/// and write the result of `request` back. The last step of both `write` and
+/// `write_body`, once a guard is already held and a body is already in hand.
 ///
 /// Reading `locked_by` here — only after the guard is held — is what makes
 /// the check race-free: reading it from an unlocked scan would race a
 /// concurrent `queue lock` setting it in between the check and the write.
-#[allow(clippy::too_many_arguments)]
 fn read_check_and_write(
     store: &Store,
     guard: &store::lock::LockGuard,
     id: &str,
-    incoming: &str,
-    side: Side,
-    mode: WriteMode,
+    request: WriteRequest,
     writer: String,
     kind: Kind,
 ) -> Result<(), QueueError> {
@@ -171,7 +180,7 @@ fn read_check_and_write(
     };
     write_permitted(store, kind, current.meta.locked_by.as_deref())?;
 
-    let body = apply_write(&current.body, incoming, side, mode);
+    let body = apply_write(&current.body, request.incoming, request.side, request.mode);
     let mut m = current.meta;
     m.last_writer = writer;
     m.updated_at = store::meta::now_utc();
@@ -222,7 +231,18 @@ pub fn write(
         return Err(QueueError::Io(format!("cannot read stdin: {e}")));
     }
 
-    read_check_and_write(store, &guard, id, &body, side, mode, writer, kind)
+    read_check_and_write(
+        store,
+        &guard,
+        id,
+        WriteRequest {
+            incoming: &body,
+            side,
+            mode,
+        },
+        writer,
+        kind,
+    )
 }
 
 /// The lock-read-modify-write core, with the body already in hand.
@@ -248,7 +268,18 @@ fn write_body(
     let (writer, kind) = resolve(store, who_name, source)?;
     let who = store::lock::Attribution::for_now(&writer, who_name);
     let guard = acquire(store, session, id, &who)?;
-    read_check_and_write(store, &guard, id, body, side, mode, writer, kind)
+    read_check_and_write(
+        store,
+        &guard,
+        id,
+        WriteRequest {
+            incoming: body,
+            side,
+            mode,
+        },
+        writer,
+        kind,
+    )
 }
 
 #[cfg(test)]
