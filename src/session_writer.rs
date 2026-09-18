@@ -465,7 +465,9 @@ mod tests {
         );
     }
 
-    /// Locate the `cassette` binary Cargo built alongside this test binary.
+    /// Locate the `cassette` binary this test must exec — rebuilding it
+    /// first, so the path this returns is guaranteed *fresh*, not just
+    /// guaranteed to exist.
     ///
     /// `CARGO_BIN_EXE_cassette` — what `tests/lock.rs` uses — is only set for
     /// integration tests; Cargo does not define it for a bin crate's own
@@ -474,17 +476,66 @@ mod tests {
     /// `tests/lock.rs` cannot link `SessionWriter` either — the cross-process
     /// test below has to live here instead, and locate the binary itself:
     /// the test binary runs from `target/<profile>/deps/`, and the plain
-    /// binary Cargo builds alongside it (so integration tests have one to
-    /// exec) sits one directory up, exactly as `CARGO_BIN_EXE_cassette`
+    /// binary sits one directory up, exactly as `CARGO_BIN_EXE_cassette`
     /// would resolve.
+    ///
+    /// Locating it is not, on its own, proof of anything about *current*
+    /// code. Nothing forces Cargo to have rebuilt `cassette` before this
+    /// function runs — a plain `cargo test` happens to, but only because
+    /// `tests/lock.rs` also exists in this workspace and its own
+    /// `CARGO_BIN_EXE_cassette` reference forces that target fresh in the
+    /// same invocation. That is an incidental sibling, not a guarantee this
+    /// file controls: scope the run to just this binary (`cargo test --bin
+    /// cassette an_agents_write_is_denied...`) and `tests/lock.rs` never
+    /// gets compiled, so nothing rebuilds `cassette` — this test would then
+    /// exec whatever stale binary happens to sit in `target/`, silently
+    /// proving nothing about the code as it stands. A reviewer confirmed
+    /// this by editing an error string in `queue/write.rs` and watching a
+    /// `--bin`-scoped run leave the binary's mtime untouched.
+    ///
+    /// So this function rebuilds the target itself before resolving its
+    /// path, via the `CARGO` environment variable Cargo sets for every test
+    /// binary it runs (confirmed present at runtime, unlike
+    /// `CARGO_BIN_EXE_*`) rather than assuming `cargo` is on `PATH`. That
+    /// makes freshness a property this test enforces on its own, regardless
+    /// of `tests/lock.rs`'s existence or how narrowly the run is scoped — at
+    /// the cost of one `cargo build` per run of this test. The profile name
+    /// is read back off the running test binary's own path (the directory
+    /// Cargo built it into) rather than guessed from `cfg!(debug_assertions)`,
+    /// so this does the right thing under `--release` or a custom `--profile`
+    /// too, respecting whatever `CARGO_TARGET_DIR` is already in the
+    /// environment since the child inherits it; the one irregular case Cargo
+    /// itself carves out is the default profile, whose flag is `dev` but
+    /// whose output directory is named `debug`.
     fn bin_path() -> std::path::PathBuf {
-        let mut path = std::env::current_exe().expect("current test exe");
-        path.pop(); // drop the test binary's own file name
-        if path.ends_with("deps") {
-            path.pop();
+        let mut dir = std::env::current_exe().expect("current test exe");
+        dir.pop(); // drop the test binary's own file name
+        if dir.ends_with("deps") {
+            dir.pop();
         }
-        path.push("cassette");
-        path
+        let profile_dir = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("profile directory name")
+            .to_string();
+        let profile_flag: &str = if profile_dir == "debug" {
+            "dev"
+        } else {
+            profile_dir.as_str()
+        };
+
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let status = std::process::Command::new(&cargo)
+            .args(["build", "--bin", "cassette", "--profile", profile_flag])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .status()
+            .expect("rebuild the cassette binary before exec'ing it");
+        assert!(
+            status.success(),
+            "cargo build --bin cassette failed; cannot prove anything about stale code"
+        );
+
+        dir.join("cassette")
     }
 
     /// Cross-process proof that the guard `SessionWriter::acquire` holds for
