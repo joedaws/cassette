@@ -278,6 +278,14 @@ impl App {
     ///   for a cassette this process has dirtied — asserted here rather than
     ///   trusted, the same way `SessionWriter::refresh_from_disk` guards the
     ///   identical case with a `debug_assert!` plus a defensive early return.
+    /// - **A no-op when nothing changed.** Same short circuit as
+    ///   `refresh_from_disk`: if `incoming`'s sides and topic already match
+    ///   the existing cassette, return without rebuilding it. Without this,
+    ///   this process's own flush of a cassette it just released focus on —
+    ///   which moves that file's mtime with no external writer involved —
+    ///   would look like a first-sight change to `main.rs`'s sync step and
+    ///   silently discard the cassette's undo stack and reset its cursor on
+    ///   every tab-away, even though disk and memory already agreed.
     ///
     /// Called from `main.rs`'s live-sync step (Task 4), on the existing
     /// one-second tick, for any cassette whose lock this process does not
@@ -293,6 +301,22 @@ impl App {
                  changed by another writer; main.rs must never offer one here"
             );
             if existing.dirty {
+                return;
+            }
+
+            // Mirrors `SessionWriter::refresh_from_disk`'s identical short
+            // circuit: when nothing actually differs, skip the rebuild
+            // entirely rather than resetting the cursor and discarding the
+            // undo stack for content that never changed. This is not just
+            // an optimization — it is what makes this process's own flush
+            // of a cassette it just released focus on (which moves that
+            // file's mtime with no external writer involved) a no-op here,
+            // the same way `refresh_from_disk` already makes an unchanged
+            // re-acquire a no-op on the read side.
+            if incoming.side_a_text().trim() == existing.side_a_text().trim()
+                && incoming.side_b_text().trim() == existing.side_b_text().trim()
+                && incoming.topic == existing.topic
+            {
                 return;
             }
 
@@ -826,6 +850,50 @@ mod tests {
         app.resize(80, 10);
         assert_eq!(app.visible_cassette_count(), 1);
         assert_eq!(app.cassette_scroll, 5);
+    }
+
+    #[test]
+    fn merge_external_is_a_no_op_when_content_and_topic_already_match() {
+        // The regression this pins: `main.rs`'s sync step moves a
+        // cassette's own flush-induced mtime the instant focus releases it,
+        // which can look like a first-sight change even though disk and
+        // memory already agree. Without this short circuit, merging
+        // identical content would rebuild the cassette via
+        // `from_sides_with_cursor` anyway, discarding its undo stack and
+        // resetting its cursor for no reason.
+        //
+        // `Cassette`'s undo stack has no public accessor, so this observes
+        // survival behaviorally: an `undo()` after the merge must still
+        // revert the insert, which is only possible if the merge left the
+        // original cassette object — undo stack included — untouched. The
+        // cursor position is asserted directly.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| {
+            c.snapshot(); // what entering insert mode does
+            c.insert_str("hello world");
+            c.move_word_back();
+        });
+        app.clear_dirty(0);
+        let cursor_before = app.cassettes[0].cursor_pos();
+
+        // Exactly what's already in memory — e.g. this process's own flush
+        // of the cassette it just released focus on, not an external
+        // writer's edit.
+        let incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            cursor_before,
+            "unchanged content must not move the cursor"
+        );
+        app.modify_focused(|c| c.undo());
+        assert_eq!(
+            app.cassettes[0].text(),
+            "",
+            "and the undo stack must survive a merge of identical content"
+        );
     }
 
     #[test]

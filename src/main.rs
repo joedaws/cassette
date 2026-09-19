@@ -916,11 +916,14 @@ fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter
 ///
 /// 1. **Stat only.** `fs::read_dir` the session's `cassettes/` directory and
 ///    check each entry's mtime against `mtimes`, with no file content read
-///    at all. The **held cassette is excluded here, before its mtime is
-///    even looked at** — this process holds that lock precisely so nobody
-///    else can have changed the file, and even considering it a candidate
-///    could only lead to replacing the human's unsaved keystrokes with
-///    whatever was last flushed.
+///    at all. The **held cassette's mtime is still recorded** — this
+///    process holds that lock precisely so nobody else can have changed the
+///    file, so its mtime only ever moves because of our own flush, and
+///    *not* recording it would make the tick after focus moves off it look
+///    like a first-sight change — but it is excluded from `changed_ids`
+///    unconditionally, so it is never a merge candidate: merging it back in
+///    could only replace the human's unsaved keystrokes with whatever was
+///    last flushed.
 /// 2. **Only if something moved**, call `Store::scan_session` once for the
 ///    whole session — which is also where `insert_at` for a newcomer comes
 ///    from: `scan_session` already returns cassettes in queue order
@@ -964,12 +967,21 @@ fn sync_external_writes(
         let Some(id) = store::ids::id_from_file_name(file_name) else {
             continue;
         };
-        if Some(id) == held_id {
-            continue;
-        }
         let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
             continue;
         };
+        if Some(id) == held_id {
+            // Nobody else can write a cassette whose lock this process
+            // holds, so its mtime only ever moves because of our own
+            // flush/autosave. Record it anyway: skipping the record (not
+            // just the merge) would make the moment focus moves off it look
+            // like a first-sight change the instant the lock is released,
+            // and `merge_external` would then rebuild it from identical
+            // content for no reason. The merge itself is still categorically
+            // skipped — this cassette is never a candidate.
+            mtimes.insert(id.to_string(), modified);
+            continue;
+        }
         let changed = mtimes.get(id).is_none_or(|prev| *prev != modified);
         mtimes.insert(id.to_string(), modified);
         if changed {
@@ -1603,6 +1615,63 @@ mod tests {
         assert!(
             !app.cassettes.iter().any(|c| c.id == newcomer_id),
             "the newcomer must not appear once the cap is already reached"
+        );
+    }
+
+    #[test]
+    fn sync_does_not_wipe_undo_when_focus_releases_a_cassette_it_just_flushed() {
+        // The regression: typing in cassette 0, then tabbing to cassette 1,
+        // flushes and releases 0's lock — moving 0's file mtime with no
+        // external writer involved. A sync tick that follows must not treat
+        // that self-inflicted mtime move as a reason to rebuild cassette 0:
+        // that would discard its undo stack and reset its cursor even
+        // though disk and memory already agree.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        for i in 0..2 {
+            let id = store_cassette(&store, &session, (i as i64 + 1) * 10, "");
+            let mut c = cassette::Cassette::new();
+            c.id = id;
+            app.cassettes.push(c);
+        }
+        let mut writer = session_writer::SessionWriter::open(&store, &session, true, "w", "w");
+        writer.acquire(&mut app, 0).expect("acquire 0");
+        app.focus_idx = 0;
+        app.modify_focused(|c| {
+            c.snapshot();
+            c.insert_str("hello world");
+        });
+        let cursor_before = app.cassettes[0].cursor_pos();
+
+        let mut mtimes = HashMap::new();
+        // A tick while 0 is still held: seeds its mtime in the map (the
+        // file itself is still whatever `store_cassette` wrote — empty —
+        // since nothing has flushed yet).
+        sync_external_writes(&mut app, &store, Some(&writer), &mut mtimes);
+
+        // Focus moves to 1: `acquire` flushes and drops 0's guard, writing
+        // cassette 0's body to disk and moving its mtime.
+        writer.acquire(&mut app, 1).expect("focus 1");
+        app.focus_idx = 1;
+
+        // The tick that follows: 0 is unheld, and its mtime has moved
+        // relative to what was seeded above.
+        sync_external_writes(&mut app, &store, Some(&writer), &mut mtimes);
+
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            cursor_before,
+            "the flush-induced mtime move must not reset the cursor"
+        );
+        app.focus_idx = 0;
+        app.modify_focused(|c| c.undo());
+        assert_eq!(
+            app.cassettes[0].text(),
+            "",
+            "and the undo stack must survive the sync tick that follows a flush"
         );
     }
 
