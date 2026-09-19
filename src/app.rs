@@ -279,10 +279,9 @@ impl App {
     ///   trusted, the same way `SessionWriter::refresh_from_disk` guards the
     ///   identical case with a `debug_assert!` plus a defensive early return.
     ///
-    /// Nothing calls this yet — `main.rs`'s live-sync step (Task 4) is what
-    /// wires a store re-read into this method, the same relationship
-    /// `from_sides_with_cursor` had to this task before it.
-    #[allow(dead_code)]
+    /// Called from `main.rs`'s live-sync step (Task 4), on the existing
+    /// one-second tick, for any cassette whose lock this process does not
+    /// hold and whose file mtime has moved since it was last seen.
     pub fn merge_external(&mut self, id: &str, incoming: Cassette, insert_at: usize) {
         let focused_id = self.cassettes.get(self.focus_idx).map(|c| c.id.clone());
 
@@ -934,6 +933,46 @@ mod tests {
             "lands at its priority slot, not appended after the third cassette"
         );
         assert_eq!(app.cassettes[2].id, "third0000000000000000000000");
+    }
+
+    #[test]
+    fn merging_follows_the_new_text_on_side_b_when_the_cursor_was_at_the_end() {
+        // The less common branch: the reader was on the scratch side (B) when
+        // the update landed. Traced correct by hand in Task 3's review but
+        // never pinned by a test until now.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| {
+            c.flip();
+            c.insert_str("scratch");
+        });
+        app.clear_dirty(0);
+        assert_eq!(app.cassettes[0].side, Side::B, "reader is on side B");
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            7,
+            "cursor at the end of side B to start"
+        );
+
+        let incoming = Cassette::from_sides(
+            "side a text".to_string(),
+            "scratch and more".to_string(),
+            None,
+        );
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes[0].side,
+            Side::B,
+            "the merge must not silently switch the reader back to side A"
+        );
+        assert_eq!(app.cassettes[0].side_a_text(), "side a text");
+        assert_eq!(app.cassettes[0].side_b_text(), "scratch and more");
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            16,
+            "the cursor was at the end of side B, so it follows side B's new end"
+        );
     }
 
     #[test]

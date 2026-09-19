@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::{
     event::{
@@ -437,7 +438,13 @@ fn main() -> io::Result<()> {
     app.resize(size.width, size.height);
 
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        run(&mut terminal, &mut app, writer.as_mut(), &theme)
+        run(
+            &mut terminal,
+            &mut app,
+            writer.as_mut(),
+            store.as_ref(),
+            &theme,
+        )
     }));
 
     restore_terminal();
@@ -739,11 +746,16 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     mut writer: Option<&mut session_writer::SessionWriter>,
+    store: Option<&store::Store>,
     theme: &theme::Theme,
 ) -> io::Result<()> {
     let tick_rate = Duration::from_secs(1);
     let mut last_tick = Instant::now();
     let mut last_autosave = Instant::now();
+    // Live sync (5b): mtime last seen per cassette id, so an unchanged file
+    // is never re-merged — that would reset its cursor and undo stack for no
+    // reason. The first sight of a file counts as changed.
+    let mut cassette_mtimes: HashMap<String, SystemTime> = HashMap::new();
     #[cfg(unix)]
     let signals = install_signal_handlers()?;
 
@@ -771,6 +783,16 @@ fn run(
             app.tick_timer();
             app.tick_status();
             app.tick_idle();
+
+            // A future task's per-tick lock retry (a cassette this run
+            // opened read-only because another writer held it) belongs here,
+            // before sync: a retry that wins the lock already re-reads that
+            // cassette through `acquire`'s `refresh_from_disk`, so sync below
+            // then finds it held and skips it — one read per tick, not two.
+            if let Some(store) = store {
+                sync_external_writes(app, store, writer.as_deref(), &mut cassette_mtimes);
+            }
+
             last_tick = Instant::now();
         }
 
@@ -882,6 +904,81 @@ fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter
             app.read_only = true;
             app.status_msg = Some(e.to_string());
         }
+    }
+}
+
+/// Notice what other writers have done to this session, once per tick.
+///
+/// For every cassette in the store whose lock this process does not hold
+/// and whose file mtime has moved since it was last seen (including the
+/// first time it is ever seen), re-read it and merge it into `app` via
+/// `App::merge_external`.
+///
+/// **The held cassette is skipped before anything else** — checked against
+/// `SessionWriter::held_id` before its mtime is even consulted, let alone
+/// before it is parsed or merged. This process holds that lock precisely so
+/// nobody else can have changed the file; merging it back in could only
+/// replace the human's unsaved keystrokes with whatever was last flushed.
+///
+/// `insert_at` for a cassette `app` has never seen is computed from
+/// `scan.cassettes`, which `Store::scan_session` already returns in queue
+/// order (`store::priority::queue_order`, applied inside the scan) — the
+/// position among the ids `app.cassettes` already holds that appear before
+/// this one in that order.
+///
+/// Degrades silently throughout: a vanished session directory, an unreadable
+/// store, or a single unreadable/unparseable cassette all just mean nothing
+/// is merged this tick. The user is still typing; a hard error over a
+/// neighbour's file would be worse than showing something stale. A cassette
+/// this process has never seen is also dropped once `MAX_CASSETTES` is
+/// already on screen, the same cap `App::add_cassette` enforces.
+fn sync_external_writes(
+    app: &mut App,
+    store: &store::Store,
+    writer: Option<&session_writer::SessionWriter>,
+    mtimes: &mut HashMap<String, SystemTime>,
+) {
+    if app.session.is_empty() {
+        return;
+    }
+    let Ok(scan) = store.scan_session(&app.session) else {
+        return;
+    };
+    let held_id = writer.and_then(session_writer::SessionWriter::held_id);
+
+    for stored in &scan.cassettes {
+        if Some(stored.meta.id.as_str()) == held_id {
+            continue;
+        }
+        let Ok(modified) = std::fs::metadata(&stored.path).and_then(|m| m.modified()) else {
+            continue;
+        };
+        let changed = mtimes
+            .get(&stored.meta.id)
+            .is_none_or(|prev| *prev != modified);
+        mtimes.insert(stored.meta.id.clone(), modified);
+        if !changed {
+            continue;
+        }
+
+        let already_known = app.cassettes.iter().any(|c| c.id == stored.meta.id);
+        if !already_known && app.cassettes.len() >= app::MAX_CASSETTES {
+            continue;
+        }
+
+        let (side_a, side_b) = queue::json::split_sides(&stored.body);
+        let incoming = cassette::Cassette::from_sides(
+            side_a.trim().to_string(),
+            side_b.trim().to_string(),
+            stored.meta.topic.clone(),
+        );
+        let insert_at = scan
+            .cassettes
+            .iter()
+            .take_while(|s| s.meta.id != stored.meta.id)
+            .filter(|s| app.cassettes.iter().any(|c| c.id == s.meta.id))
+            .count();
+        app.merge_external(&stored.meta.id, incoming, insert_at);
     }
 }
 
