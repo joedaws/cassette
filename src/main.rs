@@ -937,11 +937,25 @@ fn retry_lock(app: &mut App, writer: Option<&mut session_writer::SessionWriter>)
 /// about whether — and who — is blocking. Shared by `follow_focus` (retries
 /// on every keypress) and `retry_lock` (retries on every tick), so there is
 /// exactly one place that decides what a failed acquire looks like on screen.
+///
+/// The busy message is set directly rather than through `App::flash` — it
+/// must persist for as long as the cassette stays busy, not auto-expire like
+/// a transient flash — so success has to clear it explicitly here too, or a
+/// retry that wins the lock leaves the stale "is open by X" message on
+/// screen forever, with nothing on screen to say the cassette became
+/// editable. Only cleared when `app` was actually read-only a moment ago:
+/// that's the message this function itself put there, so clearing it can't
+/// step on an unrelated `status_msg` (a goal-reached flash, a cassette-create
+/// error) that happened to be showing when acquisition succeeded.
 fn try_acquire(app: &mut App, w: &mut session_writer::SessionWriter, idx: usize) {
+    let was_read_only = app.read_only;
     match w.acquire(app, idx) {
         Ok(()) => {
             app.read_only = false;
             app.busy_holder = None;
+            if was_read_only {
+                app.status_msg = None;
+            }
         }
         Err(e) => {
             app.read_only = true;
@@ -1803,10 +1817,15 @@ mod tests {
     fn retry_lock_recovers_read_only_on_a_tick_with_no_keypress() {
         // The point of this task: a human who walks away from a busy
         // cassette and comes back later finds it editable without typing a
-        // character to discover it. `app.read_only = true` here stands in
-        // for an earlier failed `follow_focus` attempt (5a); nothing actually
-        // contends for the cassette any more, so the tick's own retry must
-        // succeed on its own and clear both `read_only` and `busy_holder`.
+        // character to discover it. `app.read_only = true` (plus the
+        // `status_msg` a real failed acquire leaves behind, per
+        // `try_acquire`'s `Err` arm) stands in for an earlier failed
+        // `follow_focus` attempt (5a); nothing actually contends for the
+        // cassette any more, so the tick's own retry must succeed on its own
+        // and clear `read_only`, `busy_holder`, AND that stale status
+        // message — leaving it behind would hide the very recovery this
+        // feature exists to show, with nothing on screen to say the
+        // cassette became editable.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = store::Store::new(dir.path().to_path_buf());
         let session = seeded_session(&store, None);
@@ -1819,11 +1838,16 @@ mod tests {
         let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
         app.read_only = true;
         app.busy_holder = Some("stale-holder".to_string());
+        app.status_msg = Some("'c1' is held by stale-holder (since ...)".to_string());
 
         retry_lock(&mut app, Some(&mut writer));
 
         assert!(!app.read_only, "the tick's retry must recover on its own");
         assert_eq!(app.busy_holder, None);
+        assert_eq!(
+            app.status_msg, None,
+            "the stale busy message must not survive a successful retry"
+        );
     }
 
     #[test]

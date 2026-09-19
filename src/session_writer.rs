@@ -782,6 +782,126 @@ mod tests {
         );
     }
 
+    /// Spawn two `queue write` invocations racing for the same cassette lock
+    /// and return `(loser_output, winner_child)` — the same technique
+    /// `tests/lock.rs`'s `contend` uses, reproduced here since that helper
+    /// lives in a separate integration-test binary this module can't reach.
+    /// See its doc comment for why "spawn a holder first, then assume a
+    /// freshly spawned second process loses to it" is flaky by measurement
+    /// (~1 failure in 6-15 runs observed): two freshly forked processes
+    /// racing the same instruction are close enough in startup cost that
+    /// either can win. Racing their *completions* instead needs no
+    /// assumption about who acquires first — exactly one `try_lock` on the
+    /// same flock must fail, so exactly one process exits almost immediately
+    /// (before ever reading its own stdin) while the other blocks reading
+    /// stdin, which nothing has closed, and cannot exit on its own. By the
+    /// time this returns, `winner` is *proven* — by the loser's own exit, not
+    /// by anything this function wrote to either child's stdin — to hold the
+    /// cassette's lock.
+    fn contend_for_lock(
+        root: &std::path::Path,
+        session: &str,
+        id: &str,
+    ) -> (std::process::Output, std::process::Child) {
+        let spawn = |user: &str| -> std::process::Child {
+            let mut child = std::process::Command::new(bin_path())
+                .args(["queue", "write", id, "--session", session])
+                .env("CASSETTE_DATA_DIR", root)
+                .env("USER", user)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn queue write");
+            match child.stdin.as_mut().expect("stdin").write_all(b"body\n") {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("write: {e}"),
+            }
+            child
+        };
+        let mut a = spawn("contender-a");
+        let mut b = spawn("contender-b");
+        let a_id = a.id();
+        let b_id = b.id();
+        let a_out = a.stdout.take().expect("stdout a");
+        let b_out = b.stdout.take().expect("stdout b");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx2 = tx.clone();
+        std::thread::spawn(move || {
+            let mut out = a_out;
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+            let _ = tx.send(a_id);
+        });
+        std::thread::spawn(move || {
+            let mut out = b_out;
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+            let _ = tx2.send(b_id);
+        });
+        // Blocks until whichever child's stdout closes first — the loser's,
+        // since the winner's stays open until this function's caller acts.
+        let first = rx.recv().expect("recv");
+        let (loser, winner) = if first == a_id { (a, b) } else { (b, a) };
+        let out = loser.wait_with_output().expect("wait loser");
+        (out, winner)
+    }
+
+    /// The spec's required integration proof: a busy cassette becomes
+    /// editable after its holder releases, with no keypress — `retry_lock`'s
+    /// (`main.rs`) whole reason to exist. The holder here must be a real
+    /// subprocess, never a second in-process `SessionWriter`:
+    /// `store::lock`'s `HELD` bookkeeping is a process-global set keyed only
+    /// by `(session, id)`, so two `SessionWriter`s in this one test process
+    /// racing for the *same* cassette would trip `acquire`'s own
+    /// `debug_assert!("re-acquiring a lock this process already holds...")`
+    /// — a false alarm, not the real contention this test needs. The
+    /// subprocess's own `HELD` bookkeeping lives in its own process, so it
+    /// never touches this one's.
+    #[test]
+    fn retry_lock_wins_once_the_external_holder_releases_no_keypress_needed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        let store = Store::new(root.clone());
+        let (mut app, session) = fixture(&store, 1);
+        let id = app.cassettes[0].id.clone();
+
+        // Deterministic by construction (see `contend_for_lock`): by the time
+        // this returns, `holder` is proven to hold `id`'s lock, blocked
+        // reading its own stdin, which nothing has closed yet.
+        let (loser_out, mut holder) = contend_for_lock(&root, &session, &id);
+        assert_eq!(loser_out.status.code(), Some(3), "{loser_out:?}");
+        let err = String::from_utf8_lossy(&loser_out.stderr);
+        assert!(err.contains("is open by"), "{err}");
+
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        crate::try_acquire(&mut app, &mut w, 0);
+        assert!(app.read_only, "busy while the subprocess holds the lock");
+        assert!(
+            app.busy_holder.is_some(),
+            "the user must know WHO holds it, not just that it's busy"
+        );
+
+        // Still busy on a tick that finds nothing changed.
+        crate::retry_lock(&mut app, Some(&mut w));
+        assert!(app.read_only, "still blocked: the holder hasn't let go");
+
+        // The holder releases: closing its stdin hands it EOF, so it
+        // finishes its write and exits normally — no sleep, no poll; the
+        // pipe close is the synchronisation.
+        drop(holder.stdin.take());
+        let done = holder.wait().expect("wait holder");
+        assert!(done.success(), "{done:?}");
+
+        // The next tick's retry wins with no keypress at all — the point of
+        // this task.
+        crate::retry_lock(&mut app, Some(&mut w));
+        assert!(!app.read_only, "editable once the holder released");
+        assert_eq!(app.busy_holder, None);
+    }
+
     /// The reviewer's data-loss reproduction, end to end: the TUI must not
     /// republish a stale in-memory body over words another writer put on
     /// disk while the cassette was unfocused.
