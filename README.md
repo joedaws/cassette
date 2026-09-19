@@ -50,9 +50,19 @@ them.
   `queue`/`session`/`writer` commands already read, so a human at the
   keyboard and one or more agents working the queue can write different
   cassettes of the same session side by side, each seeing the other's words.
+  What an agent does shows up live: the TUI polls the store once a second, so
+  an unfocused cassette's minimized row updates as an agent fills it in and a
+  cassette an agent creates appears in the stack — minimized, at its queue
+  priority — without stealing focus; if you'd scrolled up to read the tail of
+  a cassette being written elsewhere, new text only pulls your view along
+  when your cursor was already sitting at the end, otherwise you stay put.
   The focused cassette's lock is held for as long as it stays focused; if
-  another writer already holds it, it opens read-only instead of losing your
-  keystrokes.
+  another writer already holds it, it opens read-only and the info line
+  names them (`'<id>' is held by <name> (since <time>)`), and becomes
+  editable again by itself — no keypress needed — the moment they release
+  it. A cassette a human has sticky-locked (`queue lock`) names its claimant
+  in the separator too, worded differently on purpose: busy means wait a
+  moment, locked means a human has to clear it.
 - **Themes** — six built-ins (gruvbox, nord, dracula, solarized…), full
   custom themes from the config file, and a ghostty-style `cassette themes`
   listing with color swatches. The default stays true to your terminal's own
@@ -111,9 +121,12 @@ sheet that follows the current mode.
 there is no idle timeout, so tabbing away or leaving cassette open overnight
 does not give it back on its own. If an agent (or another `cassette`
 process) is already holding it, the cassette opens **read-only**: the info
-line shows `-- READ ONLY --`, the help row says why, and every keystroke is
-silently dropped rather than lost at the next flush. Since agents drive the
-queue entirely through the CLI and never need the TUI running, the norm is
+line names the holder (`'<id>' is held by refactor-agent (since <time>)`),
+the help row says why, and every keystroke is silently dropped rather than
+lost at the next flush. Cassette retries the lock once a second, not just on
+your next keypress, so once the holder releases it the cassette becomes
+editable on its own — there's nothing to press to notice. Since agents drive
+the queue entirely through the CLI and never need the TUI running, the norm is
 to close a session when you're done with it rather than leave the tape
 loaded — that's what actually releases the lock.
 
@@ -307,11 +320,26 @@ one across commands. Tabbing to a different cassette flushes and releases the on
 before taking the next one's lock; if that next cassette's lock is already
 held live by someone else — another `cassette` process, most likely — it
 opens **read-only** instead of refusing to focus it at all: the info line
-shows `-- READ ONLY --`, the help row explains why, and keystrokes are
-dropped rather than typed into a buffer that can't be saved. This is the
-live `.locks/<id>` flock, not a `queue lock` sticky claim — a sticky lock
-only ever restricts an agent's writes through the CLI, never the human at
-the keyboard.
+names the holder (`'<id>' is held by <name> (since <time>)`), the help row
+explains why, and keystrokes are dropped rather than typed into a buffer
+that can't be saved — and once that writer's own lock frees, the TUI wins
+it back on the very next tick, with no keypress needed to notice. This is
+the live `.locks/<id>` flock, not a `queue lock` sticky claim — a sticky
+lock only ever restricts an agent's writes through the CLI, never the human
+at the keyboard, and it shows differently in the TUI too: a
+`╡ locked by <name> ╞` label woven into the separator, rather than the busy
+banner's transient "is held by".
+
+**The TUI watches the rest of the store too.** Once a second it stats every
+cassette file in the session and re-reads any whose mtime moved since the
+last tick — skipping the one it currently holds, since nobody else can have
+written it. A cassette it has never seen before appears in the stack,
+minimized, at its queue priority, without moving focus off whatever you're
+writing; a cassette already on screen has its text updated in place. If
+you'd scrolled up in a cassette being written elsewhere, new text pulls your
+view along only when your cursor was already sitting at the end — scrolled
+away to reread something, you stay put. New arrivals stop once the session
+is already at the 36-cassette cap, the same limit `Ctrl+N` respects.
 
 **There is no active session.** Cassette never remembers which session you were
 last using: every `queue` command takes an explicit `--session <id>`, and if
@@ -513,6 +541,13 @@ The lock is orthogonal to the advisory `.locks/<id>` flock `queue write`
 already takes: `busy` (someone actively writing right now) and
 `sticky_lock` (someone has durably claimed it) are independent fields in
 the `--json` contract and can be true/set in any combination.
+
+In the TUI, a sticky-locked cassette carries a `╡ locked by <name> ╞` label
+in its separator — worded differently from the transient `'<id>' is held by
+<name> (since <time>)` a merely busy cassette shows in the info line, on
+purpose: busy means an active writer has it right now and it frees itself
+the moment they're done; locked means a human must `queue unlock` it before
+an agent can touch it again.
 
 ### `writers.toml` is managed by cassette, not by you
 
