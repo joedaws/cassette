@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::cassette::Cassette;
+use crate::cassette::{Cassette, Side};
 
 /// Default number of text lines shown per cassette (excluding the separator row).
 pub const VISIBLE_LINES: usize = 5;
@@ -243,6 +243,108 @@ impl App {
         self.cassettes.truncate(MAX_CASSETTES);
         self.baseline_words = self.cassettes.iter().map(|c| c.word_count()).sum();
         self.focus_idx = self.cassettes.len() - 1;
+        self.ensure_focus_visible();
+    }
+
+    /// Merge one cassette read from the store into the list: update it in
+    /// place if this process already holds a copy (by store id, not by
+    /// index — an earlier insertion may have shifted it), or insert `incoming`
+    /// as a newcomer at `insert_at`.
+    ///
+    /// `insert_at` is the caller's job, not this method's: priority lives in
+    /// `store::meta::CassetteMeta`, which `Cassette` — a pure data type with
+    /// no store knowledge — does not carry and which this task does not add
+    /// to it. `main.rs`, which already reads the store's priority order to
+    /// decide what to merge in the first place, is where that ordering
+    /// knowledge already lives; passing the position here keeps it there
+    /// instead of duplicating it onto `Cassette`.
+    ///
+    /// The cursor rule (the point of this method): if the existing
+    /// cassette's cursor sat at the end of its active side, the merged
+    /// cursor follows the incoming text's new end — watching an agent write
+    /// follows the newest words. Otherwise the cursor stays at the same
+    /// character offset, clamped to the incoming text — a reader who
+    /// scrolled up to re-read a paragraph is not yanked to the bottom.
+    /// `ui.rs` derives `scroll_top` from the cursor's row on every render, so
+    /// placing the cursor here is the whole of it; there is no separate
+    /// scroll offset to update.
+    ///
+    /// Two invariants beyond the cursor rule:
+    /// - **Focus identity.** Whichever cassette was focused before the merge
+    ///   is still focused after, even though an insertion ahead of it shifts
+    ///   every later index. Resolved by id, the same way `SessionWriter`
+    ///   tracks the held lock across insertions.
+    /// - **Never merge over unsaved edits.** `main.rs` must never call this
+    ///   for a cassette this process has dirtied — asserted here rather than
+    ///   trusted, the same way `SessionWriter::refresh_from_disk` guards the
+    ///   identical case with a `debug_assert!` plus a defensive early return.
+    ///
+    /// Nothing calls this yet — `main.rs`'s live-sync step (Task 4) is what
+    /// wires a store re-read into this method, the same relationship
+    /// `from_sides_with_cursor` had to this task before it.
+    #[allow(dead_code)]
+    pub fn merge_external(&mut self, id: &str, incoming: Cassette, insert_at: usize) {
+        let focused_id = self.cassettes.get(self.focus_idx).map(|c| c.id.clone());
+
+        if let Some(idx) = self.cassettes.iter().position(|c| c.id == id) {
+            let existing = &self.cassettes[idx];
+            debug_assert!(
+                !existing.dirty,
+                "a cassette this process holds unsaved edits in cannot have been \
+                 changed by another writer; main.rs must never offer one here"
+            );
+            if existing.dirty {
+                return;
+            }
+
+            let existing_cursor = existing.cursor_pos();
+            let was_at_end = existing_cursor == existing.char_count();
+            let existing_on_side_b = existing.side == Side::B;
+
+            let side_a_len = incoming.side_a_text().chars().count();
+            let side_b_len = incoming.side_b_text().chars().count();
+            // The active-side cursor is placed via `from_sides_with_cursor`
+            // for side A directly; side B (the less common case: the reader
+            // was on the scratch side when the update landed) is placed by
+            // flipping and clamping afterward, since that constructor only
+            // ever seeds side A.
+            let cursor_for_a = if existing_on_side_b {
+                0
+            } else if was_at_end {
+                side_a_len
+            } else {
+                existing_cursor
+            };
+
+            let mut merged = Cassette::from_sides_with_cursor(
+                incoming.side_a_text(),
+                incoming.side_b_text(),
+                incoming.topic.clone(),
+                cursor_for_a,
+            );
+            if existing_on_side_b {
+                merged.flip();
+                let target = if was_at_end {
+                    side_b_len
+                } else {
+                    existing_cursor
+                };
+                merged.set_cursor(target);
+            }
+            merged.id = id.to_string();
+            self.cassettes[idx] = merged;
+        } else {
+            let mut merged = incoming;
+            merged.id = id.to_string();
+            let at = insert_at.min(self.cassettes.len());
+            self.cassettes.insert(at, merged);
+        }
+
+        if let Some(fid) = focused_id {
+            if let Some(new_idx) = self.cassettes.iter().position(|c| c.id == fid) {
+                self.focus_idx = new_idx;
+            }
+        }
         self.ensure_focus_visible();
     }
 
@@ -725,6 +827,113 @@ mod tests {
         app.resize(80, 10);
         assert_eq!(app.visible_cassette_count(), 1);
         assert_eq!(app.cassette_scroll, 5);
+    }
+
+    #[test]
+    fn merging_follows_the_new_text_when_the_cursor_was_at_the_end() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| c.insert_str("first"));
+        app.clear_dirty(0);
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            5,
+            "cursor at the end to start"
+        );
+
+        let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(app.cassettes[0].side_a_text(), "first and more");
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            14,
+            "the cursor was at the end, so it follows the new end"
+        );
+    }
+
+    #[test]
+    fn merging_leaves_a_scrolled_back_cursor_where_it_was() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| c.insert_str("first"));
+        app.modify_focused(|c| c.move_text_start());
+        app.clear_dirty(0);
+        assert_eq!(app.cassettes[0].cursor_pos(), 0);
+
+        let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            0,
+            "a reader who scrolled up must not be yanked to the bottom"
+        );
+    }
+
+    #[test]
+    fn merge_external_updates_by_id_not_by_index() {
+        // The updated cassette isn't at index 0: merging must find it by id,
+        // never assume the caller already knows its position.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "zzz00000000000000000000000".to_string();
+        app.add_cassette();
+        app.cassettes[1].id = "aaa00000000000000000000000".to_string();
+        app.clear_dirty(1);
+
+        let incoming = Cassette::from_sides("updated".to_string(), String::new(), None);
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes.len(),
+            2,
+            "no insertion — this id already existed"
+        );
+        assert_eq!(app.cassettes[1].side_a_text(), "updated");
+    }
+
+    #[test]
+    fn an_unknown_cassette_is_inserted_without_moving_focus() {
+        // An agent's `queue new` arrives. The human is typing in what is
+        // currently index 0; after the insert they must still be typing in it.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "bbb00000000000000000000000".to_string();
+        app.focus_idx = 0;
+        let focused_id = app.cassettes[0].id.clone();
+
+        let mut newcomer = Cassette::new();
+        newcomer.id = "aaa00000000000000000000000".to_string();
+        // Priority puts the newcomer ahead of the focused cassette: index 0
+        // shifts to index 1, so this also exercises invariant 1.
+        app.merge_external("aaa00000000000000000000000", newcomer, 0);
+
+        assert_eq!(app.cassettes.len(), 2);
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, focused_id,
+            "focus must still name the cassette the user was typing in"
+        );
+    }
+
+    #[test]
+    fn merge_external_inserts_an_unknown_cassette_at_its_priority_position() {
+        // Priority order, not append: a cassette between two existing ones
+        // must land between them, not at the tail.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "first0000000000000000000000".to_string();
+        app.add_cassette();
+        app.cassettes[1].id = "third0000000000000000000000".to_string();
+
+        let mut newcomer = Cassette::new();
+        newcomer.id = "second000000000000000000000".to_string();
+        app.merge_external("second000000000000000000000", newcomer, 1);
+
+        assert_eq!(app.cassettes.len(), 3);
+        assert_eq!(app.cassettes[0].id, "first0000000000000000000000");
+        assert_eq!(
+            app.cassettes[1].id, "second000000000000000000000",
+            "lands at its priority slot, not appended after the third cassette"
+        );
+        assert_eq!(app.cassettes[2].id, "third0000000000000000000000");
     }
 
     #[test]

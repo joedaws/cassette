@@ -155,7 +155,6 @@ impl Cassette {
     /// into side A. The offset is a character count (not a byte offset), and is clamped
     /// to the length of side A. Side A is active with the given cursor position, side B
     /// is stored, no undo history.
-    #[allow(dead_code)]
     pub fn from_sides_with_cursor(
         side_a: String,
         side_b: String,
