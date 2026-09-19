@@ -909,29 +909,34 @@ fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter
 
 /// Notice what other writers have done to this session, once per tick.
 ///
-/// For every cassette in the store whose lock this process does not hold
-/// and whose file mtime has moved since it was last seen (including the
-/// first time it is ever seen), re-read it and merge it into `app` via
-/// `App::merge_external`.
+/// Two passes, cheap-first: this is a freewriting app, and re-reading and
+/// re-parsing every cassette's prose every second — the overwhelmingly
+/// common case, where nothing changed — would cost real responsiveness at
+/// the 36-cassette cap for no benefit.
 ///
-/// **The held cassette is skipped before anything else** — checked against
-/// `SessionWriter::held_id` before its mtime is even consulted, let alone
-/// before it is parsed or merged. This process holds that lock precisely so
-/// nobody else can have changed the file; merging it back in could only
-/// replace the human's unsaved keystrokes with whatever was last flushed.
+/// 1. **Stat only.** `fs::read_dir` the session's `cassettes/` directory and
+///    check each entry's mtime against `mtimes`, with no file content read
+///    at all. The **held cassette is excluded here, before its mtime is
+///    even looked at** — this process holds that lock precisely so nobody
+///    else can have changed the file, and even considering it a candidate
+///    could only lead to replacing the human's unsaved keystrokes with
+///    whatever was last flushed.
+/// 2. **Only if something moved**, call `Store::scan_session` once for the
+///    whole session — which is also where `insert_at` for a newcomer comes
+///    from: `scan_session` already returns cassettes in queue order
+///    (`store::priority::queue_order`, applied inside the scan), so
+///    `insert_at` is just a count of known ids preceding the newcomer in
+///    that order. Only the ids the first pass actually flagged are merged;
+///    an untouched cassette is left alone, keeping its cursor and undo
+///    stack exactly as they were.
 ///
-/// `insert_at` for a cassette `app` has never seen is computed from
-/// `scan.cassettes`, which `Store::scan_session` already returns in queue
-/// order (`store::priority::queue_order`, applied inside the scan) — the
-/// position among the ids `app.cassettes` already holds that appear before
-/// this one in that order.
-///
-/// Degrades silently throughout: a vanished session directory, an unreadable
-/// store, or a single unreadable/unparseable cassette all just mean nothing
-/// is merged this tick. The user is still typing; a hard error over a
-/// neighbour's file would be worse than showing something stale. A cassette
-/// this process has never seen is also dropped once `MAX_CASSETTES` is
-/// already on screen, the same cap `App::add_cassette` enforces.
+/// Degrades silently throughout: a vanished or unreadable cassettes
+/// directory, a single unreadable directory entry, an unreadable store scan,
+/// or one unparseable cassette all just mean nothing is merged this tick.
+/// The user is still typing; a hard error over a neighbour's file would be
+/// worse than showing something stale. A cassette this process has never
+/// seen is also dropped once `MAX_CASSETTES` is already on screen, the same
+/// cap `App::add_cassette` enforces.
 fn sync_external_writes(
     app: &mut App,
     store: &store::Store,
@@ -941,23 +946,52 @@ fn sync_external_writes(
     if app.session.is_empty() {
         return;
     }
+    let held_id = writer.and_then(session_writer::SessionWriter::held_id);
+
+    // Pass 1: stat only, no file content touched.
+    let Ok(entries) = std::fs::read_dir(store.cassettes_dir(&app.session)) else {
+        return;
+    };
+    let mut changed_ids: Vec<String> = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(id) = store::ids::id_from_file_name(file_name) else {
+            continue;
+        };
+        if Some(id) == held_id {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        let changed = mtimes.get(id).is_none_or(|prev| *prev != modified);
+        mtimes.insert(id.to_string(), modified);
+        if changed {
+            changed_ids.push(id.to_string());
+        }
+    }
+    if changed_ids.is_empty() {
+        return;
+    }
+
+    // Pass 2: something moved, so the whole session's queue order is worth
+    // pulling — needed for `insert_at`, and cheap at this scale regardless.
     let Ok(scan) = store.scan_session(&app.session) else {
         return;
     };
-    let held_id = writer.and_then(session_writer::SessionWriter::held_id);
-
     for stored in &scan.cassettes {
-        if Some(stored.meta.id.as_str()) == held_id {
+        if !changed_ids.contains(&stored.meta.id) {
             continue;
         }
-        let Ok(modified) = std::fs::metadata(&stored.path).and_then(|m| m.modified()) else {
-            continue;
-        };
-        let changed = mtimes
-            .get(&stored.meta.id)
-            .is_none_or(|prev| *prev != modified);
-        mtimes.insert(stored.meta.id.clone(), modified);
-        if !changed {
+        // Cannot happen given pass 1's own check, but the invariant is worth
+        // restating rather than trusting the caller two steps back.
+        if Some(stored.meta.id.as_str()) == held_id {
             continue;
         }
 
@@ -1502,6 +1536,74 @@ mod tests {
                 word_goal: None,
             })
             .expect("create session")
+    }
+
+    /// Add a real store cassette (frontmatter + body) and return its id, for
+    /// tests that need `sync_external_writes` to see actual files on disk.
+    fn store_cassette(store: &store::Store, session: &str, priority: i64, body: &str) -> String {
+        let id = store::ids::new_id();
+        let m = store::meta::CassetteMeta {
+            id: id.clone(),
+            topic: None,
+            priority,
+            status: store::meta::Status::Open,
+            locked_by: None,
+            created_by: "w".to_string(),
+            last_writer: "w".to_string(),
+            updated_at: store::meta::now_utc(),
+        };
+        store.add_cassette(session, &m, body).expect("add cassette");
+        id
+    }
+
+    #[test]
+    fn sync_never_inserts_a_newcomer_once_the_cap_is_reached() {
+        // Unbounded growth from a busy multi-writer session would be worse
+        // than the existing `MAX_CASSETTES` cap `App::add_cassette` already
+        // enforces; sync must respect the same cap rather than introduce an
+        // unbounded queue of its own.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        for i in 0..app::MAX_CASSETTES {
+            let id = store_cassette(&store, &session, (i as i64 + 1) * 10, "");
+            let mut c = cassette::Cassette::new();
+            c.id = id;
+            app.cassettes.push(c);
+        }
+        assert_eq!(
+            app.cassettes.len(),
+            app::MAX_CASSETTES,
+            "the list is at the cap"
+        );
+        let known_ids: Vec<String> = app.cassettes.iter().map(|c| c.id.clone()).collect();
+
+        // A newcomer arrives with the lowest priority, so it would land at
+        // index 0 if the cap did not stop it.
+        let newcomer_id = store_cassette(&store, &session, 1, "## Side A\n\nnewcomer\n");
+
+        let mut mtimes = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        assert_eq!(
+            app.cassettes.len(),
+            app::MAX_CASSETTES,
+            "the cap is not exceeded"
+        );
+        assert_eq!(
+            app.cassettes
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>(),
+            known_ids,
+            "nothing already present is disturbed"
+        );
+        assert!(
+            !app.cassettes.iter().any(|c| c.id == newcomer_id),
+            "the newcomer must not appear once the cap is already reached"
+        );
     }
 
     #[test]
