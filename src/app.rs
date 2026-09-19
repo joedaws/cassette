@@ -72,6 +72,17 @@ pub struct App {
     /// session. `modify_focused` is the gate; `main.rs` sets the flag when
     /// `SessionWriter::acquire` fails.
     pub read_only: bool,
+    /// While `read_only` is set, the name of the writer holding the lock —
+    /// from the lock anchor's own attribution, the same source `queue
+    /// write`'s exit-3 message reads (`LockError::Busy`'s `holder`). `None`
+    /// when read-only for a reason with no name to show (no writer, or a
+    /// holder whose anchor could not be read). `main.rs` sets this alongside
+    /// `read_only`, on every acquire attempt — keypress-driven and, from this
+    /// task, tick-driven too. Distinct from a cassette's own `locked_by`: a
+    /// busy holder is transient and frees itself; a sticky lock is durable
+    /// and needs a human to clear it (`queue unlock`) — the two must not
+    /// render the same way.
+    pub busy_holder: Option<String>,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
     /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
@@ -116,6 +127,7 @@ impl App {
             idle_secs: 0,
             session,
             read_only: false,
+            busy_holder: None,
             bell: false,
             suspend: false,
             status_ticks: None,
@@ -285,7 +297,10 @@ impl App {
     ///   which moves that file's mtime with no external writer involved —
     ///   would look like a first-sight change to `main.rs`'s sync step and
     ///   silently discard the cassette's undo stack and reset its cursor on
-    ///   every tab-away, even though disk and memory already agreed.
+    ///   every tab-away, even though disk and memory already agreed. `incoming`'s
+    ///   `locked_by` is still applied when it's the only thing that moved
+    ///   (a `queue lock`/`unlock` with no text change) — it's metadata, not
+    ///   prose, and updating it in place costs the cursor/undo state nothing.
     ///
     /// Called from `main.rs`'s live-sync step (Task 4), on the existing
     /// one-second tick, for any cassette whose lock this process does not
@@ -317,6 +332,9 @@ impl App {
                 && incoming.side_b_text().trim() == existing.side_b_text().trim()
                 && incoming.topic == existing.topic
             {
+                if self.cassettes[idx].locked_by != incoming.locked_by {
+                    self.cassettes[idx].locked_by = incoming.locked_by;
+                }
                 return;
             }
 
@@ -355,6 +373,7 @@ impl App {
                 merged.set_cursor(target);
             }
             merged.id = id.to_string();
+            merged.locked_by = incoming.locked_by;
             self.cassettes[idx] = merged;
         } else {
             let mut merged = incoming;
@@ -893,6 +912,61 @@ mod tests {
             app.cassettes[0].text(),
             "",
             "and the undo stack must survive a merge of identical content"
+        );
+    }
+
+    #[test]
+    fn merge_external_carries_locked_by_through_a_full_rebuild() {
+        // `merged` in the rebuild branch is a fresh `Cassette` built by
+        // `from_sides_with_cursor`, which knows nothing about
+        // `incoming.locked_by` unless the branch copies it across — a sticky
+        // lock must survive the same merge that follows an agent's words.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+
+        let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        incoming.locked_by = Some("joseph".to_string());
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(app.cassettes[0].locked_by.as_deref(), Some("joseph"));
+    }
+
+    #[test]
+    fn merge_external_updates_locked_by_even_when_the_no_op_short_circuit_fires() {
+        // A sticky lock is metadata, not prose: `queue lock`/`unlock` can
+        // change it with the cassette's own text and topic untouched, and the
+        // no-op short circuit (which exists to protect the cursor/undo stack
+        // from a self-inflicted mtime move) must not swallow that change
+        // along with the rebuild the text genuinely didn't need.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| {
+            c.snapshot();
+            c.insert_str("hello world");
+            c.move_word_back();
+        });
+        app.clear_dirty(0);
+        let cursor_before = app.cassettes[0].cursor_pos();
+
+        let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        incoming.locked_by = Some("joseph".to_string());
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes[0].locked_by.as_deref(),
+            Some("joseph"),
+            "the sticky lock must still land"
+        );
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            cursor_before,
+            "text/topic were unchanged, so the cursor must not move"
+        );
+        app.modify_focused(|c| c.undo());
+        assert_eq!(
+            app.cassettes[0].text(),
+            "",
+            "and the undo stack must survive, exactly as the plain no-op case does"
         );
     }
 

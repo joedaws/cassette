@@ -240,10 +240,29 @@ impl<'a> SessionWriter<'a> {
         let stored = guard.read()?;
         let (disk_a, disk_b) = crate::queue::json::split_sides(&stored.body);
         let (disk_a, disk_b) = (disk_a.trim(), disk_b.trim());
+        // Resolved once here rather than on every render: `Cassette` carries
+        // no store knowledge of its own, so the id-to-name lookup (the same
+        // fallback-to-raw-id `store::writers::display_name` gives
+        // `queue::write::write_permitted`'s sticky-lock message) happens the
+        // one time this cassette's data is read from disk.
+        let locked_by = stored
+            .meta
+            .locked_by
+            .as_deref()
+            .map(|id| match self.store.writers() {
+                Ok(w) => crate::store::writers::display_name(&w, id),
+                Err(_) => id.to_string(),
+            });
         if disk_a == c.side_a_text().trim()
             && disk_b == c.side_b_text().trim()
             && stored.meta.topic == c.topic
         {
+            // Text and topic are unchanged, so the cursor/undo short-circuit
+            // still applies — but a sticky lock is metadata, not prose, and
+            // can change (`queue lock`/`unlock`) with nothing else moving.
+            if app.cassettes[idx].locked_by != locked_by {
+                app.cassettes[idx].locked_by = locked_by;
+            }
             return Ok(());
         }
         let id = c.id.clone();
@@ -253,6 +272,7 @@ impl<'a> SessionWriter<'a> {
             stored.meta.topic,
         );
         fresh.id = id;
+        fresh.locked_by = locked_by;
         app.cassettes[idx] = fresh;
         app.clear_dirty(idx);
         Ok(())
@@ -726,6 +746,39 @@ mod tests {
             zero.body.contains("the agent's words"),
             "body: {}",
             zero.body
+        );
+    }
+
+    /// A sticky lock (`queue lock`) set before the TUI ever focuses the
+    /// cassette must show up resolved to a display name, not left as `None`
+    /// or as the raw writer id — `ui.rs`'s separator has nothing else to
+    /// show. This cassette's body is empty and its topic is `None` on both
+    /// sides, so `refresh_from_disk`'s no-op short circuit is the one that
+    /// fires here; `locked_by` must still be applied even though the
+    /// rebuild it guards is skipped.
+    #[test]
+    fn acquiring_a_cassette_resolves_its_sticky_lock_to_a_writer_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        let store = Store::new(root.clone());
+        let (mut app, session) = fixture(&store, 1);
+        let cid = app.cassettes[0].id.clone();
+
+        let lock = std::process::Command::new(bin_path())
+            .args(["queue", "lock", &cid, "--session", &session])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn queue lock");
+        assert_eq!(lock.status.code(), Some(0), "{lock:?}");
+
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        w.acquire(&mut app, 0).expect("acquire 0");
+
+        assert_eq!(
+            app.cassettes[0].locked_by.as_deref(),
+            Some("joseph"),
+            "the sticky lock's writer id must resolve to its display name"
         );
     }
 

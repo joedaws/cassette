@@ -34,6 +34,15 @@ pub struct Cassette {
     /// Set on any edit; cleared once the caller has persisted this cassette.
     /// `App::modify_focused` sets it, `App::clear_dirty` clears it.
     pub dirty: bool,
+    /// A durable claim on this cassette (`queue lock`), resolved to a writer
+    /// display name (raw id fallback) by whoever built this `Cassette` from
+    /// stored `CassetteMeta` — `Cassette` does no store I/O of its own, so it
+    /// carries the name, not the id, ready for `ui.rs` to show verbatim.
+    /// `None` for a cassette with no sticky lock, which is most of them.
+    /// Distinct from `App.busy_holder`: this is a durable claim only a human
+    /// can clear (`queue unlock`); a busy cassette is transiently held by a
+    /// live process and frees itself.
+    pub locked_by: Option<String>,
 }
 
 /// Maximum undo snapshots kept per cassette side.
