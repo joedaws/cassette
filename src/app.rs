@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::cassette::Cassette;
+use crate::cassette::{Cassette, Side};
 
 /// Default number of text lines shown per cassette (excluding the separator row).
 pub const VISIBLE_LINES: usize = 5;
@@ -72,6 +72,17 @@ pub struct App {
     /// session. `modify_focused` is the gate; `main.rs` sets the flag when
     /// `SessionWriter::acquire` fails.
     pub read_only: bool,
+    /// While `read_only` is set, the name of the writer holding the lock —
+    /// from the lock anchor's own attribution, the same source `queue
+    /// write`'s exit-3 message reads (`LockError::Busy`'s `holder`). `None`
+    /// when read-only for a reason with no name to show (no writer, or a
+    /// holder whose anchor could not be read). `main.rs` sets this alongside
+    /// `read_only`, on every acquire attempt — keypress-driven and, from this
+    /// task, tick-driven too. Distinct from a cassette's own `locked_by`: a
+    /// busy holder is transient and frees itself; a sticky lock is durable
+    /// and needs a human to clear it (`queue unlock`) — the two must not
+    /// render the same way.
+    pub busy_holder: Option<String>,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
     /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
@@ -116,6 +127,7 @@ impl App {
             idle_secs: 0,
             session,
             read_only: false,
+            busy_holder: None,
             bell: false,
             suspend: false,
             status_ticks: None,
@@ -124,7 +136,12 @@ impl App {
     }
 
     /// Show `msg` on the status line for `STATUS_FLASH_SECS`, with a bell.
-    fn flash(&mut self, msg: String) {
+    ///
+    /// `pub(crate)` for `main.rs`'s `try_acquire`, which reports a lock
+    /// failure that is *not* ordinary contention this way: those have no
+    /// banner of their own, and being transient news is exactly what keeps
+    /// them out of the standing-condition role `status_msg` must not take on.
+    pub(crate) fn flash(&mut self, msg: String) {
         self.status_msg = Some(msg);
         self.status_ticks = Some(STATUS_FLASH_SECS);
         self.bell = true;
@@ -243,6 +260,138 @@ impl App {
         self.cassettes.truncate(MAX_CASSETTES);
         self.baseline_words = self.cassettes.iter().map(|c| c.word_count()).sum();
         self.focus_idx = self.cassettes.len() - 1;
+        self.ensure_focus_visible();
+    }
+
+    /// Merge one cassette read from the store into the list: update it in
+    /// place if this process already holds a copy (by store id, not by
+    /// index — an earlier insertion may have shifted it), or insert `incoming`
+    /// as a newcomer at `insert_at`.
+    ///
+    /// `insert_at` is the caller's job, not this method's: priority lives in
+    /// `store::meta::CassetteMeta`, which `Cassette` — a pure data type with
+    /// no store knowledge — does not carry and which this task does not add
+    /// to it. `main.rs`, which already reads the store's priority order to
+    /// decide what to merge in the first place, is where that ordering
+    /// knowledge already lives; passing the position here keeps it there
+    /// instead of duplicating it onto `Cassette`.
+    ///
+    /// The cursor rule (the point of this method): if the existing
+    /// cassette's cursor sat at the end of its active side, the merged
+    /// cursor follows the incoming text's new end — watching an agent write
+    /// follows the newest words. Otherwise the cursor stays at the same
+    /// character offset, clamped to the incoming text — a reader who
+    /// scrolled up to re-read a paragraph is not yanked to the bottom.
+    /// `ui.rs` derives `scroll_top` from the cursor's row on every render, so
+    /// placing the cursor here is the whole of it; there is no separate
+    /// scroll offset to update.
+    ///
+    /// Two invariants beyond the cursor rule:
+    /// - **Focus identity.** Whichever cassette was focused before the merge
+    ///   is still focused after, even though an insertion ahead of it shifts
+    ///   every later index. Resolved by id, the same way `SessionWriter`
+    ///   tracks the held lock across insertions.
+    /// - **Never merge over unsaved edits.** `main.rs` must never call this
+    ///   for a cassette this process has dirtied — asserted here rather than
+    ///   trusted, the same way `SessionWriter::refresh_from_disk` guards the
+    ///   identical case with a `debug_assert!` plus a defensive early return.
+    /// - **A no-op when nothing changed.** Same short circuit as
+    ///   `refresh_from_disk`: if `incoming`'s sides and topic already match
+    ///   the existing cassette, return without rebuilding it. Without this,
+    ///   this process's own flush of a cassette it just released focus on —
+    ///   which moves that file's mtime with no external writer involved —
+    ///   would look like a first-sight change to `main.rs`'s sync step and
+    ///   silently discard the cassette's undo stack and reset its cursor on
+    ///   every tab-away, even though disk and memory already agreed. `incoming`'s
+    ///   `locked_by` is still applied when it's the only thing that moved
+    ///   (a `queue lock`/`unlock` with no text change) — it's metadata, not
+    ///   prose, and updating it in place costs the cursor/undo state nothing.
+    ///
+    /// Called from `main.rs`'s live-sync step (Task 4), on the existing
+    /// one-second tick, for any cassette whose lock this process does not
+    /// hold and whose file mtime has moved since it was last seen.
+    pub fn merge_external(&mut self, id: &str, incoming: Cassette, insert_at: usize) {
+        let focused_id = self.cassettes.get(self.focus_idx).map(|c| c.id.clone());
+
+        if let Some(idx) = self.cassettes.iter().position(|c| c.id == id) {
+            let existing = &self.cassettes[idx];
+            debug_assert!(
+                !existing.dirty,
+                "a cassette this process holds unsaved edits in cannot have been \
+                 changed by another writer; main.rs must never offer one here"
+            );
+            if existing.dirty {
+                return;
+            }
+
+            // Mirrors `SessionWriter::refresh_from_disk`'s identical short
+            // circuit: when nothing actually differs, skip the rebuild
+            // entirely rather than resetting the cursor and discarding the
+            // undo stack for content that never changed. This is not just
+            // an optimization — it is what makes this process's own flush
+            // of a cassette it just released focus on (which moves that
+            // file's mtime with no external writer involved) a no-op here,
+            // the same way `refresh_from_disk` already makes an unchanged
+            // re-acquire a no-op on the read side.
+            if incoming.side_a_text().trim() == existing.side_a_text().trim()
+                && incoming.side_b_text().trim() == existing.side_b_text().trim()
+                && incoming.topic == existing.topic
+            {
+                if self.cassettes[idx].locked_by != incoming.locked_by {
+                    self.cassettes[idx].locked_by = incoming.locked_by;
+                }
+                return;
+            }
+
+            let existing_cursor = existing.cursor_pos();
+            let was_at_end = existing_cursor == existing.char_count();
+            let existing_on_side_b = existing.side == Side::B;
+
+            let side_a_len = incoming.side_a_text().chars().count();
+            let side_b_len = incoming.side_b_text().chars().count();
+            // The active-side cursor is placed via `from_sides_with_cursor`
+            // for side A directly; side B (the less common case: the reader
+            // was on the scratch side when the update landed) is placed by
+            // flipping and clamping afterward, since that constructor only
+            // ever seeds side A.
+            let cursor_for_a = if existing_on_side_b {
+                0
+            } else if was_at_end {
+                side_a_len
+            } else {
+                existing_cursor
+            };
+
+            let mut merged = Cassette::from_sides_with_cursor(
+                incoming.side_a_text(),
+                incoming.side_b_text(),
+                incoming.topic.clone(),
+                cursor_for_a,
+            );
+            if existing_on_side_b {
+                merged.flip();
+                let target = if was_at_end {
+                    side_b_len
+                } else {
+                    existing_cursor
+                };
+                merged.set_cursor(target);
+            }
+            merged.id = id.to_string();
+            merged.locked_by = incoming.locked_by;
+            self.cassettes[idx] = merged;
+        } else {
+            let mut merged = incoming;
+            merged.id = id.to_string();
+            let at = insert_at.min(self.cassettes.len());
+            self.cassettes.insert(at, merged);
+        }
+
+        if let Some(fid) = focused_id {
+            if let Some(new_idx) = self.cassettes.iter().position(|c| c.id == fid) {
+                self.focus_idx = new_idx;
+            }
+        }
         self.ensure_focus_visible();
     }
 
@@ -725,6 +874,252 @@ mod tests {
         app.resize(80, 10);
         assert_eq!(app.visible_cassette_count(), 1);
         assert_eq!(app.cassette_scroll, 5);
+    }
+
+    #[test]
+    fn merge_external_is_a_no_op_when_content_and_topic_already_match() {
+        // The regression this pins: `main.rs`'s sync step moves a
+        // cassette's own flush-induced mtime the instant focus releases it,
+        // which can look like a first-sight change even though disk and
+        // memory already agree. Without this short circuit, merging
+        // identical content would rebuild the cassette via
+        // `from_sides_with_cursor` anyway, discarding its undo stack and
+        // resetting its cursor for no reason.
+        //
+        // `Cassette`'s undo stack has no public accessor, so this observes
+        // survival behaviorally: an `undo()` after the merge must still
+        // revert the insert, which is only possible if the merge left the
+        // original cassette object — undo stack included — untouched. The
+        // cursor position is asserted directly.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| {
+            c.snapshot(); // what entering insert mode does
+            c.insert_str("hello world");
+            c.move_word_back();
+        });
+        app.clear_dirty(0);
+        let cursor_before = app.cassettes[0].cursor_pos();
+
+        // Exactly what's already in memory — e.g. this process's own flush
+        // of the cassette it just released focus on, not an external
+        // writer's edit.
+        let incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            cursor_before,
+            "unchanged content must not move the cursor"
+        );
+        app.modify_focused(|c| c.undo());
+        assert_eq!(
+            app.cassettes[0].text(),
+            "",
+            "and the undo stack must survive a merge of identical content"
+        );
+    }
+
+    #[test]
+    fn merge_external_carries_locked_by_through_a_full_rebuild() {
+        // `merged` in the rebuild branch is a fresh `Cassette` built by
+        // `from_sides_with_cursor`, which knows nothing about
+        // `incoming.locked_by` unless the branch copies it across — a sticky
+        // lock must survive the same merge that follows an agent's words.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+
+        let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        incoming.locked_by = Some("joseph".to_string());
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(app.cassettes[0].locked_by.as_deref(), Some("joseph"));
+    }
+
+    #[test]
+    fn merge_external_updates_locked_by_even_when_the_no_op_short_circuit_fires() {
+        // A sticky lock is metadata, not prose: `queue lock`/`unlock` can
+        // change it with the cassette's own text and topic untouched, and the
+        // no-op short circuit (which exists to protect the cursor/undo stack
+        // from a self-inflicted mtime move) must not swallow that change
+        // along with the rebuild the text genuinely didn't need.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| {
+            c.snapshot();
+            c.insert_str("hello world");
+            c.move_word_back();
+        });
+        app.clear_dirty(0);
+        let cursor_before = app.cassettes[0].cursor_pos();
+
+        let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        incoming.locked_by = Some("joseph".to_string());
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes[0].locked_by.as_deref(),
+            Some("joseph"),
+            "the sticky lock must still land"
+        );
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            cursor_before,
+            "text/topic were unchanged, so the cursor must not move"
+        );
+        app.modify_focused(|c| c.undo());
+        assert_eq!(
+            app.cassettes[0].text(),
+            "",
+            "and the undo stack must survive, exactly as the plain no-op case does"
+        );
+    }
+
+    #[test]
+    fn merging_follows_the_new_text_when_the_cursor_was_at_the_end() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| c.insert_str("first"));
+        app.clear_dirty(0);
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            5,
+            "cursor at the end to start"
+        );
+
+        let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(app.cassettes[0].side_a_text(), "first and more");
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            14,
+            "the cursor was at the end, so it follows the new end"
+        );
+    }
+
+    #[test]
+    fn merging_leaves_a_scrolled_back_cursor_where_it_was() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| c.insert_str("first"));
+        app.modify_focused(|c| c.move_text_start());
+        app.clear_dirty(0);
+        assert_eq!(app.cassettes[0].cursor_pos(), 0);
+
+        let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            0,
+            "a reader who scrolled up must not be yanked to the bottom"
+        );
+    }
+
+    #[test]
+    fn merge_external_updates_by_id_not_by_index() {
+        // The updated cassette isn't at index 0: merging must find it by id,
+        // never assume the caller already knows its position.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "zzz00000000000000000000000".to_string();
+        app.add_cassette();
+        app.cassettes[1].id = "aaa00000000000000000000000".to_string();
+        app.clear_dirty(1);
+
+        let incoming = Cassette::from_sides("updated".to_string(), String::new(), None);
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes.len(),
+            2,
+            "no insertion — this id already existed"
+        );
+        assert_eq!(app.cassettes[1].side_a_text(), "updated");
+    }
+
+    #[test]
+    fn an_unknown_cassette_is_inserted_without_moving_focus() {
+        // An agent's `queue new` arrives. The human is typing in what is
+        // currently index 0; after the insert they must still be typing in it.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "bbb00000000000000000000000".to_string();
+        app.focus_idx = 0;
+        let focused_id = app.cassettes[0].id.clone();
+
+        let mut newcomer = Cassette::new();
+        newcomer.id = "aaa00000000000000000000000".to_string();
+        // Priority puts the newcomer ahead of the focused cassette: index 0
+        // shifts to index 1, so this also exercises invariant 1.
+        app.merge_external("aaa00000000000000000000000", newcomer, 0);
+
+        assert_eq!(app.cassettes.len(), 2);
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, focused_id,
+            "focus must still name the cassette the user was typing in"
+        );
+    }
+
+    #[test]
+    fn merge_external_inserts_an_unknown_cassette_at_its_priority_position() {
+        // Priority order, not append: a cassette between two existing ones
+        // must land between them, not at the tail.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "first0000000000000000000000".to_string();
+        app.add_cassette();
+        app.cassettes[1].id = "third0000000000000000000000".to_string();
+
+        let mut newcomer = Cassette::new();
+        newcomer.id = "second000000000000000000000".to_string();
+        app.merge_external("second000000000000000000000", newcomer, 1);
+
+        assert_eq!(app.cassettes.len(), 3);
+        assert_eq!(app.cassettes[0].id, "first0000000000000000000000");
+        assert_eq!(
+            app.cassettes[1].id, "second000000000000000000000",
+            "lands at its priority slot, not appended after the third cassette"
+        );
+        assert_eq!(app.cassettes[2].id, "third0000000000000000000000");
+    }
+
+    #[test]
+    fn merging_follows_the_new_text_on_side_b_when_the_cursor_was_at_the_end() {
+        // The less common branch: the reader was on the scratch side (B) when
+        // the update landed. Traced correct by hand in Task 3's review but
+        // never pinned by a test until now.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| {
+            c.flip();
+            c.insert_str("scratch");
+        });
+        app.clear_dirty(0);
+        assert_eq!(app.cassettes[0].side, Side::B, "reader is on side B");
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            7,
+            "cursor at the end of side B to start"
+        );
+
+        let incoming = Cassette::from_sides(
+            "side a text".to_string(),
+            "scratch and more".to_string(),
+            None,
+        );
+        app.merge_external("aaa00000000000000000000000", incoming, 0);
+
+        assert_eq!(
+            app.cassettes[0].side,
+            Side::B,
+            "the merge must not silently switch the reader back to side A"
+        );
+        assert_eq!(app.cassettes[0].side_a_text(), "side a text");
+        assert_eq!(app.cassettes[0].side_b_text(), "scratch and more");
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            16,
+            "the cursor was at the end of side B, so it follows side B's new end"
+        );
     }
 
     #[test]

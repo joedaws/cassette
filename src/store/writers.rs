@@ -169,6 +169,21 @@ pub(crate) fn write(root: &Path, w: &Writers) -> io::Result<()> {
     crate::store::atomic_write(&root.join(WRITERS_FILE), &text)
 }
 
+/// A writer id resolved to its registered display name, falling back to the
+/// raw id when the registry doesn't know it — a damaged store, or a writer
+/// that registered and was since removed by hand. The same fallback
+/// `queue::write::write_permitted`'s sticky-lock message already applies
+/// inline; `pub(crate)` here so the TUI's own `locked_by` resolution (5b,
+/// `main.rs` and `session_writer.rs`) can share it instead of reimplementing
+/// the lookup a third time.
+pub(crate) fn display_name(writers: &Writers, id: &str) -> String {
+    writers
+        .writers
+        .get(id)
+        .map(|w| w.name.clone())
+        .unwrap_or_else(|| id.to_string())
+}
+
 /// The id and kind registered under `name`, if any. Shared by `ensure` and
 /// `resolve`, which differ in what they do with the result, not in how they
 /// find it. The map is keyed by id, so this is a linear scan over values.

@@ -34,6 +34,15 @@ pub struct Cassette {
     /// Set on any edit; cleared once the caller has persisted this cassette.
     /// `App::modify_focused` sets it, `App::clear_dirty` clears it.
     pub dirty: bool,
+    /// A durable claim on this cassette (`queue lock`), resolved to a writer
+    /// display name (raw id fallback) by whoever built this `Cassette` from
+    /// stored `CassetteMeta` — `Cassette` does no store I/O of its own, so it
+    /// carries the name, not the id, ready for `ui.rs` to show verbatim.
+    /// `None` for a cassette with no sticky lock, which is most of them.
+    /// Distinct from `App.busy_holder`: this is a durable claim only a human
+    /// can clear (`queue unlock`); a busy cassette is transiently held by a
+    /// live process and frees itself.
+    pub locked_by: Option<String>,
 }
 
 /// Maximum undo snapshots kept per cassette side.
@@ -145,6 +154,31 @@ impl Cassette {
     pub fn from_sides(side_a: String, side_b: String, topic: Option<String>) -> Self {
         Self {
             left: side_a,
+            back_left: side_b,
+            topic,
+            ..Self::default()
+        }
+    }
+
+    /// Rebuild a cassette from saved text with the cursor at a specific character offset
+    /// into side A. The offset is a character count (not a byte offset), and is clamped
+    /// to the length of side A. Side A is active with the given cursor position, side B
+    /// is stored, no undo history.
+    pub fn from_sides_with_cursor(
+        side_a: String,
+        side_b: String,
+        topic: Option<String>,
+        cursor: usize,
+    ) -> Self {
+        // Split side_a at the character offset, clamping to the length.
+        let chars: Vec<char> = side_a.chars().collect();
+        let split_pos = cursor.min(chars.len());
+        let left = chars[..split_pos].iter().collect::<String>();
+        let right = chars[split_pos..].iter().collect::<String>();
+
+        Self {
+            left,
+            right,
             back_left: side_b,
             topic,
             ..Self::default()
@@ -776,5 +810,27 @@ mod tests {
         c.open_above();
         assert_eq!(c.text(), "one\n\ntwo");
         assert_eq!(c.cursor_pos(), 4);
+    }
+
+    #[test]
+    fn from_sides_with_cursor_splits_side_a_at_a_character_offset() {
+        let c = Cassette::from_sides_with_cursor("hello world".to_string(), String::new(), None, 5);
+        assert_eq!(c.cursor_pos(), 5);
+        assert_eq!(c.side_a_text(), "hello world");
+    }
+
+    #[test]
+    fn from_sides_with_cursor_clamps_past_the_end() {
+        let c = Cassette::from_sides_with_cursor("short".to_string(), String::new(), None, 999);
+        assert_eq!(c.cursor_pos(), 5, "an offset past the end lands at the end");
+    }
+
+    #[test]
+    fn from_sides_with_cursor_counts_characters_not_bytes() {
+        // Multi-byte text is the case a byte offset gets wrong, and the crate
+        // counts characters everywhere else (`cursor_pos` is chars().count()).
+        let c = Cassette::from_sides_with_cursor("héllo".to_string(), String::new(), None, 2);
+        assert_eq!(c.cursor_pos(), 2);
+        assert_eq!(c.side_a_text(), "héllo");
     }
 }

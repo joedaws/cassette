@@ -81,44 +81,16 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     render_reel_stats(frame, chunks[n + 2], app);
 
     // The topic prompt owns the line while open; then status messages; then
-    // the idle nudge; otherwise a vim-style info line.
-    let info;
+    // the idle nudge; otherwise a vim-style info line. `info_text` is the
+    // pure text; the idle-nudge dimming is the only style decision left here.
     let mut info_style = Style::new();
-    let status = if app.mode == Mode::Topic {
-        info = format!("topic: {}▏", app.topic_input);
-        info.as_str()
-    } else if let Some(m) = &app.status_msg {
-        m.as_str()
-    } else if app.idle_nudge() {
+    if app.status_msg.is_none() && app.mode != Mode::Topic && app.idle_nudge() && !app.read_only {
         info_style = Style::new().fg(Color::DarkGray);
-        "· · ·  tape's still rolling — keep writing  · · ·"
-    } else {
-        let c = &app.cassettes[app.focus_idx];
-        let (ln, col) = c.cursor_line_col();
-        let mode_str = match app.mode {
-            _ if app.read_only => "-- READ ONLY --",
-            Mode::Insert if app.record => "-- RECORD --",
-            Mode::Insert => "-- INSERT --",
-            Mode::Normal => "-- NORMAL --",
-            Mode::Topic => unreachable!("handled above"),
-        };
-        let side = match c.side {
-            Side::A => "  ·  side A",
-            Side::B => "  ·  side B",
-        };
-        info = format!(
-            "{}  ln {}, col {}  ·  {} chars  ·  cassette {}/{}{}",
-            mode_str,
-            ln,
-            col,
-            c.char_count(),
-            app.focus_idx + 1,
-            app.cassettes.len(),
-            side
-        );
-        info.as_str()
-    };
-    frame.render_widget(Paragraph::new(status).style(info_style), chunks[n + 3]);
+    }
+    frame.render_widget(
+        Paragraph::new(info_text(app)).style(info_style),
+        chunks[n + 3],
+    );
 
     let help = match app.mode {
         _ if app.read_only => {
@@ -134,6 +106,64 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         Mode::Topic => "Enter:set topic  Esc:cancel  (empty input clears the topic)",
     };
     frame.render_widget(Paragraph::new(help_line(help, theme)), chunks[n + 4]);
+}
+
+/// The vim-style info line's text: topic prompt, status message, or idle
+/// nudge when one of those is showing, otherwise mode/cursor/cassette
+/// position. Pure — returns the text only, no styling — so tests can assert
+/// on its content without a terminal; `render` applies the one remaining
+/// style decision (dimming the idle nudge).
+///
+/// A read-only cassette names its holder — `open by refactor-agent` — rather
+/// than showing the bare `-- READ ONLY --` 5a left: `app.busy_holder` is
+/// `None` only when there is genuinely no name to show (a garbled lock
+/// anchor), in which case the bare label is all that's left to say.
+///
+/// That arm is reachable only because `try_acquire` records a busy cassette
+/// in `read_only`/`busy_holder` and leaves `status_msg` — checked above it —
+/// for transient news. `pub(crate)` so the cross-process contention test in
+/// `session_writer` can assert the banner reaches the screen under a real
+/// held lock, rather than only from hand-set fields.
+pub(crate) fn info_text(app: &App) -> String {
+    if app.mode == Mode::Topic {
+        return format!("topic: {}▏", app.topic_input);
+    }
+    if let Some(m) = &app.status_msg {
+        return m.clone();
+    }
+    // Not while locked out: "keep writing" is advice the user cannot take,
+    // and it would shadow the one line saying why — the same shadowing the
+    // busy banner was rescued from one branch below. Watching another writer
+    // work is not idling, so the nudge is wrong here on its own terms.
+    if app.idle_nudge() && !app.read_only {
+        return "· · ·  tape's still rolling — keep writing  · · ·".to_string();
+    }
+    let c = &app.cassettes[app.focus_idx];
+    let (ln, col) = c.cursor_line_col();
+    let mode_str = match app.mode {
+        _ if app.read_only => match &app.busy_holder {
+            Some(holder) => format!("-- READ ONLY (open by {holder}) --"),
+            None => "-- READ ONLY --".to_string(),
+        },
+        Mode::Insert if app.record => "-- RECORD --".to_string(),
+        Mode::Insert => "-- INSERT --".to_string(),
+        Mode::Normal => "-- NORMAL --".to_string(),
+        Mode::Topic => unreachable!("handled above"),
+    };
+    let side = match c.side {
+        Side::A => "  ·  side A",
+        Side::B => "  ·  side B",
+    };
+    format!(
+        "{}  ln {}, col {}  ·  {} chars  ·  cassette {}/{}{}",
+        mode_str,
+        ln,
+        col,
+        c.char_count(),
+        app.focus_idx + 1,
+        app.cassettes.len(),
+        side
+    )
 }
 
 /// Style a `key:description  key:description` help string: key combos get
@@ -188,10 +218,61 @@ fn render_overflow_hint(frame: &mut Frame, sep_area: Rect, count: usize, arrow: 
     );
 }
 
+/// Side tag text for a cassette's separator: `╡ SIDE A ╞`/`╡ SIDE B ╞`, or the
+/// compact `╡ A ╞`/`╡ B ╞` used on minimized cassettes (`short`).
+fn side_tag_text(side: Side, short: bool) -> &'static str {
+    match (side, short) {
+        (Side::A, false) => "╡ SIDE A ╞",
+        (Side::A, true) => "╡ A ╞",
+        (Side::B, false) => "╡ SIDE B ╞",
+        (Side::B, true) => "╡ B ╞",
+    }
+}
+
+fn topic_label_text(topic: &str) -> String {
+    format!("╡ {topic} ╞")
+}
+
+/// A sticky lock's label — worded "locked by", never "open by": a **busy**
+/// cassette (`info_text`'s `open by <holder>`) is transiently held by a live
+/// process and frees itself; this is a durable claim only a human can clear
+/// (`queue unlock`). The two must not read the same.
+fn sticky_lock_label_text(holder: &str) -> String {
+    format!("╡ locked by {holder} ╞")
+}
+
+/// A cassette's separator content, in display order: the side tag, then the
+/// topic label if set, then the sticky-lock label if set. No fill characters
+/// (those depend on the terminal width, which this doesn't take) — shared by
+/// `render_separator` (styles and joins these with `ch` fill) and
+/// `separator_text` (just concatenates them, for tests), so the two can never
+/// disagree about what the separator says.
+fn separator_pieces(cassette: &Cassette, short: bool) -> Vec<String> {
+    let mut pieces = vec![side_tag_text(cassette.side, short).to_string()];
+    if let Some(topic) = &cassette.topic {
+        pieces.push(topic_label_text(topic));
+    }
+    if let Some(holder) = &cassette.locked_by {
+        pieces.push(sticky_lock_label_text(holder));
+    }
+    pieces
+}
+
+/// The plain text of cassette `idx`'s separator (long-form tags, as on the
+/// focused cassette) — pure, no fill, no styling, so a test can assert on
+/// content without a terminal. `render_separator` gets the same content
+/// (styled, with fill) straight from `separator_pieces`; this wrapper has no
+/// production caller of its own, only tests — gated on `cfg(test)` for the
+/// same reason `queue::write::write_body` is.
+#[cfg(test)]
+fn separator_text(app: &App, idx: usize) -> String {
+    separator_pieces(&app.cassettes[idx], false).concat()
+}
+
 /// A cassette's top separator row: the active side's tag is woven into it
 /// (accents from the theme; side A carries the loud one), followed by the
-/// topic label when one is set. `short` picks the compact tags used on
-/// minimized cassettes.
+/// topic label when one is set and a sticky-lock label when `locked_by` is
+/// set. `short` picks the compact tags used on minimized cassettes.
 fn render_separator(
     frame: &mut Frame,
     area: Rect,
@@ -206,27 +287,19 @@ fn render_separator(
         Side::A => theme.accent_a,
         Side::B => theme.accent_b,
     };
-    let tag = match (cassette.side, short) {
-        (Side::A, false) => "╡ SIDE A ╞",
-        (Side::A, true) => "╡ A ╞",
-        (Side::B, false) => "╡ SIDE B ╞",
-        (Side::B, true) => "╡ B ╞",
-    };
     let tag_style = Style::new().fg(accent);
+    let label_style = Style::new().add_modifier(Modifier::BOLD);
 
-    let mut used = 2 + tag.chars().count();
+    let pieces = separator_pieces(cassette, short);
+    let mut used = 2 + pieces[0].chars().count();
     let mut spans = vec![
         Span::raw(ch.to_string().repeat(2)),
-        Span::styled(tag, tag_style),
+        Span::styled(pieces[0].clone(), tag_style),
     ];
-    if let Some(topic) = &cassette.topic {
-        let label = format!("╡ {} ╞", topic);
+    for label in &pieces[1..] {
         used += 1 + label.chars().count();
         spans.push(Span::raw(ch.to_string()));
-        spans.push(Span::styled(
-            label,
-            Style::new().add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled(label.clone(), label_style));
     }
     spans.push(Span::raw(ch.to_string().repeat(total.saturating_sub(used))));
     frame.render_widget(Paragraph::new(Line::from(spans)), sep_area);
@@ -773,6 +846,66 @@ mod tests {
         let row = row_text(&app, 0);
         assert!(row.contains("╡ A ╞"), "compact side tag: {row}");
         assert!(row.contains("╡ dream log ╞"));
+    }
+
+    /// A busy read-only cassette must name its holder, not just say
+    /// `-- READ ONLY --` — the user needs to know WHO to wait on.
+    #[test]
+    fn the_busy_indicator_names_the_holder() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.read_only = true;
+        app.busy_holder = Some("refactor-agent".to_string());
+        let line = crate::ui::info_text(&app);
+        assert!(
+            line.contains("refactor-agent"),
+            "the user must know WHO holds it: {line}"
+        );
+    }
+
+    /// Ten quiet seconds on a cassette an agent holds must not replace the
+    /// reason the keyboard is dead with advice to keep typing. The nudge
+    /// sits ABOVE the read-only arm in `info_text`, so this is the same
+    /// shadowing class the busy banner was rescued from.
+    #[test]
+    fn the_idle_nudge_does_not_shadow_the_busy_banner() {
+        let mut app = App::new(
+            Some(600),
+            None,
+            None,
+            "01JTESTSESSN00000000000000".to_string(),
+        );
+        app.idle_secs = App::IDLE_NUDGE_SECS + 5;
+        assert!(
+            app.idle_nudge(),
+            "fixture must actually be nudging, or this proves nothing"
+        );
+
+        app.read_only = true;
+        app.busy_holder = Some("refactor-agent".to_string());
+        let line = crate::ui::info_text(&app);
+        assert!(
+            line.contains("READ ONLY (open by refactor-agent)"),
+            "the banner must win over the nudge: {line}"
+        );
+        assert!(!line.contains("still rolling"), "{line}");
+    }
+
+    /// Busy means wait; sticky means go and unlock it. A display that blurs
+    /// them sends the user to wait for something that will never free itself.
+    #[test]
+    fn a_busy_cassette_and_a_sticky_one_do_not_read_the_same() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.read_only = true;
+        app.busy_holder = Some("refactor-agent".to_string());
+        let busy = crate::ui::info_text(&app);
+
+        app.read_only = false;
+        app.busy_holder = None;
+        app.cassettes[0].locked_by = Some("joseph".to_string());
+        let sticky = crate::ui::separator_text(&app, 0);
+
+        assert_ne!(busy, sticky);
+        assert!(sticky.contains("joseph"), "{sticky}");
     }
 
     /// With the cursor at the start of a long text the scroll clamp pins the

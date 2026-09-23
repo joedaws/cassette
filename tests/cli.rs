@@ -2240,3 +2240,67 @@ fn today_refuses_a_template_once_the_day_already_has_a_session() {
         stderr(&out)
     );
 }
+
+#[test]
+fn a_cassette_written_behind_the_tuis_back_is_visible_to_the_next_reader() {
+    // Not a TUI test: this pins the store-side contract live sync depends on
+    // — that an external write is observable by re-reading, with the mtime
+    // moving. The TUI-side merge is unit-tested in app.rs, and the two
+    // together are what Task 6 drives through a pty.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let sid = {
+        let o = Command::new(bin())
+            .args(["session", "new"])
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let cid = {
+        let o = Command::new(bin())
+            .args(["queue", "new", "shared", "--session", &sid])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let path = std::fs::read_dir(root.join("sessions").join(&sid).join("cassettes"))
+        .expect("read cassettes dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().contains(&cid))
+        .expect("the cassette file");
+    let before = std::fs::metadata(&path)
+        .expect("stat")
+        .modified()
+        .expect("mtime");
+
+    let mut child = Command::new(bin())
+        .args(["queue", "write", &cid, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "joseph")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"agent words\n")
+        .expect("write");
+    assert!(child.wait().expect("wait").success());
+
+    let after = std::fs::metadata(&path)
+        .expect("stat")
+        .modified()
+        .expect("mtime");
+    assert!(
+        after >= before,
+        "the write must move the mtime live sync watches"
+    );
+    let body = std::fs::read_to_string(&path).expect("read");
+    assert!(body.contains("agent words"), "{body}");
+}

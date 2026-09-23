@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::{
     event::{
@@ -400,11 +401,14 @@ fn main() -> io::Result<()> {
         // read-only rather than refusing to start: refusing would let a
         // running agent lock a human out of their own session, and accepting
         // keystrokes with no guard to write them through would lose them.
+        // Through `try_acquire`, not by hand: it is the one place that
+        // decides what a failed acquire looks like, and hand-setting
+        // `read_only` here used to skip `busy_holder` — so the opening
+        // frames named nobody until the first tick's retry filled it in,
+        // and a non-contention failure was reported only by an `eprintln!`
+        // the alternate screen immediately wiped.
         let focus = app.focus_idx;
-        if let Err(e) = w.acquire(&mut app, focus) {
-            app.read_only = true;
-            eprintln!("cassette: {e} — opening read-only");
-        }
+        try_acquire(&mut app, w, focus);
     }
 
     // Restore the terminal before the default hook prints, so the panic
@@ -437,7 +441,13 @@ fn main() -> io::Result<()> {
     app.resize(size.width, size.height);
 
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        run(&mut terminal, &mut app, writer.as_mut(), &theme)
+        run(
+            &mut terminal,
+            &mut app,
+            writer.as_mut(),
+            store.as_ref(),
+            &theme,
+        )
     }));
 
     restore_terminal();
@@ -692,6 +702,10 @@ fn load_session_cassettes(store: &store::Store, session: &str) -> Vec<cassette::
             scan.unreadable
         );
     }
+    // Resolved once for the whole session rather than per cassette; a
+    // registry read failure degrades to showing raw writer ids rather than
+    // failing the load.
+    let writers = store.writers().unwrap_or_default();
     scan.cassettes
         .into_iter()
         .map(|c| {
@@ -702,6 +716,11 @@ fn load_session_cassettes(store: &store::Store, session: &str) -> Vec<cassette::
                 c.meta.topic,
             );
             loaded.id = c.meta.id;
+            loaded.locked_by = c
+                .meta
+                .locked_by
+                .as_deref()
+                .map(|id| store::writers::display_name(&writers, id));
             loaded
         })
         .collect()
@@ -739,11 +758,16 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     mut writer: Option<&mut session_writer::SessionWriter>,
+    store: Option<&store::Store>,
     theme: &theme::Theme,
 ) -> io::Result<()> {
     let tick_rate = Duration::from_secs(1);
     let mut last_tick = Instant::now();
     let mut last_autosave = Instant::now();
+    // Live sync (5b): mtime last seen per cassette id, so an unchanged file
+    // is never re-merged — that would reset its cursor and undo stack for no
+    // reason. The first sight of a file counts as changed.
+    let mut cassette_mtimes: HashMap<String, SystemTime> = HashMap::new();
     #[cfg(unix)]
     let signals = install_signal_handlers()?;
 
@@ -771,6 +795,18 @@ fn run(
             app.tick_timer();
             app.tick_status();
             app.tick_idle();
+
+            // Per-tick lock retry runs BEFORE sync: a retry that wins the
+            // lock already re-reads that cassette through `acquire`'s
+            // `refresh_from_disk`, so sync below then finds it held and
+            // skips it — one read this tick, not two. Sync-first would merge
+            // the cassette and then immediately re-read it here.
+            retry_lock(app, writer.as_deref_mut());
+
+            if let Some(store) = store {
+                sync_external_writes(app, store, writer.as_deref(), &mut cassette_mtimes);
+            }
+
             last_tick = Instant::now();
         }
 
@@ -869,15 +905,222 @@ fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter
     if let Err(e) = w.create_missing_cassettes(app) {
         app.status_msg = Some(format!("cannot create cassette: {e}"));
     }
-    if w.held_idx() == Some(app.focus_idx) {
+    if app
+        .cassettes
+        .get(app.focus_idx)
+        .is_some_and(|c| Some(c.id.as_str()) == w.held_id())
+    {
         return;
     }
-    match w.acquire(app, app.focus_idx) {
-        Ok(()) => app.read_only = false,
+    try_acquire(app, w, app.focus_idx);
+}
+
+/// Retry the focused cassette's lock once a tick, independent of any
+/// keypress — so a human who steps away from a cassette an agent holds
+/// finds it editable on their return without typing a character to discover
+/// it. A no-op unless the session is currently read-only: an already-held
+/// cassette has nothing to retry, and `follow_focus` already retries on
+/// every keypress, so this only has work to do between them.
+///
+/// Runs BEFORE `sync_external_writes` in the tick block: a retry that wins
+/// the lock already re-reads this cassette via `acquire`'s
+/// `refresh_from_disk`, so sync then finds it newly held and skips it —
+/// one read this tick, not two. Sync-first would merge the cassette and
+/// then immediately re-read it here.
+fn retry_lock(app: &mut App, writer: Option<&mut session_writer::SessionWriter>) {
+    let Some(w) = writer else { return };
+    if !app.read_only {
+        return;
+    }
+    try_acquire(app, w, app.focus_idx);
+}
+
+/// Attempt to acquire cassette `idx`'s lock and record the outcome on `app`:
+/// `read_only` and `busy_holder` together, so the two can never disagree
+/// about whether — and who — is blocking. Shared by `follow_focus` (retries
+/// on every keypress) and `retry_lock` (retries on every tick), so there is
+/// exactly one place that decides what a failed acquire looks like on screen.
+///
+/// Those two fields are the *whole* record: this deliberately does not also
+/// write `status_msg`. Being busy is a standing condition, not news, and
+/// `ui::info_text` already renders it from `read_only`/`busy_holder` as
+/// `-- READ ONLY (open by <name>) --` with the rest of the info line — ln/col,
+/// char count, cassette position, side — intact. Copying the same fact into
+/// `status_msg` would put it on screen through the one branch that outranks
+/// the mode line, costing the user that whole line for as long as the lock is
+/// held, and it could not use `App::flash` (a standing condition must not
+/// auto-expire), so it would need clearing on every path back to editable —
+/// which is exactly the stale-message bug this shape cannot have. Leaving
+/// `status_msg` alone also means a genuine flash — goal reached, timer
+/// expired — still shows for its few seconds while a cassette is busy, and
+/// the banner returns underneath it when it expires.
+fn try_acquire(app: &mut App, w: &mut session_writer::SessionWriter, idx: usize) {
+    match w.acquire(app, idx) {
+        Ok(()) => {
+            app.read_only = false;
+            app.busy_holder = None;
+        }
         Err(e) => {
             app.read_only = true;
-            app.status_msg = Some(e.to_string());
+            app.busy_holder = busy_holder_name(&e);
+            // Ordinary contention is the case the banner was built for, and
+            // it says everything there is to say. Anything else — an `Io`
+            // from `acquire`'s own flush of the OUTGOING cassette (a full
+            // disk, a vanished session directory), a `NoSuchCassette` — has
+            // no banner of its own and would otherwise show as a bare
+            // `-- READ ONLY --` beside a help row blaming a writer who does
+            // not exist, while the user's unflushed words sit in memory.
+            // `flash` and not `status_msg` directly: this is news, it
+            // expires on its own, and each tick's `retry_lock` re-reports it
+            // for as long as the condition lasts.
+            if !matches!(e, store::lock::LockError::Busy { .. }) {
+                app.flash(format!("cannot take this cassette's lock: {e}"));
+            }
         }
+    }
+}
+
+/// The name to show for a busy cassette's holder, straight from the lock
+/// anchor's own attribution — the same source `queue write`'s exit-3 message
+/// reads (`LockError::Busy`'s `holder`). `None` when there is genuinely
+/// nothing to show: no writer at all, or a holder whose anchor line could
+/// not be parsed (a crash before it wrote one, or garbled bytes) — `queue
+/// write` degrades the same case to "another writer" rather than a name.
+fn busy_holder_name(e: &store::lock::LockError) -> Option<String> {
+    match e {
+        store::lock::LockError::Busy {
+            holder: Some(a), ..
+        } => Some(a.name.clone()),
+        _ => None,
+    }
+}
+
+/// Notice what other writers have done to this session, once per tick.
+///
+/// Two passes, cheap-first: this is a freewriting app, and re-reading and
+/// re-parsing every cassette's prose every second — the overwhelmingly
+/// common case, where nothing changed — would cost real responsiveness at
+/// the 36-cassette cap for no benefit.
+///
+/// 1. **Stat only.** `fs::read_dir` the session's `cassettes/` directory and
+///    check each entry's mtime against `mtimes`, with no file content read
+///    at all. The **held cassette's mtime is still recorded** — this
+///    process holds that lock precisely so nobody else can have changed the
+///    file, so its mtime only ever moves because of our own flush, and
+///    *not* recording it would make the tick after focus moves off it look
+///    like a first-sight change — but it is excluded from `changed_ids`
+///    unconditionally, so it is never a merge candidate: merging it back in
+///    could only replace the human's unsaved keystrokes with whatever was
+///    last flushed.
+/// 2. **Only if something moved**, call `Store::scan_session` once for the
+///    whole session — which is also where `insert_at` for a newcomer comes
+///    from: `scan_session` already returns cassettes in queue order
+///    (`store::priority::queue_order`, applied inside the scan), so
+///    `insert_at` is just a count of known ids preceding the newcomer in
+///    that order. Only the ids the first pass actually flagged are merged;
+///    an untouched cassette is left alone, keeping its cursor and undo
+///    stack exactly as they were.
+///
+/// Degrades silently throughout: a vanished or unreadable cassettes
+/// directory, a single unreadable directory entry, an unreadable store scan,
+/// or one unparseable cassette all just mean nothing is merged this tick.
+/// The user is still typing; a hard error over a neighbour's file would be
+/// worse than showing something stale. A cassette this process has never
+/// seen is also dropped once `MAX_CASSETTES` is already on screen, the same
+/// cap `App::add_cassette` enforces.
+fn sync_external_writes(
+    app: &mut App,
+    store: &store::Store,
+    writer: Option<&session_writer::SessionWriter>,
+    mtimes: &mut HashMap<String, SystemTime>,
+) {
+    if app.session.is_empty() {
+        return;
+    }
+    let held_id = writer.and_then(session_writer::SessionWriter::held_id);
+
+    // Pass 1: stat only, no file content touched.
+    let Ok(entries) = std::fs::read_dir(store.cassettes_dir(&app.session)) else {
+        return;
+    };
+    let mut changed_ids: Vec<String> = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(id) = store::ids::id_from_file_name(file_name) else {
+            continue;
+        };
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if Some(id) == held_id {
+            // Nobody else can write a cassette whose lock this process
+            // holds, so its mtime only ever moves because of our own
+            // flush/autosave. Record it anyway: skipping the record (not
+            // just the merge) would make the moment focus moves off it look
+            // like a first-sight change the instant the lock is released,
+            // and `merge_external` would then rebuild it from identical
+            // content for no reason. The merge itself is still categorically
+            // skipped — this cassette is never a candidate.
+            mtimes.insert(id.to_string(), modified);
+            continue;
+        }
+        let changed = mtimes.get(id).is_none_or(|prev| *prev != modified);
+        mtimes.insert(id.to_string(), modified);
+        if changed {
+            changed_ids.push(id.to_string());
+        }
+    }
+    if changed_ids.is_empty() {
+        return;
+    }
+
+    // Pass 2: something moved, so the whole session's queue order is worth
+    // pulling — needed for `insert_at`, and cheap at this scale regardless.
+    let Ok(scan) = store.scan_session(&app.session) else {
+        return;
+    };
+    // Resolved once per tick, not once per changed cassette; a registry read
+    // failure degrades to raw writer ids rather than skipping the merge.
+    let writers = store.writers().unwrap_or_default();
+    for stored in &scan.cassettes {
+        if !changed_ids.contains(&stored.meta.id) {
+            continue;
+        }
+        // Cannot happen given pass 1's own check, but the invariant is worth
+        // restating rather than trusting the caller two steps back.
+        if Some(stored.meta.id.as_str()) == held_id {
+            continue;
+        }
+
+        let already_known = app.cassettes.iter().any(|c| c.id == stored.meta.id);
+        if !already_known && app.cassettes.len() >= app::MAX_CASSETTES {
+            continue;
+        }
+
+        let (side_a, side_b) = queue::json::split_sides(&stored.body);
+        let mut incoming = cassette::Cassette::from_sides(
+            side_a.trim().to_string(),
+            side_b.trim().to_string(),
+            stored.meta.topic.clone(),
+        );
+        incoming.locked_by = stored
+            .meta
+            .locked_by
+            .as_deref()
+            .map(|id| store::writers::display_name(&writers, id));
+        let insert_at = scan
+            .cassettes
+            .iter()
+            .take_while(|s| s.meta.id != stored.meta.id)
+            .filter(|s| app.cassettes.iter().any(|c| c.id == s.meta.id))
+            .count();
+        app.merge_external(&stored.meta.id, incoming, insert_at);
     }
 }
 
@@ -1401,6 +1644,367 @@ mod tests {
                 word_goal: None,
             })
             .expect("create session")
+    }
+
+    /// Add a real store cassette (frontmatter + body) and return its id, for
+    /// tests that need `sync_external_writes` to see actual files on disk.
+    fn store_cassette(store: &store::Store, session: &str, priority: i64, body: &str) -> String {
+        let id = store::ids::new_id();
+        let m = store::meta::CassetteMeta {
+            id: id.clone(),
+            topic: None,
+            priority,
+            status: store::meta::Status::Open,
+            locked_by: None,
+            created_by: "w".to_string(),
+            last_writer: "w".to_string(),
+            updated_at: store::meta::now_utc(),
+        };
+        store.add_cassette(session, &m, body).expect("add cassette");
+        id
+    }
+
+    /// Bump a cassette file's mtime well clear of whatever the filesystem
+    /// gave it, so the stat pass must see the change. Without this the test
+    /// would be asserting on mtime granularity rather than on sync.
+    fn touch_forward(store: &store::Store, session: &str, id: &str) {
+        let path = store
+            .cassette_path(session, id)
+            .expect("cassette path")
+            .expect("cassette exists");
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for touch");
+        f.set_modified(SystemTime::now() + std::time::Duration::from_secs(5))
+            .expect("set mtime");
+    }
+
+    /// The phase's headline feature, end to end in one process: an agent
+    /// rewrites a cassette the TUI is NOT holding, and the next tick puts
+    /// those words on screen.
+    ///
+    /// Every part of this was tested in isolation — `merge_external` in
+    /// `app.rs`, the store contract in `tests/cli.rs` — but the seam between
+    /// them was not: `read_dir` -> mtime compare -> `scan_session` ->
+    /// `split_sides` -> merge. Deleting the `merge_external` call at the end
+    /// of `sync_external_writes` left the whole suite green.
+    #[test]
+    fn sync_lands_an_external_write_on_screen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "## Side A\n\nmine\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id.clone();
+        c.insert_str("mine");
+        app.cassettes.push(c);
+
+        // First sync only seeds the mtime map: nothing has changed yet.
+        let mut mtimes = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        assert_eq!(app.cassettes[0].side_a_text(), "mine", "nothing yet");
+
+        // The agent writes, through the same store API `queue write` uses.
+        let path = store
+            .cassette_path(&session, &id)
+            .expect("path")
+            .expect("exists");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let (fm, _) = raw.split_at(raw.rfind("---\n").expect("frontmatter end") + 4);
+        std::fs::write(&path, format!("{fm}\n## Side A\n\nagent words\n")).expect("write");
+        touch_forward(&store, &session, &id);
+
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        assert_eq!(
+            app.cassettes[0].side_a_text().trim(),
+            "agent words",
+            "the agent's words must reach the screen"
+        );
+    }
+
+    /// A cassette an agent creates with `queue new` appears in the stack at
+    /// its queue position, and does NOT steal focus from the human.
+    #[test]
+    fn sync_shows_a_cassette_another_writer_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let mine = store_cassette(&store, &session, 20, "## Side A\n\nmine\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = mine.clone();
+        app.cassettes.push(c);
+        app.focus_idx = 0;
+
+        let mut mtimes = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        assert_eq!(app.cassettes.len(), 1, "only mine so far");
+
+        // Priority 10 sorts ahead of mine (20), so it lands at index 0 —
+        // which is exactly the case that could silently move focus.
+        let newcomer = store_cassette(&store, &session, 10, "## Side A\n\nfrom the agent\n");
+
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        assert_eq!(app.cassettes.len(), 2, "the newcomer must appear");
+        assert_eq!(app.cassettes[0].id, newcomer, "at its queue position");
+        assert_eq!(
+            app.cassettes[0].side_a_text().trim(),
+            "from the agent",
+            "with its text"
+        );
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, mine,
+            "focus must still be on MY cassette, not dragged by an insertion"
+        );
+    }
+
+    #[test]
+    fn sync_never_inserts_a_newcomer_once_the_cap_is_reached() {
+        // Unbounded growth from a busy multi-writer session would be worse
+        // than the existing `MAX_CASSETTES` cap `App::add_cassette` already
+        // enforces; sync must respect the same cap rather than introduce an
+        // unbounded queue of its own.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        for i in 0..app::MAX_CASSETTES {
+            let id = store_cassette(&store, &session, (i as i64 + 1) * 10, "");
+            let mut c = cassette::Cassette::new();
+            c.id = id;
+            app.cassettes.push(c);
+        }
+        assert_eq!(
+            app.cassettes.len(),
+            app::MAX_CASSETTES,
+            "the list is at the cap"
+        );
+        let known_ids: Vec<String> = app.cassettes.iter().map(|c| c.id.clone()).collect();
+
+        // A newcomer arrives with the lowest priority, so it would land at
+        // index 0 if the cap did not stop it.
+        let newcomer_id = store_cassette(&store, &session, 1, "## Side A\n\nnewcomer\n");
+
+        let mut mtimes = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        assert_eq!(
+            app.cassettes.len(),
+            app::MAX_CASSETTES,
+            "the cap is not exceeded"
+        );
+        assert_eq!(
+            app.cassettes
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>(),
+            known_ids,
+            "nothing already present is disturbed"
+        );
+        assert!(
+            !app.cassettes.iter().any(|c| c.id == newcomer_id),
+            "the newcomer must not appear once the cap is already reached"
+        );
+    }
+
+    #[test]
+    fn sync_does_not_wipe_undo_when_focus_releases_a_cassette_it_just_flushed() {
+        // The regression: typing in cassette 0, then tabbing to cassette 1,
+        // flushes and releases 0's lock — moving 0's file mtime with no
+        // external writer involved. A sync tick that follows must not treat
+        // that self-inflicted mtime move as a reason to rebuild cassette 0:
+        // that would discard its undo stack and reset its cursor even
+        // though disk and memory already agree.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        for i in 0..2 {
+            let id = store_cassette(&store, &session, (i as i64 + 1) * 10, "");
+            let mut c = cassette::Cassette::new();
+            c.id = id;
+            app.cassettes.push(c);
+        }
+        let mut writer = session_writer::SessionWriter::open(&store, &session, true, "w", "w");
+        writer.acquire(&mut app, 0).expect("acquire 0");
+        app.focus_idx = 0;
+        app.modify_focused(|c| {
+            c.snapshot();
+            c.insert_str("hello world");
+        });
+        let cursor_before = app.cassettes[0].cursor_pos();
+
+        let mut mtimes = HashMap::new();
+        // A tick while 0 is still held: seeds its mtime in the map (the
+        // file itself is still whatever `store_cassette` wrote — empty —
+        // since nothing has flushed yet).
+        sync_external_writes(&mut app, &store, Some(&writer), &mut mtimes);
+
+        // Focus moves to 1: `acquire` flushes and drops 0's guard, writing
+        // cassette 0's body to disk and moving its mtime.
+        writer.acquire(&mut app, 1).expect("focus 1");
+        app.focus_idx = 1;
+
+        // The tick that follows: 0 is unheld, and its mtime has moved
+        // relative to what was seeded above.
+        sync_external_writes(&mut app, &store, Some(&writer), &mut mtimes);
+
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            cursor_before,
+            "the flush-induced mtime move must not reset the cursor"
+        );
+        app.focus_idx = 0;
+        app.modify_focused(|c| c.undo());
+        assert_eq!(
+            app.cassettes[0].text(),
+            "",
+            "and the undo stack must survive the sync tick that follows a flush"
+        );
+    }
+
+    /// `busy_holder_name` is what turns a failed acquire into the name
+    /// `info_text` shows — pure, so this pins the mapping without needing a
+    /// real lock or a second process. `LockError::Busy`'s two shapes (a
+    /// readable attribution, and a garbled/absent one) must map to `Some`
+    /// and `None` respectively; the other variants never name anyone.
+    #[test]
+    fn busy_holder_name_reads_the_attribution_queue_writes_exit_three_message_uses() {
+        let busy_named = store::lock::LockError::Busy {
+            id: "c1".to_string(),
+            holder: Some(store::lock::Attribution {
+                writer: "01WRITERID0000000000000000".to_string(),
+                name: "refactor-agent".to_string(),
+                pid: 4242,
+                since: "2026-09-18T00:00:00Z".to_string(),
+            }),
+        };
+        assert_eq!(
+            busy_holder_name(&busy_named).as_deref(),
+            Some("refactor-agent")
+        );
+
+        let busy_garbled = store::lock::LockError::Busy {
+            id: "c1".to_string(),
+            holder: None,
+        };
+        assert_eq!(busy_holder_name(&busy_garbled), None);
+
+        let no_such = store::lock::LockError::NoSuchCassette {
+            session: "s".to_string(),
+            id: "c1".to_string(),
+        };
+        assert_eq!(busy_holder_name(&no_such), None);
+    }
+
+    #[test]
+    fn retry_lock_does_nothing_while_the_session_is_not_read_only() {
+        // Nothing to retry when the last attempt already succeeded — calling
+        // `acquire` again for the cassette we already hold would trip its own
+        // "already holding this one" fast path, but `retry_lock` shouldn't
+        // even try: it's a no-op the moment `read_only` is false.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id;
+        app.cassettes.push(c);
+        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        writer.acquire(&mut app, 0).expect("acquire");
+        assert!(!app.read_only);
+
+        retry_lock(&mut app, Some(&mut writer));
+        assert!(!app.read_only, "still fine: nothing should have changed");
+    }
+
+    #[test]
+    fn retry_lock_recovers_read_only_on_a_tick_with_no_keypress() {
+        // The point of this task: a human who walks away from a busy
+        // cassette and comes back later finds it editable without typing a
+        // character to discover it. `app.read_only = true` and a
+        // `busy_holder` stand in for an earlier failed `follow_focus`
+        // attempt (5a) — together they are the whole on-screen record of
+        // being busy, so clearing both is what makes the recovery visible:
+        // `info_text` falls back to the ordinary mode line the moment
+        // `read_only` goes false. Nothing actually contends for the cassette
+        // any more, so the tick's own retry must succeed unaided.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id;
+        app.cassettes.push(c);
+        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        app.read_only = true;
+        app.busy_holder = Some("stale-holder".to_string());
+
+        retry_lock(&mut app, Some(&mut writer));
+
+        assert!(!app.read_only, "the tick's retry must recover on its own");
+        assert_eq!(
+            app.busy_holder, None,
+            "a name left behind would keep claiming someone holds it"
+        );
+    }
+
+    /// Contention has a banner; nothing else does. An `Io` (`acquire`
+    /// propagates `flush_held`'s failure — a full disk, a session directory
+    /// pulled out from under us) or a `NoSuchCassette` would otherwise show
+    /// as a bare `-- READ ONLY --` beside a help row blaming a writer who
+    /// does not exist, while the words that failed to flush sit in memory.
+    /// It must reach the screen, and as a flash: news expires, so it cannot
+    /// become the standing message the banner has to own.
+    ///
+    /// The mirror property — that ordinary `Busy` leaves an unrelated flash
+    /// alone — needs a genuinely held lock and so lives in
+    /// `session_writer`'s cross-process test, not here.
+    #[test]
+    fn a_non_contention_lock_failure_is_reported_not_silently_read_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id.clone();
+        app.cassettes.push(c);
+
+        // A second writer in this process cannot contend (HELD is
+        // process-global), so drive the `Err` arm through the one input that
+        // reaches it without a lock at all: an id no cassette in the session
+        // has, which `Store::lock` reports as `NoSuchCassette`.
+        app.cassettes[0].id = "01JNOSUCHCASSETTE000000000".to_string();
+        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        try_acquire(&mut app, &mut writer, 0);
+
+        assert!(app.read_only, "a failed acquire must open read-only");
+        assert_eq!(
+            app.busy_holder, None,
+            "there is no holder to name: this was not contention"
+        );
+        let msg = app
+            .status_msg
+            .as_deref()
+            .expect("a failure with no banner of its own must still be reported");
+        assert!(
+            msg.contains("01JNOSUCHCASSETTE000000000"),
+            "the report must carry the real cause: {msg}"
+        );
     }
 
     #[test]

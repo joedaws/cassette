@@ -47,10 +47,17 @@ pub struct SessionWriter<'a> {
     /// contender sees stamped in the lock anchor.
     writer: String,
     name: String,
-    /// The cassette index the guard belongs to, alongside the guard. `None`
-    /// when nothing is held — before the first `acquire`, after `finish`, or
-    /// when acquiring failed and the session is read-only.
-    guard: Option<(usize, LockGuard)>,
+    /// The guard currently held, if any. `None` when nothing is held —
+    /// before the first `acquire`, after `finish`, or when acquiring failed
+    /// and the session is read-only.
+    ///
+    /// Bound to the cassette's id, not its position in `app.cassettes`: the
+    /// list can grow at arbitrary positions (an agent's `queue new` inserted
+    /// by live sync in priority order), and an index would silently start
+    /// naming a different cassette the moment something is inserted ahead of
+    /// it. `LockGuard::id` is the guard's own id, so wherever a position is
+    /// still needed it is resolved fresh by id rather than cached.
+    guard: Option<LockGuard>,
 }
 
 impl<'a> SessionWriter<'a> {
@@ -88,10 +95,11 @@ impl<'a> SessionWriter<'a> {
         &self.session
     }
 
-    /// The cassette index whose lock is currently held, if any. `main.rs`
-    /// compares it against `App::focus_idx` to notice that focus moved.
-    pub fn held_idx(&self) -> Option<usize> {
-        self.guard.as_ref().map(|(idx, _)| *idx)
+    /// The id of the cassette whose lock is currently held, if any.
+    /// `main.rs` compares it against the focused cassette's id to notice
+    /// that focus moved.
+    pub fn held_id(&self) -> Option<&str> {
+        self.guard.as_ref().map(LockGuard::id)
     }
 
     fn attribution(&self) -> Attribution {
@@ -158,8 +166,9 @@ impl<'a> SessionWriter<'a> {
     /// hold is skipped outright: `flock` is per-open-file-description, so
     /// asking twice reports `Busy` against ourselves.
     pub fn acquire(&mut self, app: &mut App, idx: usize) -> Result<(), LockError> {
-        if let Some((held, _)) = &self.guard {
-            if *held == idx {
+        if let Some(held) = &self.guard {
+            let already_this_one = app.cassettes.get(idx).is_some_and(|c| c.id == held.id());
+            if already_this_one {
                 return Ok(());
             }
             // Flush first, drop second. The write goes through the guard.
@@ -183,7 +192,7 @@ impl<'a> SessionWriter<'a> {
         // The lock is ours; the in-memory copy may not be. Re-read before
         // anything can be written back through this guard.
         self.refresh_from_disk(app, idx, &guard)?;
-        self.guard = Some((idx, guard));
+        self.guard = Some(guard);
         Ok(())
     }
 
@@ -231,10 +240,29 @@ impl<'a> SessionWriter<'a> {
         let stored = guard.read()?;
         let (disk_a, disk_b) = crate::queue::json::split_sides(&stored.body);
         let (disk_a, disk_b) = (disk_a.trim(), disk_b.trim());
+        // Resolved once here rather than on every render: `Cassette` carries
+        // no store knowledge of its own, so the id-to-name lookup (the same
+        // fallback-to-raw-id `store::writers::display_name` gives
+        // `queue::write::write_permitted`'s sticky-lock message) happens the
+        // one time this cassette's data is read from disk.
+        let locked_by = stored
+            .meta
+            .locked_by
+            .as_deref()
+            .map(|id| match self.store.writers() {
+                Ok(w) => crate::store::writers::display_name(&w, id),
+                Err(_) => id.to_string(),
+            });
         if disk_a == c.side_a_text().trim()
             && disk_b == c.side_b_text().trim()
             && stored.meta.topic == c.topic
         {
+            // Text and topic are unchanged, so the cursor/undo short-circuit
+            // still applies — but a sticky lock is metadata, not prose, and
+            // can change (`queue lock`/`unlock`) with nothing else moving.
+            if app.cassettes[idx].locked_by != locked_by {
+                app.cassettes[idx].locked_by = locked_by;
+            }
             return Ok(());
         }
         let id = c.id.clone();
@@ -244,21 +272,24 @@ impl<'a> SessionWriter<'a> {
             stored.meta.topic,
         );
         fresh.id = id;
+        fresh.locked_by = locked_by;
         app.cassettes[idx] = fresh;
         app.clear_dirty(idx);
         Ok(())
     }
 
     /// Write the focused cassette through the held guard when it has unsaved
-    /// edits. The guard's index *is* the focused index — `acquire` keeps
-    /// them equal — and the write is keyed on the guard's, so a focus change
-    /// that has not yet moved the lock can never write one cassette's words
-    /// into another's file.
+    /// edits. The guard names the focused cassette by id — `acquire` keeps
+    /// them in step — and the write is keyed on the guard's id, so a focus
+    /// change that has not yet moved the lock can never write one cassette's
+    /// words into another's file, and an insertion elsewhere in the list
+    /// cannot repoint the write either.
     pub fn flush_focused(&mut self, app: &mut App) -> io::Result<()> {
         self.flush_held(app).map_err(io::Error::from)
     }
 
-    /// The flush itself, keyed on the guard rather than on `App::focus_idx`.
+    /// The flush itself, keyed on the guard's id rather than on
+    /// `App::focus_idx` or a cached position.
     ///
     /// Frontmatter is re-read under the lock and only the fields the TUI
     /// owns are replaced: `priority`, `status` and `locked_by` belong to the
@@ -272,10 +303,17 @@ impl<'a> SessionWriter<'a> {
     /// between. Every window in which somebody could have is a window in
     /// which this guard did not exist.
     fn flush_held(&mut self, app: &mut App) -> Result<(), LockError> {
-        let Some((idx, guard)) = self.guard.as_ref() else {
+        let Some(guard) = self.guard.as_ref() else {
             return Ok(());
         };
-        let idx = *idx;
+        // A cassette cannot actually be removed from `app.cassettes` today,
+        // so this lookup is not known to ever fail — but the event loop is
+        // the wrong place to discover that assumption was wrong. Treat a
+        // failed lookup as "nothing to flush" rather than panicking or
+        // indexing blindly.
+        let Some(idx) = app.cassettes.iter().position(|c| c.id == guard.id()) else {
+            return Ok(());
+        };
         debug_assert!(
             app.dirty_indices().iter().all(|i| *i == idx),
             "only the cassette whose lock is held can be dirty: nothing edits an \
@@ -711,6 +749,188 @@ mod tests {
         );
     }
 
+    /// A sticky lock (`queue lock`) set before the TUI ever focuses the
+    /// cassette must show up resolved to a display name, not left as `None`
+    /// or as the raw writer id — `ui.rs`'s separator has nothing else to
+    /// show. This cassette's body is empty and its topic is `None` on both
+    /// sides, so `refresh_from_disk`'s no-op short circuit is the one that
+    /// fires here; `locked_by` must still be applied even though the
+    /// rebuild it guards is skipped.
+    #[test]
+    fn acquiring_a_cassette_resolves_its_sticky_lock_to_a_writer_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        let store = Store::new(root.clone());
+        let (mut app, session) = fixture(&store, 1);
+        let cid = app.cassettes[0].id.clone();
+
+        let lock = std::process::Command::new(bin_path())
+            .args(["queue", "lock", &cid, "--session", &session])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "joseph")
+            .output()
+            .expect("spawn queue lock");
+        assert_eq!(lock.status.code(), Some(0), "{lock:?}");
+
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        w.acquire(&mut app, 0).expect("acquire 0");
+
+        assert_eq!(
+            app.cassettes[0].locked_by.as_deref(),
+            Some("joseph"),
+            "the sticky lock's writer id must resolve to its display name"
+        );
+    }
+
+    /// Spawn two `queue write` invocations racing for the same cassette lock
+    /// and return `(loser_output, winner_child)` — the same technique
+    /// `tests/lock.rs`'s `contend` uses, reproduced here since that helper
+    /// lives in a separate integration-test binary this module can't reach.
+    /// See its doc comment for why "spawn a holder first, then assume a
+    /// freshly spawned second process loses to it" is flaky by measurement
+    /// (~1 failure in 6-15 runs observed): two freshly forked processes
+    /// racing the same instruction are close enough in startup cost that
+    /// either can win. Racing their *completions* instead needs no
+    /// assumption about who acquires first — exactly one `try_lock` on the
+    /// same flock must fail, so exactly one process exits almost immediately
+    /// (before ever reading its own stdin) while the other blocks reading
+    /// stdin, which nothing has closed, and cannot exit on its own. By the
+    /// time this returns, `winner` is *proven* — by the loser's own exit, not
+    /// by anything this function wrote to either child's stdin — to hold the
+    /// cassette's lock.
+    fn contend_for_lock(
+        root: &std::path::Path,
+        session: &str,
+        id: &str,
+    ) -> (std::process::Output, std::process::Child) {
+        let spawn = |user: &str| -> std::process::Child {
+            let mut child = std::process::Command::new(bin_path())
+                .args(["queue", "write", id, "--session", session])
+                .env("CASSETTE_DATA_DIR", root)
+                .env("USER", user)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn queue write");
+            match child.stdin.as_mut().expect("stdin").write_all(b"body\n") {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("write: {e}"),
+            }
+            child
+        };
+        let mut a = spawn("contender-a");
+        let mut b = spawn("contender-b");
+        let a_id = a.id();
+        let b_id = b.id();
+        let a_out = a.stdout.take().expect("stdout a");
+        let b_out = b.stdout.take().expect("stdout b");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx2 = tx.clone();
+        std::thread::spawn(move || {
+            let mut out = a_out;
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+            let _ = tx.send(a_id);
+        });
+        std::thread::spawn(move || {
+            let mut out = b_out;
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+            let _ = tx2.send(b_id);
+        });
+        // Blocks until whichever child's stdout closes first — the loser's,
+        // since the winner's stays open until this function's caller acts.
+        let first = rx.recv().expect("recv");
+        let (loser, winner) = if first == a_id { (a, b) } else { (b, a) };
+        let out = loser.wait_with_output().expect("wait loser");
+        (out, winner)
+    }
+
+    /// The spec's required integration proof: a busy cassette becomes
+    /// editable after its holder releases, with no keypress — `retry_lock`'s
+    /// (`main.rs`) whole reason to exist. The holder here must be a real
+    /// subprocess, never a second in-process `SessionWriter`:
+    /// `store::lock`'s `HELD` bookkeeping is a process-global set keyed only
+    /// by `(session, id)`, so two `SessionWriter`s in this one test process
+    /// racing for the *same* cassette would trip `acquire`'s own
+    /// `debug_assert!("re-acquiring a lock this process already holds...")`
+    /// — a false alarm, not the real contention this test needs. The
+    /// subprocess's own `HELD` bookkeeping lives in its own process, so it
+    /// never touches this one's.
+    #[test]
+    fn retry_lock_wins_once_the_external_holder_releases_no_keypress_needed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        let store = Store::new(root.clone());
+        let (mut app, session) = fixture(&store, 1);
+        let id = app.cassettes[0].id.clone();
+
+        // Deterministic by construction (see `contend_for_lock`): by the time
+        // this returns, `holder` is proven to hold `id`'s lock, blocked
+        // reading its own stdin, which nothing has closed yet.
+        let (loser_out, mut holder) = contend_for_lock(&root, &session, &id);
+        assert_eq!(loser_out.status.code(), Some(3), "{loser_out:?}");
+        let err = String::from_utf8_lossy(&loser_out.stderr);
+        assert!(err.contains("is open by"), "{err}");
+
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        crate::try_acquire(&mut app, &mut w, 0);
+        assert!(app.read_only, "busy while the subprocess holds the lock");
+        let holder_name = app
+            .busy_holder
+            .clone()
+            .expect("the user must know WHO holds it, not just that it's busy");
+
+        // The spec's banner must actually REACH the screen under a real held
+        // lock, not merely exist as an arm of `info_text`. It was unreachable
+        // once: `try_acquire` also wrote `status_msg`, which `info_text`
+        // checks first, so every live busy cassette rendered the raw
+        // `LockError` instead and this arm was dead on the only path that
+        // can reach it.
+        let line = crate::ui::info_text(&app);
+        assert!(
+            line.contains(&format!("-- READ ONLY (open by {holder_name}) --")),
+            "the busy banner must name the holder on screen: {line}"
+        );
+        assert!(
+            line.contains("cassette 1/"),
+            "and must not cost the user the rest of the info line: {line}"
+        );
+
+        // Still busy on a tick that finds nothing changed.
+        crate::retry_lock(&mut app, Some(&mut w));
+        assert!(app.read_only, "still blocked: the holder hasn't let go");
+
+        // Contention is a standing condition with a banner of its own, so a
+        // retry that stays blocked must not spend `status_msg` on saying so
+        // again — that is where transient news lives, and news showing over
+        // a busy cassette has to survive the ticks that keep failing.
+        app.flash("goal reached — 500 words. keep rolling!".to_string());
+        crate::retry_lock(&mut app, Some(&mut w));
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("goal reached — 500 words. keep rolling!"),
+            "a still-contended retry must not clobber an unrelated flash"
+        );
+        app.status_msg = None;
+
+        // The holder releases: closing its stdin hands it EOF, so it
+        // finishes its write and exits normally — no sleep, no poll; the
+        // pipe close is the synchronisation.
+        drop(holder.stdin.take());
+        let done = holder.wait().expect("wait holder");
+        assert!(done.success(), "{done:?}");
+
+        // The next tick's retry wins with no keypress at all — the point of
+        // this task.
+        crate::retry_lock(&mut app, Some(&mut w));
+        assert!(!app.read_only, "editable once the holder released");
+        assert_eq!(app.busy_holder, None);
+    }
+
     /// The reviewer's data-loss reproduction, end to end: the TUI must not
     /// republish a stale in-memory body over words another writer put on
     /// disk while the cassette was unfocused.
@@ -836,7 +1056,33 @@ mod tests {
         w.acquire(&mut app, 0).expect("acquire");
         w.acquire(&mut app, 0)
             .expect("re-acquiring the held cassette must not fail");
-        assert_eq!(w.held_idx(), Some(0));
+        assert_eq!(w.held_id(), Some(app.cassettes[0].id.as_str()));
+    }
+
+    #[test]
+    fn the_guard_survives_a_cassette_being_inserted_before_it() {
+        // The guard must name a cassette, not a position. An agent creating a
+        // cassette shifts every index after it; a guard bound to an index would
+        // then write the held cassette's text into a different file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 2);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+
+        w.acquire(&mut app, 1).expect("hold cassette 1");
+        let held = app.cassettes[1].id.clone();
+        assert_eq!(w.held_id(), Some(held.as_str()));
+
+        // Something inserts at the front; index 1 is now a different cassette.
+        let mut newcomer = Cassette::new();
+        newcomer.id = "aaa00000000000000000000000".to_string();
+        app.cassettes.insert(0, newcomer);
+
+        assert_eq!(
+            w.held_id(),
+            Some(held.as_str()),
+            "the guard must still name the cassette it locked, not whatever now sits at index 1"
+        );
     }
 
     #[test]
