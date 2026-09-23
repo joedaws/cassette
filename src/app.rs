@@ -395,6 +395,38 @@ impl App {
         self.ensure_focus_visible();
     }
 
+    /// Cassettes in queue order: open before closed, then priority, then id.
+    /// Mirrors `store::priority::queue_order`, which stays the authority on
+    /// what queue order means — `App` is pure and cannot import it, so the
+    /// two are kept in step by tests that pin the same three keys.
+    ///
+    /// Focus is preserved by **identity**, not position: sorting moves
+    /// cassettes under `focus_idx`. Doing that here rather than in each
+    /// caller is the discipline `merge_external` already follows, and the
+    /// reason 5b bound the held lock guard to an id instead of an index.
+    pub fn sort_queue(&mut self) {
+        let focused_id = self.cassettes.get(self.focus_idx).map(|c| c.id.clone());
+        self.cassettes.sort_by(|a, b| {
+            a.closed
+                .cmp(&b.closed)
+                .then(a.priority.cmp(&b.priority))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        if let Some(id) = focused_id {
+            if let Some(i) = self.cassettes.iter().position(|c| c.id == id) {
+                self.focus_idx = i;
+            }
+        }
+        self.ensure_focus_visible();
+    }
+
+    /// How many cassettes are open. Because `sort_queue` puts closed ones
+    /// last, the open set is a prefix — so this is also the index of the
+    /// first closed cassette, and no second collection is needed anywhere.
+    pub fn open_count(&self) -> usize {
+        self.cassettes.iter().take_while(|c| !c.closed).count()
+    }
+
     pub fn add_cassette(&mut self) {
         if self.cassettes.len() >= MAX_CASSETTES {
             self.status_msg = Some(format!("Cassette limit reached ({}).", MAX_CASSETTES));
@@ -848,6 +880,82 @@ mod tests {
         let topics: Vec<String> = (0..MAX_CASSETTES + 5).map(|i| format!("t{i}")).collect();
         app.apply_topics(&topics);
         assert_eq!(app.cassettes.len(), MAX_CASSETTES);
+    }
+
+    /// Queue order is the store's, not insertion order: open before closed,
+    /// then priority, then id as the tie-break. `store::priority::queue_order`
+    /// is the authority on this; `sort_queue` must not disagree with it.
+    #[test]
+    fn sort_queue_orders_open_before_closed_then_priority_then_id() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for (id, priority, closed) in [
+            ("z", 20, false),
+            ("b", 10, true),
+            ("a", 20, false),
+            ("m", 10, false),
+        ] {
+            let mut c = Cassette::new();
+            c.id = id.to_string();
+            c.priority = priority;
+            c.closed = closed;
+            app.cassettes.push(c);
+        }
+
+        app.sort_queue();
+
+        assert_eq!(
+            app.cassettes
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m", "a", "z", "b"],
+            "open by priority then id, closed last"
+        );
+        assert_eq!(app.open_count(), 3);
+    }
+
+    /// Sorting moves cassettes under `focus_idx`, which is an index. Focus is
+    /// identity, not position — the same rule `merge_external` already follows
+    /// and the reason 5b bound the lock guard to an id.
+    #[test]
+    fn sort_queue_keeps_focus_on_the_same_cassette() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for (id, priority) in [("z", 30), ("a", 10)] {
+            let mut c = Cassette::new();
+            c.id = id.to_string();
+            c.priority = priority;
+            app.cassettes.push(c);
+        }
+        app.focus_idx = 0; // "z"
+
+        app.sort_queue();
+
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, "z",
+            "focus follows the cassette"
+        );
+        assert_eq!(app.focus_idx, 1, "which is now at the tail");
+    }
+
+    /// A `Ctrl+N` cassette has no store priority yet. It must sort to the tail
+    /// rather than to the head, so a new cassette appears where the human
+    /// expects it until `create_cassette` mints the real value.
+    #[test]
+    fn an_unminted_cassette_sorts_to_the_tail() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        let mut stored = Cassette::new();
+        stored.id = "a".to_string();
+        stored.priority = 10;
+        app.cassettes.push(stored);
+        app.cassettes.push(Cassette::new()); // unminted: empty id, i64::MAX
+
+        app.sort_queue();
+
+        assert_eq!(app.cassettes[0].id, "a");
+        assert!(app.cassettes[1].id.is_empty(), "the new one stays last");
     }
 
     #[test]
