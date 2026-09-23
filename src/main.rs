@@ -938,29 +938,28 @@ fn retry_lock(app: &mut App, writer: Option<&mut session_writer::SessionWriter>)
 /// on every keypress) and `retry_lock` (retries on every tick), so there is
 /// exactly one place that decides what a failed acquire looks like on screen.
 ///
-/// The busy message is set directly rather than through `App::flash` — it
-/// must persist for as long as the cassette stays busy, not auto-expire like
-/// a transient flash — so success has to clear it explicitly here too, or a
-/// retry that wins the lock leaves the stale "is open by X" message on
-/// screen forever, with nothing on screen to say the cassette became
-/// editable. Only cleared when `app` was actually read-only a moment ago:
-/// that's the message this function itself put there, so clearing it can't
-/// step on an unrelated `status_msg` (a goal-reached flash, a cassette-create
-/// error) that happened to be showing when acquisition succeeded.
+/// Those two fields are the *whole* record: this deliberately does not also
+/// write `status_msg`. Being busy is a standing condition, not news, and
+/// `ui::info_text` already renders it from `read_only`/`busy_holder` as
+/// `-- READ ONLY (open by <name>) --` with the rest of the info line — ln/col,
+/// char count, cassette position, side — intact. Copying the same fact into
+/// `status_msg` would put it on screen through the one branch that outranks
+/// the mode line, costing the user that whole line for as long as the lock is
+/// held, and it could not use `App::flash` (a standing condition must not
+/// auto-expire), so it would need clearing on every path back to editable —
+/// which is exactly the stale-message bug this shape cannot have. Leaving
+/// `status_msg` alone also means a genuine flash — goal reached, timer
+/// expired — still shows for its few seconds while a cassette is busy, and
+/// the banner returns underneath it when it expires.
 fn try_acquire(app: &mut App, w: &mut session_writer::SessionWriter, idx: usize) {
-    let was_read_only = app.read_only;
     match w.acquire(app, idx) {
         Ok(()) => {
             app.read_only = false;
             app.busy_holder = None;
-            if was_read_only {
-                app.status_msg = None;
-            }
         }
         Err(e) => {
             app.read_only = true;
             app.busy_holder = busy_holder_name(&e);
-            app.status_msg = Some(e.to_string());
         }
     }
 }
@@ -1817,15 +1816,13 @@ mod tests {
     fn retry_lock_recovers_read_only_on_a_tick_with_no_keypress() {
         // The point of this task: a human who walks away from a busy
         // cassette and comes back later finds it editable without typing a
-        // character to discover it. `app.read_only = true` (plus the
-        // `status_msg` a real failed acquire leaves behind, per
-        // `try_acquire`'s `Err` arm) stands in for an earlier failed
-        // `follow_focus` attempt (5a); nothing actually contends for the
-        // cassette any more, so the tick's own retry must succeed on its own
-        // and clear `read_only`, `busy_holder`, AND that stale status
-        // message — leaving it behind would hide the very recovery this
-        // feature exists to show, with nothing on screen to say the
-        // cassette became editable.
+        // character to discover it. `app.read_only = true` and a
+        // `busy_holder` stand in for an earlier failed `follow_focus`
+        // attempt (5a) — together they are the whole on-screen record of
+        // being busy, so clearing both is what makes the recovery visible:
+        // `info_text` falls back to the ordinary mode line the moment
+        // `read_only` goes false. Nothing actually contends for the cassette
+        // any more, so the tick's own retry must succeed unaided.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = store::Store::new(dir.path().to_path_buf());
         let session = seeded_session(&store, None);
@@ -1838,15 +1835,52 @@ mod tests {
         let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
         app.read_only = true;
         app.busy_holder = Some("stale-holder".to_string());
-        app.status_msg = Some("'c1' is held by stale-holder (since ...)".to_string());
 
         retry_lock(&mut app, Some(&mut writer));
 
         assert!(!app.read_only, "the tick's retry must recover on its own");
-        assert_eq!(app.busy_holder, None);
         assert_eq!(
-            app.status_msg, None,
-            "the stale busy message must not survive a successful retry"
+            app.busy_holder, None,
+            "a name left behind would keep claiming someone holds it"
+        );
+    }
+
+    /// Being busy is a standing condition, so it is rendered from
+    /// `read_only`/`busy_holder` and must NOT be copied into `status_msg`.
+    /// `status_msg` is the one branch that outranks the whole info line, and
+    /// it belongs to transient news — a reached word goal, an expired timer.
+    /// If a failed acquire wrote there it would both cost the user ln/col,
+    /// char count, cassette position and side tag for as long as the lock is
+    /// held, and destroy whatever flash happened to be showing when they
+    /// tabbed onto the busy cassette.
+    #[test]
+    fn a_failed_acquire_leaves_an_unrelated_flash_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id.clone();
+        app.cassettes.push(c);
+
+        // A real flash is showing when the acquire is attempted.
+        app.status_msg = Some("word goal reached".to_string());
+
+        // A second writer in this process cannot contend (HELD is
+        // process-global), so drive the `Err` arm through the one input that
+        // reaches it without a lock at all: an id no cassette in the session
+        // has, which `Store::lock` reports as `NoSuchCassette`.
+        app.cassettes[0].id = "01JNOSUCHCASSETTE000000000".to_string();
+        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        try_acquire(&mut app, &mut writer, 0);
+
+        assert!(app.read_only, "a failed acquire must open read-only");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("word goal reached"),
+            "the busy state belongs in read_only/busy_holder, not on top of a flash"
         );
     }
 

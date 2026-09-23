@@ -879,9 +879,25 @@ mod tests {
         let mut w = SessionWriter::open(&store, &session, true, "w", "w");
         crate::try_acquire(&mut app, &mut w, 0);
         assert!(app.read_only, "busy while the subprocess holds the lock");
+        let holder_name = app
+            .busy_holder
+            .clone()
+            .expect("the user must know WHO holds it, not just that it's busy");
+
+        // The spec's banner must actually REACH the screen under a real held
+        // lock, not merely exist as an arm of `info_text`. It was unreachable
+        // once: `try_acquire` also wrote `status_msg`, which `info_text`
+        // checks first, so every live busy cassette rendered the raw
+        // `LockError` instead and this arm was dead on the only path that
+        // can reach it.
+        let line = crate::ui::info_text(&app);
         assert!(
-            app.busy_holder.is_some(),
-            "the user must know WHO holds it, not just that it's busy"
+            line.contains(&format!("-- READ ONLY (open by {holder_name}) --")),
+            "the busy banner must name the holder on screen: {line}"
+        );
+        assert!(
+            line.contains("cassette 1/"),
+            "and must not cost the user the rest of the info line: {line}"
         );
 
         // Still busy on a tick that finds nothing changed.

@@ -118,7 +118,13 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
 /// than showing the bare `-- READ ONLY --` 5a left: `app.busy_holder` is
 /// `None` only when there is genuinely no name to show (a garbled lock
 /// anchor), in which case the bare label is all that's left to say.
-fn info_text(app: &App) -> String {
+///
+/// That arm is reachable only because `try_acquire` records a busy cassette
+/// in `read_only`/`busy_holder` and leaves `status_msg` — checked above it —
+/// for transient news. `pub(crate)` so the cross-process contention test in
+/// `session_writer` can assert the banner reaches the screen under a real
+/// held lock, rather than only from hand-set fields.
+pub(crate) fn info_text(app: &App) -> String {
     if app.mode == Mode::Topic {
         return format!("topic: {}▏", app.topic_input);
     }
