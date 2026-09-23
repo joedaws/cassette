@@ -960,7 +960,12 @@ fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter
 /// then immediately re-read it here.
 fn retry_lock(app: &mut App, writer: Option<&mut session_writer::SessionWriter>) {
     let Some(w) = writer else { return };
-    if !app.read_only.is_read_only() {
+    // Only CONTENTION is worth retrying. A closed cassette's lock is free,
+    // so acquiring it succeeds and clears the read-only state — leaving the
+    // human looking at `-- INSERT --` on a cassette every keystroke is
+    // dropped from. Closed is cleared by `follow_focus` seeing a reopen, not
+    // by winning a lock that was never the obstacle.
+    if !matches!(app.read_only, app::ReadOnly::Busy { .. }) {
         return;
     }
     try_acquire(app, w, app.focus_idx);
@@ -1715,6 +1720,33 @@ mod tests {
             .expect("open for touch");
         f.set_modified(SystemTime::now() + std::time::Duration::from_secs(5))
             .expect("set mtime");
+    }
+
+    /// A closed cassette's lock is FREE, so a tick that retries it succeeds
+    /// and reports the cassette editable — while `modify_focused` goes on
+    /// dropping every keystroke. Only contention is worth retrying.
+    #[test]
+    fn retry_lock_does_not_clear_a_closed_cassette() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id;
+        c.closed = true;
+        app.cassettes.push(c);
+        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        app.read_only = app::ReadOnly::Closed;
+
+        retry_lock(&mut app, Some(&mut writer));
+
+        assert_eq!(
+            app.read_only,
+            app::ReadOnly::Closed,
+            "winning a lock that was never the obstacle must not say 'editable'"
+        );
     }
 
     /// A newcomer lands at its queue position because it carries its own
