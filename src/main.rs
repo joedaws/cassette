@@ -905,11 +905,24 @@ fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter
     if let Err(e) = w.create_missing_cassettes(app) {
         app.status_msg = Some(format!("cannot create cassette: {e}"));
     }
+    // A closed cassette is not contended, it is simply not writable, so do
+    // not take its lock at all: acquiring would succeed and then claim the
+    // cassette is editable. Checked before the held-lock fast path, because
+    // an agent may close the very cassette we are holding.
+    if app.cassettes.get(app.focus_idx).is_some_and(|c| c.closed) {
+        app.read_only = app::ReadOnly::Closed;
+        return;
+    }
     if app
         .cassettes
         .get(app.focus_idx)
         .is_some_and(|c| Some(c.id.as_str()) == w.held_id())
     {
+        // Already ours, but the reason we were read-only may have been a
+        // `Closed` that a `queue reopen` has since cleared.
+        if matches!(app.read_only, app::ReadOnly::Closed) {
+            app.read_only = app::ReadOnly::No;
+        }
         return;
     }
     try_acquire(app, w, app.focus_idx);
@@ -929,7 +942,7 @@ fn follow_focus(app: &mut App, writer: Option<&mut session_writer::SessionWriter
 /// then immediately re-read it here.
 fn retry_lock(app: &mut App, writer: Option<&mut session_writer::SessionWriter>) {
     let Some(w) = writer else { return };
-    if !app.read_only {
+    if !app.read_only.is_read_only() {
         return;
     }
     try_acquire(app, w, app.focus_idx);
@@ -956,13 +969,11 @@ fn retry_lock(app: &mut App, writer: Option<&mut session_writer::SessionWriter>)
 /// the banner returns underneath it when it expires.
 fn try_acquire(app: &mut App, w: &mut session_writer::SessionWriter, idx: usize) {
     match w.acquire(app, idx) {
-        Ok(()) => {
-            app.read_only = false;
-            app.busy_holder = None;
-        }
+        Ok(()) => app.read_only = app::ReadOnly::No,
         Err(e) => {
-            app.read_only = true;
-            app.busy_holder = busy_holder_name(&e);
+            app.read_only = app::ReadOnly::Busy {
+                holder: busy_holder_name(&e),
+            };
             // Ordinary contention is the case the banner was built for, and
             // it says everything there is to say. Anything else — an `Io`
             // from `acquire`'s own flush of the OUTGOING cassette (a full
@@ -1922,10 +1933,13 @@ mod tests {
         app.cassettes.push(c);
         let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
         writer.acquire(&mut app, 0).expect("acquire");
-        assert!(!app.read_only);
+        assert!(!app.read_only.is_read_only());
 
         retry_lock(&mut app, Some(&mut writer));
-        assert!(!app.read_only, "still fine: nothing should have changed");
+        assert!(
+            !app.read_only.is_read_only(),
+            "still fine: nothing should have changed"
+        );
     }
 
     #[test]
@@ -1949,14 +1963,19 @@ mod tests {
         c.id = id;
         app.cassettes.push(c);
         let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
-        app.read_only = true;
-        app.busy_holder = Some("stale-holder".to_string());
+        app.read_only = app::ReadOnly::Busy {
+            holder: Some("stale-holder".to_string()),
+        };
 
         retry_lock(&mut app, Some(&mut writer));
 
-        assert!(!app.read_only, "the tick's retry must recover on its own");
+        assert!(
+            !app.read_only.is_read_only(),
+            "the tick's retry must recover on its own"
+        );
         assert_eq!(
-            app.busy_holder, None,
+            app.read_only,
+            app::ReadOnly::No,
             "a name left behind would keep claiming someone holds it"
         );
     }
@@ -1992,9 +2011,13 @@ mod tests {
         let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
         try_acquire(&mut app, &mut writer, 0);
 
-        assert!(app.read_only, "a failed acquire must open read-only");
+        assert!(
+            app.read_only.is_read_only(),
+            "a failed acquire must open read-only"
+        );
         assert_eq!(
-            app.busy_holder, None,
+            app.read_only,
+            app::ReadOnly::Busy { holder: None },
             "there is no holder to name: this was not contention"
         );
         let msg = app

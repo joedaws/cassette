@@ -878,9 +878,15 @@ mod tests {
 
         let mut w = SessionWriter::open(&store, &session, true, "w", "w");
         crate::try_acquire(&mut app, &mut w, 0);
-        assert!(app.read_only, "busy while the subprocess holds the lock");
-        let holder_name = app
-            .busy_holder
+        assert!(
+            app.read_only.is_read_only(),
+            "busy while the subprocess holds the lock"
+        );
+        // `holder` is already the subprocess here, so bind the name apart.
+        let crate::app::ReadOnly::Busy { holder: who } = &app.read_only else {
+            panic!("a held lock must read as Busy, not {:?}", app.read_only);
+        };
+        let holder_name = who
             .clone()
             .expect("the user must know WHO holds it, not just that it's busy");
 
@@ -902,7 +908,10 @@ mod tests {
 
         // Still busy on a tick that finds nothing changed.
         crate::retry_lock(&mut app, Some(&mut w));
-        assert!(app.read_only, "still blocked: the holder hasn't let go");
+        assert!(
+            app.read_only.is_read_only(),
+            "still blocked: the holder hasn't let go"
+        );
 
         // Contention is a standing condition with a banner of its own, so a
         // retry that stays blocked must not spend `status_msg` on saying so
@@ -927,8 +936,11 @@ mod tests {
         // The next tick's retry wins with no keypress at all — the point of
         // this task.
         crate::retry_lock(&mut app, Some(&mut w));
-        assert!(!app.read_only, "editable once the holder released");
-        assert_eq!(app.busy_holder, None);
+        assert!(
+            !app.read_only.is_read_only(),
+            "editable once the holder released"
+        );
+        assert_eq!(app.read_only, crate::app::ReadOnly::No);
     }
 
     /// The reviewer's data-loss reproduction, end to end: the TUI must not

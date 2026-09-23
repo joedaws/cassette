@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Mode, GUTTER_WIDTH, MINIMIZED_ROWS};
+use crate::app::{App, Mode, ReadOnly, GUTTER_WIDTH, MINIMIZED_ROWS};
 use crate::cassette::{char_width, pos_to_row_col, wrap_spans, Cassette, Side};
 use crate::theme::Theme;
 
@@ -84,7 +84,11 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     // the idle nudge; otherwise a vim-style info line. `info_text` is the
     // pure text; the idle-nudge dimming is the only style decision left here.
     let mut info_style = Style::new();
-    if app.status_msg.is_none() && app.mode != Mode::Topic && app.idle_nudge() && !app.read_only {
+    if app.status_msg.is_none()
+        && app.mode != Mode::Topic
+        && app.idle_nudge()
+        && !app.read_only.is_read_only()
+    {
         info_style = Style::new().fg(Color::DarkGray);
     }
     frame.render_widget(
@@ -93,7 +97,10 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     );
 
     let help = match app.mode {
-        _ if app.read_only => {
+        _ if matches!(app.read_only, ReadOnly::Closed) => {
+            "this cassette is closed  `cassette queue reopen` to write in it again  Tab:next  ^C:quit & save"
+        }
+        _ if app.read_only.is_read_only() => {
             "keys ignored: another writer holds this cassette's lock  Tab:next  ^N:new  ^C:quit & save"
         }
         Mode::Insert if app.record => {
@@ -135,15 +142,17 @@ pub(crate) fn info_text(app: &App) -> String {
     // and it would shadow the one line saying why — the same shadowing the
     // busy banner was rescued from one branch below. Watching another writer
     // work is not idling, so the nudge is wrong here on its own terms.
-    if app.idle_nudge() && !app.read_only {
+    if app.idle_nudge() && !app.read_only.is_read_only() {
         return "· · ·  tape's still rolling — keep writing  · · ·".to_string();
     }
     let c = &app.cassettes[app.focus_idx];
     let (ln, col) = c.cursor_line_col();
     let mode_str = match app.mode {
-        _ if app.read_only => match &app.busy_holder {
-            Some(holder) => format!("-- READ ONLY (open by {holder}) --"),
-            None => "-- READ ONLY --".to_string(),
+        _ if app.read_only.is_read_only() => match &app.read_only {
+            ReadOnly::Busy { holder: Some(h) } => format!("-- READ ONLY (open by {h}) --"),
+            ReadOnly::Busy { holder: None } => "-- READ ONLY --".to_string(),
+            ReadOnly::Closed => "-- CLOSED --".to_string(),
+            ReadOnly::No => unreachable!("guarded by is_read_only above"),
         },
         Mode::Insert if app.record => "-- RECORD --".to_string(),
         Mode::Insert => "-- INSERT --".to_string(),
@@ -853,8 +862,9 @@ mod tests {
     #[test]
     fn the_busy_indicator_names_the_holder() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.read_only = true;
-        app.busy_holder = Some("refactor-agent".to_string());
+        app.read_only = ReadOnly::Busy {
+            holder: Some("refactor-agent".to_string()),
+        };
         let line = crate::ui::info_text(&app);
         assert!(
             line.contains("refactor-agent"),
@@ -880,8 +890,9 @@ mod tests {
             "fixture must actually be nudging, or this proves nothing"
         );
 
-        app.read_only = true;
-        app.busy_holder = Some("refactor-agent".to_string());
+        app.read_only = ReadOnly::Busy {
+            holder: Some("refactor-agent".to_string()),
+        };
         let line = crate::ui::info_text(&app);
         assert!(
             line.contains("READ ONLY (open by refactor-agent)"),
@@ -890,17 +901,47 @@ mod tests {
         assert!(!line.contains("still rolling"), "{line}");
     }
 
+    /// Busy, sticky and closed are three states with three different
+    /// remedies: wait, go unlock it, go reopen it. 5b established that the
+    /// display must tell busy and sticky apart; closed is the third, and a
+    /// human sent to wait for a closed cassette waits forever.
+    #[test]
+    fn a_closed_cassette_does_not_read_like_a_busy_one() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.read_only = ReadOnly::Busy {
+            holder: Some("refactor-agent".to_string()),
+        };
+        let busy = crate::ui::info_text(&app);
+
+        app.read_only = ReadOnly::Closed;
+        let closed = crate::ui::info_text(&app);
+
+        assert!(
+            busy.contains("READ ONLY (open by refactor-agent)"),
+            "{busy}"
+        );
+        assert!(closed.contains("-- CLOSED --"), "{closed}");
+        assert!(
+            !closed.contains("READ ONLY"),
+            "closed is not 'someone else has it': {closed}"
+        );
+        assert!(
+            closed.contains("cassette 1/"),
+            "and it keeps the rest of the info line: {closed}"
+        );
+    }
+
     /// Busy means wait; sticky means go and unlock it. A display that blurs
     /// them sends the user to wait for something that will never free itself.
     #[test]
     fn a_busy_cassette_and_a_sticky_one_do_not_read_the_same() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.read_only = true;
-        app.busy_holder = Some("refactor-agent".to_string());
+        app.read_only = ReadOnly::Busy {
+            holder: Some("refactor-agent".to_string()),
+        };
         let busy = crate::ui::info_text(&app);
 
-        app.read_only = false;
-        app.busy_holder = None;
+        app.read_only = ReadOnly::No;
         app.cassettes[0].locked_by = Some("joseph".to_string());
         let sticky = crate::ui::separator_text(&app, 0);
 

@@ -30,6 +30,34 @@ pub enum Mode {
     Topic,
 }
 
+/// Why the focused cassette cannot be written, or `No` when it can.
+///
+/// One field rather than a `bool` plus a separate holder name: 5b shipped a
+/// display bug caused by recording one fact in two places, and adding
+/// "closed" as a second reason to be unwritable would have compounded it.
+/// Each variant carries exactly what its own banner needs, so the renderer
+/// cannot be handed a state that contradicts itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReadOnly {
+    #[default]
+    No,
+    /// Another live writer holds the lock. It frees itself, so the remedy is
+    /// to wait. `holder` is `None` only when the lock anchor yields no name
+    /// (a crashed or garbled write).
+    Busy { holder: Option<String> },
+    /// Closed in the store (`queue close`). Only `queue reopen` clears it,
+    /// so the remedy is an action, not patience — which is why this must not
+    /// read like `Busy` on screen.
+    Closed,
+}
+
+impl ReadOnly {
+    /// True for every reason the focused cassette cannot be written.
+    pub fn is_read_only(&self) -> bool {
+        !matches!(self, ReadOnly::No)
+    }
+}
+
 pub struct App {
     pub cassettes: Vec<Cassette>,
     pub focus_idx: usize,
@@ -71,18 +99,8 @@ pub struct App {
     /// refusing to start would let an agent lock a human out of their own
     /// session. `modify_focused` is the gate; `main.rs` sets the flag when
     /// `SessionWriter::acquire` fails.
-    pub read_only: bool,
-    /// While `read_only` is set, the name of the writer holding the lock —
-    /// from the lock anchor's own attribution, the same source `queue
-    /// write`'s exit-3 message reads (`LockError::Busy`'s `holder`). `None`
-    /// when read-only for a reason with no name to show (no writer, or a
-    /// holder whose anchor could not be read). `main.rs` sets this alongside
-    /// `read_only`, on every acquire attempt — keypress-driven and, from this
-    /// task, tick-driven too. Distinct from a cassette's own `locked_by`: a
-    /// busy holder is transient and frees itself; a sticky lock is durable
-    /// and needs a human to clear it (`queue unlock`) — the two must not
-    /// render the same way.
-    pub busy_holder: Option<String>,
+    /// Why the focused cassette cannot be written, or `No` when it can.
+    pub read_only: ReadOnly,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
     /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
@@ -126,8 +144,7 @@ impl App {
             baseline_words: 0,
             idle_secs: 0,
             session,
-            read_only: false,
-            busy_holder: None,
+            read_only: ReadOnly::No,
             bell: false,
             suspend: false,
             status_ticks: None,
@@ -492,7 +509,7 @@ impl App {
     /// the writer; one that reaches it and is then discarded at the next
     /// flush is not.
     pub fn modify_focused<F: FnOnce(&mut Cassette)>(&mut self, f: F) {
-        if self.read_only {
+        if self.read_only.is_read_only() {
             return;
         }
         if let Some(c) = self.cassettes.get_mut(self.focus_idx) {
@@ -1346,7 +1363,7 @@ mod tests {
     #[test]
     fn read_only_ignores_text_keys_but_allows_leaving() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.read_only = true;
+        app.read_only = ReadOnly::Closed;
         let before = app.cassettes[app.focus_idx].side_a_text();
 
         app.modify_focused(|c| c.insert('x'));
