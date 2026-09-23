@@ -358,8 +358,13 @@ changed: notes had human-typed names, sessions have ULIDs. There is no name to t
 selection has to be a picker. `sessions` follows the `find.rs` structure — a thin
 `scan_sessions_dir` plus pure sort/render functions.
 
-Keys: `j/k` and arrows, `Enter` opens the session in the TUI and marks it active, `a`
+Keys: `j/k` and arrows, `Enter` opens the session in the TUI, `a`
 expands to all sessions, `/` filters, `q` quits. Alias shown where set, id otherwise.
+
+**Corrected 2026-09-23 (Phase 5c brainstorming):** `Enter` originally read "opens the session
+in the TUI *and marks it active*". Phase 4b removed the active-session pointer and made
+`--session <id>` required on every queue command, so there is no active session to mark. The
+picker opens the session and nothing more.
 
 ## JSON contract
 
@@ -641,8 +646,12 @@ phases, each independently testable and each leaving the tool working.
      inside `acquire` (a Critical its final review caught), so 5b builds on that rather than
      repeating it.
    - **5c — Queue-shaped display.** Priority ordering, the collapsed closed row,
-     `MAX_CASSETTES` applying to open cassettes only, damaged cassettes as error rows, the
-     `cassette sessions` picker.
+     `MAX_CASSETTES` applying to open cassettes only, damaged cassettes as error rows. Spec:
+     `2026-09-23-queue-shaped-display-design.md`.
+   - **5d — The sessions picker.** `cassette sessions`, the interactive "15 recent, 'a' = all"
+     screen. **Split out of 5c on 2026-09-23**, for the reason phases 4 and 5 were split: it is
+     a new full-screen UI with its own event loop, and 5c is otherwise four changes to the
+     existing stack render.
 
    `stats` and `find` move from Phase 6 into 5a so there is never a window where the TUI
    writes the store while the reporting commands read the old notes directory.
