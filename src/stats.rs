@@ -58,7 +58,7 @@ pub fn scan_store(store: &Store) -> (Vec<NoteMeta>, usize) {
         let Ok(scan) = store.scan_session(&id) else {
             continue;
         };
-        unreadable += scan.unreadable;
+        unreadable += scan.unreadable();
         metas.push(NoteMeta {
             date,
             words: session_word_count(&scan.cassettes),

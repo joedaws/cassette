@@ -380,8 +380,9 @@ fn main() -> io::Result<()> {
     if let Some(topics) = &template_topics {
         app.apply_topics(topics);
     }
-    if let Some(cassettes) = loaded {
-        app.load_cassettes(cassettes);
+    if let Some(loaded) = loaded {
+        app.load_cassettes(loaded.cassettes);
+        app.damaged = loaded.damaged;
     }
 
     let mut writer = store.as_ref().map(|s| {
@@ -588,11 +589,20 @@ fn resolve_tui_writer(store: &store::Store, args: &cli::Args) -> (String, String
 /// nothing), so a name resolves to the **most recent** session carrying it:
 /// `list_sessions` is newest-first, and picking the newest is the only
 /// answer that keeps `cassette today` idempotent across a day.
+/// What opening an existing session read off disk: its cassettes, plus the
+/// files that could not be loaded. Damaged files travel with the cassettes
+/// rather than being logged, because an `eprintln!` here is wiped by the
+/// alternate screen before a human can read it — `ui.rs` puts them on screen.
+struct LoadedSession {
+    cassettes: Vec<cassette::Cassette>,
+    damaged: Vec<(String, String)>,
+}
+
 fn resolve_session(
     store: &store::Store,
     args: &cli::Args,
     daily_name: Option<&str>,
-) -> (String, bool, Option<Vec<cassette::Cassette>>) {
+) -> (String, bool, Option<LoadedSession>) {
     let by_alias = |alias: &str| -> Option<String> {
         store
             .list_sessions()
@@ -601,9 +611,9 @@ fn resolve_session(
             .find(|(_, m)| m.alias.as_deref() == Some(alias))
             .map(|(id, _)| id)
     };
-    let open = |id: String| -> (String, bool, Option<Vec<cassette::Cassette>>) {
-        let cassettes = load_session_cassettes(store, &id);
-        (id, false, Some(cassettes))
+    let open = |id: String| -> (String, bool, Option<LoadedSession>) {
+        let (cassettes, damaged) = load_session_cassettes(store, &id);
+        (id, false, Some(LoadedSession { cassettes, damaged }))
     };
 
     if let Some(name) = &args.resume {
@@ -692,21 +702,26 @@ fn create_session(store: &store::Store, args: &cli::Args, alias: Option<&str>) -
 /// Closed cassettes are loaded too. The TUI has no notion of closed yet
 /// (5c adds the collapsed row), and hiding text a human wrote would look
 /// exactly like losing it.
-fn load_session_cassettes(store: &store::Store, session: &str) -> Vec<cassette::Cassette> {
+fn load_session_cassettes(
+    store: &store::Store,
+    session: &str,
+) -> (Vec<cassette::Cassette>, Vec<(String, String)>) {
     let scan = store
         .scan_session(session)
         .unwrap_or_else(|e| die_with(1, &format!("cannot read session '{session}': {e}")));
-    if scan.unreadable > 0 {
-        eprintln!(
-            "cassette: {} file(s) in this session could not be read and were skipped",
-            scan.unreadable
-        );
-    }
+    // Not an eprintln any more: the alternate screen wipes one before a
+    // human can read it. These ride out to `App.damaged` and onto the screen.
+    let damaged: Vec<(String, String)> = scan
+        .damaged
+        .iter()
+        .map(|d| (d.label(), d.reason.to_string()))
+        .collect();
     // Resolved once for the whole session rather than per cassette; a
     // registry read failure degrades to showing raw writer ids rather than
     // failing the load.
     let writers = store.writers().unwrap_or_default();
-    scan.cassettes
+    let cassettes: Vec<cassette::Cassette> = scan
+        .cassettes
         .into_iter()
         .map(|c| {
             let (side_a, side_b) = queue::json::split_sides(&c.body);
@@ -725,7 +740,8 @@ fn load_session_cassettes(store: &store::Store, session: &str) -> Vec<cassette::
                 .map(|id| store::writers::display_name(&writers, id));
             loaded
         })
-        .collect()
+        .collect();
+    (cassettes, damaged)
 }
 
 /// Print the `themes` listing: every selectable theme with a color swatch
@@ -1099,6 +1115,13 @@ fn sync_external_writes(
     let Ok(scan) = store.scan_session(&app.session) else {
         return;
     };
+    // A file may have become damaged (or been repaired) since load, and this
+    // is the only place the session is rescanned while running.
+    app.damaged = scan
+        .damaged
+        .iter()
+        .map(|d| (d.label(), d.reason.to_string()))
+        .collect();
     // Resolved once per tick, not once per changed cassette; a registry read
     // failure degrades to raw writer ids rather than skipping the merge.
     let writers = store.writers().unwrap_or_default();

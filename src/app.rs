@@ -63,6 +63,11 @@ pub struct App {
     pub focus_idx: usize,
     /// Index of the first cassette shown on screen (whole-cassette scrolling).
     pub cassette_scroll: usize,
+    /// Files in this session that exist but could not be loaded, as
+    /// (label, reason) — plain strings, because these are not cassettes and
+    /// `App` holds no store types. Rendered as unfocusable rows: they are
+    /// not in `cassettes`, so focus movement cannot reach them at all.
+    pub damaged: Vec<(String, String)>,
     /// Whether the closed-cassette fold is open. Closed cassettes are in the
     /// scroll window only while it is, which is what keeps Tab out of them
     /// without a special case in focus movement.
@@ -129,6 +134,7 @@ impl App {
             cassettes: vec![Cassette::new()],
             focus_idx: 0,
             cassette_scroll: 0,
+            damaged: Vec::new(),
             closed_expanded: false,
             term_width: 80,
             term_height: 24,

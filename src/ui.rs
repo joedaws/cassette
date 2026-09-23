@@ -39,6 +39,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     if closed_row.is_some() {
         constraints.push(Constraint::Length(1)); // the closed fold's own row
     }
+    for _ in &app.damaged {
+        constraints.push(Constraint::Length(1)); // one row per damaged file
+    }
     constraints.push(Constraint::Length(1)); // bottom separator (closes the stack)
     constraints.push(Constraint::Min(0)); // filler: pins the footer to the window bottom
     constraints.push(Constraint::Length(1)); // reel stats
@@ -78,6 +81,17 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     } else {
         n
     };
+
+    // Damaged files sit below the fold row: both are outside the working
+    // set, which is what they have in common.
+    let damaged_style = Style::new().fg(theme.unfocused_fg);
+    for (i, (label, reason)) in app.damaged.iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(format!("⚠ {label} — {reason}")).style(damaged_style),
+            chunks[after_stack + i],
+        );
+    }
+    let after_stack = after_stack + app.damaged.len();
 
     let sep = "─".repeat(area.width as usize);
     frame.render_widget(Paragraph::new(sep), chunks[after_stack]);

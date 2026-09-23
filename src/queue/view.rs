@@ -110,10 +110,9 @@ fn scan_filtered(
     let scan = store
         .scan_session(session)
         .map_err(|e| QueueError::Io(format!("cannot scan session '{session}': {e}")))?;
-    Ok((
-        filter_cassettes(scan.cassettes, status, since),
-        scan.unreadable,
-    ))
+    // Read the count before `cassettes` is moved out of the scan.
+    let unreadable = scan.unreadable();
+    Ok((filter_cassettes(scan.cassettes, status, since), unreadable))
 }
 
 /// `cassette queue list --session <ID> [--status open|closed|all] [--since <TIME>]`.

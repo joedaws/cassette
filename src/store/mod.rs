@@ -127,7 +127,62 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
 #[derive(Debug, Default)]
 pub struct SessionScan {
     pub cassettes: Vec<StoredCassette>,
-    pub unreadable: usize,
+    /// Files that exist but could not be loaded. Carried as a list rather
+    /// than a count so the TUI can render one row per damaged file naming
+    /// it: an operator told "1 unreadable" with no filename has nothing to
+    /// act on.
+    pub damaged: Vec<DamagedCassette>,
+}
+
+impl SessionScan {
+    /// How many files could not be loaded. Derived from `damaged` rather
+    /// than tracked beside it, so the count and the list cannot disagree —
+    /// the two-records-of-one-fact shape this codebase has already paid for
+    /// once in the TUI's read-only banner.
+    pub fn unreadable(&self) -> usize {
+        self.damaged.len()
+    }
+}
+
+/// Why a cassette file could not be turned into a `StoredCassette`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DamageReason {
+    /// Could not be read at all: permissions, I/O, or invalid UTF-8.
+    Unreadable,
+    /// Read, but carries no parseable frontmatter block.
+    BadFrontmatter,
+}
+
+impl std::fmt::Display for DamageReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DamageReason::Unreadable => write!(f, "could not be read"),
+            DamageReason::BadFrontmatter => write!(f, "frontmatter is unparseable"),
+        }
+    }
+}
+
+/// One cassette file that exists but could not be loaded.
+#[derive(Debug, Clone)]
+pub struct DamagedCassette {
+    pub path: PathBuf,
+    /// The id from the filename stem, where there is one. The frontmatter is
+    /// exactly what could not be trusted, so the name is all there is.
+    pub id: Option<String>,
+    pub reason: DamageReason,
+}
+
+impl DamagedCassette {
+    /// What to show for this file: its id when the name yields one, else the
+    /// bare filename.
+    pub fn label(&self) -> String {
+        self.id.clone().unwrap_or_else(|| {
+            self.path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.path.display().to_string())
+        })
+    }
 }
 
 /// One cassette as it exists on disk.
@@ -532,18 +587,30 @@ impl Store {
             Err(e) => return Err(e),
         };
         let mut found = Vec::new();
-        let mut unreadable = 0usize;
+        let mut damaged: Vec<DamagedCassette> = Vec::new();
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| ids::is_valid_id(s));
             let Ok(content) = std::fs::read_to_string(&path) else {
-                unreadable += 1;
+                damaged.push(DamagedCassette {
+                    path,
+                    id: stem,
+                    reason: DamageReason::Unreadable,
+                });
                 continue;
             };
             let (Some(meta), body) = meta::split(&content) else {
-                unreadable += 1;
+                damaged.push(DamagedCassette {
+                    path,
+                    id: stem,
+                    reason: DamageReason::BadFrontmatter,
+                });
                 continue;
             };
             found.push(StoredCassette {
@@ -561,9 +628,11 @@ impl Store {
                 .position(|id| *id == c.meta.id)
                 .unwrap_or(usize::MAX)
         });
+        // Stable order so a damaged row does not jump between renders.
+        damaged.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(SessionScan {
             cassettes: found,
-            unreadable,
+            damaged,
         })
     }
 
@@ -664,6 +733,40 @@ mod tests {
         atomic_write(&path, "first").expect("write");
         atomic_write(&path, "second").expect("write");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    /// A damaged cassette must be nameable, not merely countable: an
+    /// operator told "1 unreadable" with no filename has nothing to act on.
+    /// The count stays exact by being derived from the list, not kept beside
+    /// it — the two-records-of-one-fact shape this codebase already paid for.
+    #[test]
+    fn scan_session_names_damaged_cassettes_and_says_why() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let session = store.create_session(&session_meta()).expect("session");
+        std::fs::write(
+            store
+                .cassettes_dir(&session)
+                .join("01M38000000000000000000BAD.md"),
+            "no frontmatter here at all\n",
+        )
+        .expect("write");
+
+        let scan = store.scan_session(&session).expect("scan");
+
+        assert_eq!(scan.unreadable(), 1);
+        assert_eq!(scan.damaged.len(), 1, "the count is derived from the list");
+        assert_eq!(
+            scan.damaged[0].id.as_deref(),
+            Some("01M38000000000000000000BAD"),
+            "recovered from the filename, since the frontmatter is what failed"
+        );
+        assert_eq!(scan.damaged[0].reason, DamageReason::BadFrontmatter);
+        assert_eq!(scan.damaged[0].label(), "01M38000000000000000000BAD");
+        assert!(
+            scan.cassettes.is_empty(),
+            "and it is not served as a cassette"
+        );
     }
 
     #[test]

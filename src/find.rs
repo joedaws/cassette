@@ -181,7 +181,7 @@ pub fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize) {
         let Ok(scan) = store.scan_session(&id) else {
             continue;
         };
-        unreadable += scan.unreadable;
+        unreadable += scan.unreadable();
         let (topics, preview) = topics_and_preview(&scan.cassettes);
         let words = session_word_count(&scan.cassettes);
         let haystack = build_haystack(

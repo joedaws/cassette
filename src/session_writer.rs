@@ -370,7 +370,7 @@ impl<'a> SessionWriter<'a> {
         let Ok(scan) = self.store.scan_session(&self.session) else {
             return false;
         };
-        if scan.unreadable > 0 {
+        if scan.unreadable() > 0 {
             return false;
         }
         for stored in &scan.cassettes {
