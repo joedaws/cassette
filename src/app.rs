@@ -63,6 +63,10 @@ pub struct App {
     pub focus_idx: usize,
     /// Index of the first cassette shown on screen (whole-cassette scrolling).
     pub cassette_scroll: usize,
+    /// Whether the closed-cassette fold is open. Closed cassettes are in the
+    /// scroll window only while it is, which is what keeps Tab out of them
+    /// without a special case in focus movement.
+    pub closed_expanded: bool,
     pub term_width: u16,
     pub term_height: u16,
     pub status_msg: Option<String>,
@@ -125,6 +129,7 @@ impl App {
             cassettes: vec![Cassette::new()],
             focus_idx: 0,
             cassette_scroll: 0,
+            closed_expanded: false,
             term_width: 80,
             term_height: 24,
             status_msg: None,
@@ -243,7 +248,7 @@ impl App {
     /// Keep `focus_idx` inside the visible window, clamped to the cassette list.
     fn ensure_focus_visible(&mut self) {
         let visible = self.visible_cassette_count();
-        let max_scroll = self.cassettes.len().saturating_sub(visible);
+        let max_scroll = self.stack_len().saturating_sub(visible);
         self.cassette_scroll = self.cassette_scroll.min(max_scroll);
         if self.focus_idx < self.cassette_scroll {
             self.cassette_scroll = self.focus_idx;
@@ -294,6 +299,10 @@ impl App {
             .open_count()
             .saturating_sub(1)
             .min(self.cassettes.len().saturating_sub(1));
+        // A session whose cassettes are ALL closed has nothing to show
+        // folded, so it opens expanded — there would otherwise be an empty
+        // screen and no valid focus.
+        self.closed_expanded = self.open_count() == 0;
         self.ensure_focus_visible();
     }
 
@@ -492,6 +501,43 @@ impl App {
         self.cassettes.iter().filter(|c| !c.closed).count()
     }
 
+    /// How many cassettes the scroll window and focus movement cover.
+    ///
+    /// Closed cassettes join it only while the fold is open. Because
+    /// `sort_queue` keeps them last, "the open set" is the prefix
+    /// `0..open_count()`, so folding is a bound rather than a filter — and
+    /// Tab needs no special case to stay out of closed cassettes.
+    pub fn stack_len(&self) -> usize {
+        if self.closed_expanded {
+            self.cassettes.len()
+        } else {
+            self.open_count()
+        }
+    }
+
+
+    /// Toggle the closed fold (`z`).
+    ///
+    /// Refuses to collapse when nothing is open: that would leave a
+    /// zero-length stack with no valid focus and an empty screen. Collapsing
+    /// from a closed cassette moves focus to the last open one first, since
+    /// `focus_idx` would otherwise sit outside `stack_len()`.
+    pub fn toggle_closed_fold(&mut self) {
+        if self.closed_expanded {
+            if self.open_count() == 0 {
+                return;
+            }
+            self.closed_expanded = false;
+            if self.focus_idx >= self.open_count() {
+                self.focus_idx = self.open_count() - 1;
+            }
+        } else {
+            self.closed_expanded = true;
+        }
+        self.clear_status();
+        self.ensure_focus_visible();
+    }
+
     pub fn add_cassette(&mut self) {
         // The cap is on the working set, not the retained history: closed
         // cassettes fold away and are never written in, so they must not be
@@ -513,14 +559,14 @@ impl App {
     }
 
     pub fn focus_next(&mut self) {
-        let n = self.cassettes.len().max(1);
+        let n = self.stack_len().max(1);
         self.focus_idx = (self.focus_idx + 1) % n;
         self.clear_status();
         self.ensure_focus_visible();
     }
 
     pub fn focus_prev(&mut self) {
-        let n = self.cassettes.len().max(1);
+        let n = self.stack_len().max(1);
         self.focus_idx = (self.focus_idx + n - 1) % n;
         self.clear_status();
         self.ensure_focus_visible();
@@ -609,8 +655,7 @@ impl App {
     pub fn hidden_cassettes(&self) -> (usize, usize) {
         let visible = self.visible_cassette_count();
         let below = self
-            .cassettes
-            .len()
+            .stack_len()
             .saturating_sub(self.cassette_scroll + visible);
         (self.cassette_scroll, below)
     }
@@ -1011,6 +1056,79 @@ mod tests {
             app.cassettes.len(),
             MAX_CASSETTES + 5,
             "closed ones are retained"
+        );
+    }
+
+    /// Collapsed, Tab must not reach a closed cassette: expansion is what
+    /// makes them reachable, so focus movement needs no special case.
+    #[test]
+    fn tab_skips_closed_cassettes_while_folded() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for (id, priority, closed) in [("a", 10, false), ("b", 20, false), ("c", 30, true)] {
+            let mut c = Cassette::new();
+            c.id = id.to_string();
+            c.priority = priority;
+            c.closed = closed;
+            app.cassettes.push(c);
+        }
+        app.sort_queue();
+        assert!(!app.closed_expanded, "folded by default");
+
+        app.focus_idx = 1; // "b", the last open one
+        app.focus_next();
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, "a",
+            "wraps within the open set"
+        );
+
+        app.toggle_closed_fold();
+        app.focus_idx = 1;
+        app.focus_next();
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, "c",
+            "expanded, it is reachable"
+        );
+    }
+
+    /// Collapsing while focused on a closed cassette would leave `focus_idx`
+    /// outside `stack_len()` — pointing at a cassette no longer drawn.
+    #[test]
+    fn collapsing_moves_focus_off_a_closed_cassette() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for (id, closed) in [("a", false), ("c", true)] {
+            let mut c = Cassette::new();
+            c.id = id.to_string();
+            c.closed = closed;
+            app.cassettes.push(c);
+        }
+        app.sort_queue();
+        app.toggle_closed_fold();
+        app.focus_idx = 1; // the closed one
+
+        app.toggle_closed_fold(); // collapse
+
+        assert!(!app.closed_expanded);
+        assert_eq!(app.cassettes[app.focus_idx].id, "a");
+        assert!(app.focus_idx < app.stack_len());
+    }
+
+    /// A session whose cassettes are all closed has nothing to focus when
+    /// folded, so the fold opens and refuses to close.
+    #[test]
+    fn a_fully_closed_session_stays_expanded() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        let mut c = Cassette::new();
+        c.id = "c".to_string();
+        c.closed = true;
+        app.load_cassettes(vec![c]);
+
+        assert!(app.closed_expanded, "nothing else could be shown");
+        app.toggle_closed_fold();
+        assert!(
+            app.closed_expanded,
+            "refuses to collapse to an empty screen"
         );
     }
 

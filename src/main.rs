@@ -1390,6 +1390,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         c.delete();
                     });
                 }
+                'z' => app.toggle_closed_fold(),
                 'd' => app.pending = Some('d'),
                 'g' => app.pending = Some('g'),
                 _ => {}
