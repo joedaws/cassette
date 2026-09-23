@@ -20,12 +20,11 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
 
     // Only the window of cassettes starting at `cassette_scroll` is laid out:
     // the focused one full-height, the others minimized to their last line.
-    let first = app
-        .cassette_scroll
-        .min(app.cassettes.len().saturating_sub(1));
-    let n = app
-        .visible_cassette_count()
-        .min(app.cassettes.len() - first);
+    // The window covers the STACK, which excludes closed cassettes while the
+    // fold is shut — so a folded session never lays one out at all.
+    let stack = app.stack_len();
+    let first = app.cassette_scroll.min(stack.saturating_sub(1));
+    let n = app.visible_cassette_count().min(stack - first);
 
     let mut constraints: Vec<Constraint> = (first..first + n)
         .map(|i| {
@@ -36,6 +35,10 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
             }
         })
         .collect();
+    let closed_row = closed_row_text(app);
+    if closed_row.is_some() {
+        constraints.push(Constraint::Length(1)); // the closed fold's own row
+    }
     constraints.push(Constraint::Length(1)); // bottom separator (closes the stack)
     constraints.push(Constraint::Min(0)); // filler: pins the footer to the window bottom
     constraints.push(Constraint::Length(1)); // reel stats
@@ -66,8 +69,18 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         }
     }
 
+    // Everything after the stack shifts down by one when the fold row is
+    // drawn, so the offset is computed once rather than spelled per chunk.
+    let after_stack = if let Some(row) = &closed_row {
+        let style = Style::new().fg(theme.unfocused_fg);
+        frame.render_widget(Paragraph::new(row.clone()).style(style), chunks[n]);
+        n + 1
+    } else {
+        n
+    };
+
     let sep = "─".repeat(area.width as usize);
-    frame.render_widget(Paragraph::new(sep), chunks[n]);
+    frame.render_widget(Paragraph::new(sep), chunks[after_stack]);
 
     // Overflow indicators for cassettes scrolled out of view.
     let (above, below) = app.hidden_cassettes();
@@ -75,10 +88,10 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         render_overflow_hint(frame, chunks[0], above, '↑');
     }
     if below > 0 {
-        render_overflow_hint(frame, chunks[n], below, '↓');
+        render_overflow_hint(frame, chunks[after_stack], below, '↓');
     }
 
-    render_reel_stats(frame, chunks[n + 2], app);
+    render_reel_stats(frame, chunks[after_stack + 2], app);
 
     // The topic prompt owns the line while open; then status messages; then
     // the idle nudge; otherwise a vim-style info line. `info_text` is the
@@ -93,10 +106,21 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     }
     frame.render_widget(
         Paragraph::new(info_text(app)).style(info_style),
-        chunks[n + 3],
+        chunks[after_stack + 3],
     );
 
-    let help = match app.mode {
+    let help = help_text(app);
+    frame.render_widget(
+        Paragraph::new(help_line(help, theme)),
+        chunks[after_stack + 4],
+    );
+}
+
+/// The help row's text for the current mode and read-only reason. Pure, so
+/// tests can assert the remedy each state names without a terminal —
+/// `render` applies the key/description styling.
+pub(crate) fn help_text(app: &App) -> &'static str {
+    match app.mode {
         _ if matches!(app.read_only, ReadOnly::Closed) => {
             "this cassette is closed  `cassette queue reopen` to write in it again  Tab:next  ^C:quit & save"
         }
@@ -111,8 +135,21 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
             "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  t:topic  ^B:flip  q:quit"
         }
         Mode::Topic => "Enter:set topic  Esc:cancel  (empty input clears the topic)",
-    };
-    frame.render_widget(Paragraph::new(help_line(help, theme)), chunks[n + 4]);
+    }
+}
+
+/// The closed fold's row — `▸ 12 closed` shut, `▾ 12 closed` open — or
+/// `None` when the session has no closed cassettes, since an affordance for
+/// nothing is noise. Pure text; `render` applies the theme's `unfocused_fg`,
+/// following the `info_text`/`separator_text` precedent so production and
+/// tests can never disagree about the wording.
+pub(crate) fn closed_row_text(app: &App) -> Option<String> {
+    let n = app.closed_count();
+    if n == 0 {
+        return None;
+    }
+    let arrow = if app.closed_expanded { '▾' } else { '▸' };
+    Some(format!("{arrow} {n} closed"))
 }
 
 /// The vim-style info line's text: topic prompt, status message, or idle
@@ -899,6 +936,59 @@ mod tests {
             "the banner must win over the nudge: {line}"
         );
         assert!(!line.contains("still rolling"), "{line}");
+    }
+
+    /// The fold's own row: how much history is there, and which way it
+    /// opens.
+    #[test]
+    fn the_closed_row_counts_and_points() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        let mut open = Cassette::new();
+        open.id = "a".to_string();
+        open.priority = 1;
+        app.cassettes.push(open);
+        for i in 0..12 {
+            let mut c = Cassette::new();
+            c.id = format!("c{i:02}");
+            c.priority = 10 + i;
+            c.closed = true;
+            app.cassettes.push(c);
+        }
+        app.sort_queue();
+
+        assert_eq!(
+            crate::ui::closed_row_text(&app).as_deref(),
+            Some("▸ 12 closed")
+        );
+        app.toggle_closed_fold();
+        assert_eq!(
+            crate::ui::closed_row_text(&app).as_deref(),
+            Some("▾ 12 closed")
+        );
+    }
+
+    /// No closed cassettes, no row — an affordance for nothing is noise.
+    #[test]
+    fn no_closed_row_without_closed_cassettes() {
+        let app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        assert_eq!(crate::ui::closed_row_text(&app), None);
+    }
+
+    /// The help row must name the remedy. Closed needs an action
+    /// (`queue reopen`); busy only needs patience, and telling a human to
+    /// wait for a closed cassette leaves them waiting forever.
+    #[test]
+    fn the_help_row_names_the_remedy_for_closed() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.read_only = ReadOnly::Closed;
+        let help = crate::ui::help_text(&app);
+        assert!(help.contains("queue reopen"), "{help}");
+
+        app.read_only = ReadOnly::Busy { holder: None };
+        let busy = crate::ui::help_text(&app);
+        assert!(busy.contains("another writer"), "{busy}");
+        assert!(!busy.contains("queue reopen"), "{busy}");
     }
 
     /// Busy, sticky and closed are three states with three different

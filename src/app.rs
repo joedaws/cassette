@@ -507,6 +507,11 @@ impl App {
     /// `sort_queue` keeps them last, "the open set" is the prefix
     /// `0..open_count()`, so folding is a bound rather than a filter — and
     /// Tab needs no special case to stay out of closed cassettes.
+    /// How many closed cassettes the fold is hiding or showing.
+    pub fn closed_count(&self) -> usize {
+        self.cassettes.len() - self.open_count()
+    }
+
     pub fn stack_len(&self) -> usize {
         if self.closed_expanded {
             self.cassettes.len()
@@ -514,7 +519,6 @@ impl App {
             self.open_count()
         }
     }
-
 
     /// Toggle the closed fold (`z`).
     ///
