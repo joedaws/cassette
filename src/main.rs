@@ -716,6 +716,8 @@ fn load_session_cassettes(store: &store::Store, session: &str) -> Vec<cassette::
                 c.meta.topic,
             );
             loaded.id = c.meta.id;
+            loaded.priority = c.meta.priority;
+            loaded.closed = c.meta.status == store::meta::Status::Closed;
             loaded.locked_by = c
                 .meta
                 .locked_by
@@ -1092,7 +1094,8 @@ fn sync_external_writes(
     }
 
     // Pass 2: something moved, so the whole session's queue order is worth
-    // pulling — needed for `insert_at`, and cheap at this scale regardless.
+    // pulling — it is the only place statuses and priorities are read, and
+    // cheap at this scale regardless.
     let Ok(scan) = store.scan_session(&app.session) else {
         return;
     };
@@ -1110,7 +1113,10 @@ fn sync_external_writes(
         }
 
         let already_known = app.cassettes.iter().any(|c| c.id == stored.meta.id);
-        if !already_known && app.cassettes.len() >= app::MAX_CASSETTES {
+        // The cap is on the working set: a newcomer that is already closed
+        // is history, not work, so it never counts against it.
+        let newcomer_is_open = stored.meta.status != store::meta::Status::Closed;
+        if !already_known && newcomer_is_open && app.open_count() >= app::MAX_CASSETTES {
             continue;
         }
 
@@ -1125,13 +1131,9 @@ fn sync_external_writes(
             .locked_by
             .as_deref()
             .map(|id| store::writers::display_name(&writers, id));
-        let insert_at = scan
-            .cassettes
-            .iter()
-            .take_while(|s| s.meta.id != stored.meta.id)
-            .filter(|s| app.cassettes.iter().any(|c| c.id == s.meta.id))
-            .count();
-        app.merge_external(&stored.meta.id, incoming, insert_at);
+        incoming.priority = stored.meta.priority;
+        incoming.closed = stored.meta.status == store::meta::Status::Closed;
+        app.merge_external(&stored.meta.id, incoming);
     }
 }
 
@@ -1689,6 +1691,77 @@ mod tests {
             .expect("open for touch");
         f.set_modified(SystemTime::now() + std::time::Duration::from_secs(5))
             .expect("set mtime");
+    }
+
+    /// A newcomer lands at its queue position because it carries its own
+    /// priority, not because the caller computed an index. This is what
+    /// retires `merge_external`'s `insert_at` parameter.
+    #[test]
+    fn sync_places_a_newcomer_by_its_own_priority() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let mine = store_cassette(&store, &session, 20, "## Side A\n\nmine\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = mine.clone();
+        c.priority = 20;
+        app.cassettes.push(c);
+
+        let mut mtimes = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        // 30 sorts after mine, 10 before it — so a single append would put
+        // them both at the tail and only ordering can get this right.
+        let later = store_cassette(&store, &session, 30, "## Side A\n\nlater\n");
+        let earlier = store_cassette(&store, &session, 10, "## Side A\n\nearlier\n");
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        assert_eq!(
+            app.cassettes
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![earlier.as_str(), mine.as_str(), later.as_str()],
+            "queue order comes from the cassettes' own priorities"
+        );
+        assert_eq!(app.cassettes[app.focus_idx].id, mine, "focus unmoved");
+    }
+
+    /// A cassette an agent CLOSES while the TUI is running folds away on the
+    /// next tick rather than staying in the working set.
+    #[test]
+    fn sync_notices_a_cassette_being_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let a = store_cassette(&store, &session, 10, "## Side A\n\na\n");
+        let b = store_cassette(&store, &session, 20, "## Side A\n\nb\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        for (id, priority) in [(&a, 10), (&b, 20)] {
+            let mut c = cassette::Cassette::new();
+            c.id = id.clone();
+            c.priority = priority;
+            app.cassettes.push(c);
+        }
+
+        let mut mtimes = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        assert_eq!(app.open_count(), 2);
+
+        // Close `a` the way `queue close` does, then touch it forward.
+        let path = store.cassette_path(&session, &a).expect("p").expect("e");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, raw.replace("status: open", "status: closed")).expect("write");
+        touch_forward(&store, &session, &a);
+
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        assert_eq!(app.open_count(), 1, "the closed one left the working set");
+        assert!(app.cassettes[1].closed, "and sorted to the tail");
+        assert_eq!(app.cassettes[1].id, a);
     }
 
     /// The phase's headline feature, end to end in one process: an agent

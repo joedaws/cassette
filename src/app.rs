@@ -302,13 +302,11 @@ impl App {
     /// index — an earlier insertion may have shifted it), or insert `incoming`
     /// as a newcomer at `insert_at`.
     ///
-    /// `insert_at` is the caller's job, not this method's: priority lives in
-    /// `store::meta::CassetteMeta`, which `Cassette` — a pure data type with
-    /// no store knowledge — does not carry and which this task does not add
-    /// to it. `main.rs`, which already reads the store's priority order to
-    /// decide what to merge in the first place, is where that ordering
-    /// knowledge already lives; passing the position here keeps it there
-    /// instead of duplicating it onto `Cassette`.
+    /// Position is not a parameter: `Cassette` carries its own `priority`,
+    /// so a newcomer is pushed and the list re-sorted. Phase 5b passed an
+    /// `insert_at` computed by the caller because priority lived only in
+    /// `store::meta::CassetteMeta`; 5c put it on the cassette and retired
+    /// the parameter.
     ///
     /// The cursor rule (the point of this method): if the existing
     /// cassette's cursor sat at the end of its active side, the merged
@@ -337,14 +335,15 @@ impl App {
     ///   would look like a first-sight change to `main.rs`'s sync step and
     ///   silently discard the cassette's undo stack and reset its cursor on
     ///   every tab-away, even though disk and memory already agreed. `incoming`'s
-    ///   `locked_by` is still applied when it's the only thing that moved
-    ///   (a `queue lock`/`unlock` with no text change) — it's metadata, not
-    ///   prose, and updating it in place costs the cursor/undo state nothing.
+    ///   `locked_by`, `priority` and `closed` are still applied when one of
+    ///   them is the only thing that moved (a `queue lock`/`move`/`close`
+    ///   with no text change) — they are metadata, not prose, and updating
+    ///   them in place costs the cursor/undo state nothing.
     ///
     /// Called from `main.rs`'s live-sync step (Task 4), on the existing
     /// one-second tick, for any cassette whose lock this process does not
     /// hold and whose file mtime has moved since it was last seen.
-    pub fn merge_external(&mut self, id: &str, incoming: Cassette, insert_at: usize) {
+    pub fn merge_external(&mut self, id: &str, incoming: Cassette) {
         let focused_id = self.cassettes.get(self.focus_idx).map(|c| c.id.clone());
 
         if let Some(idx) = self.cassettes.iter().position(|c| c.id == id) {
@@ -371,8 +370,19 @@ impl App {
                 && incoming.side_b_text().trim() == existing.side_b_text().trim()
                 && incoming.topic == existing.topic
             {
+                // `queue move` and `queue close` are the same kind of
+                // event as `queue lock`: metadata moving with the prose
+                // untouched. Re-sorting only when one actually changed keeps
+                // the overwhelmingly common no-op tick free of work.
+                let requeued = self.cassettes[idx].priority != incoming.priority
+                    || self.cassettes[idx].closed != incoming.closed;
+                self.cassettes[idx].priority = incoming.priority;
+                self.cassettes[idx].closed = incoming.closed;
                 if self.cassettes[idx].locked_by != incoming.locked_by {
                     self.cassettes[idx].locked_by = incoming.locked_by;
+                }
+                if requeued {
+                    self.sort_queue();
                 }
                 return;
             }
@@ -412,13 +422,26 @@ impl App {
                 merged.set_cursor(target);
             }
             merged.id = id.to_string();
+            // Queue metadata survives the rebuild. `merged` is built from
+            // the incoming TEXT, so anything not copied here silently
+            // reverts to `Cassette::default()` — which for `priority` is the
+            // `i64::MAX` unminted sentinel, and would send an established
+            // cassette to the tail of the queue on its next merge.
+            merged.priority = incoming.priority;
+            merged.closed = incoming.closed;
             merged.locked_by = incoming.locked_by;
             self.cassettes[idx] = merged;
+            self.sort_queue();
         } else {
             let mut merged = incoming;
             merged.id = id.to_string();
-            let at = insert_at.min(self.cassettes.len());
-            self.cassettes.insert(at, merged);
+            // Push and sort: the cassette carries its own priority, so its
+            // position is a property of the data rather than something the
+            // caller computes. `sort_queue` restores focus by id, which is
+            // what keeps an arrival ahead of the focused cassette from
+            // silently stealing focus.
+            self.cassettes.push(merged);
+            self.sort_queue();
         }
 
         if let Some(fid) = focused_id {
@@ -1143,7 +1166,7 @@ mod tests {
         // of the cassette it just released focus on, not an external
         // writer's edit.
         let incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].cursor_pos(),
@@ -1169,7 +1192,7 @@ mod tests {
 
         let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
         incoming.locked_by = Some("joseph".to_string());
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(app.cassettes[0].locked_by.as_deref(), Some("joseph"));
     }
@@ -1193,7 +1216,7 @@ mod tests {
 
         let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
         incoming.locked_by = Some("joseph".to_string());
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].locked_by.as_deref(),
@@ -1226,7 +1249,7 @@ mod tests {
         );
 
         let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(app.cassettes[0].side_a_text(), "first and more");
         assert_eq!(
@@ -1246,7 +1269,7 @@ mod tests {
         assert_eq!(app.cassettes[0].cursor_pos(), 0);
 
         let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].cursor_pos(),
@@ -1266,14 +1289,22 @@ mod tests {
         app.clear_dirty(1);
 
         let incoming = Cassette::from_sides("updated".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes.len(),
             2,
             "no insertion — this id already existed"
         );
-        assert_eq!(app.cassettes[1].side_a_text(), "updated");
+        // By id, not by index: the merge re-sorts, and these two share the
+        // unminted priority so the id tie-break decides where each lands.
+        // Asserting a fixed index here would be testing the fixture.
+        let updated = app
+            .cassettes
+            .iter()
+            .find(|c| c.id == "aaa00000000000000000000000")
+            .expect("the merged cassette is still present");
+        assert_eq!(updated.side_a_text(), "updated");
     }
 
     #[test]
@@ -1289,7 +1320,7 @@ mod tests {
         newcomer.id = "aaa00000000000000000000000".to_string();
         // Priority puts the newcomer ahead of the focused cassette: index 0
         // shifts to index 1, so this also exercises invariant 1.
-        app.merge_external("aaa00000000000000000000000", newcomer, 0);
+        app.merge_external("aaa00000000000000000000000", newcomer);
 
         assert_eq!(app.cassettes.len(), 2);
         assert_eq!(
@@ -1309,7 +1340,7 @@ mod tests {
 
         let mut newcomer = Cassette::new();
         newcomer.id = "second000000000000000000000".to_string();
-        app.merge_external("second000000000000000000000", newcomer, 1);
+        app.merge_external("second000000000000000000000", newcomer);
 
         assert_eq!(app.cassettes.len(), 3);
         assert_eq!(app.cassettes[0].id, "first0000000000000000000000");
@@ -1344,7 +1375,7 @@ mod tests {
             "scratch and more".to_string(),
             None,
         );
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].side,

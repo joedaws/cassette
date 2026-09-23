@@ -143,6 +143,9 @@ impl<'a> SessionWriter<'a> {
         let body = output::cassette_body(&app.cassettes[idx]);
         self.store.add_cassette(&self.session, &meta, &body)?;
         app.cassettes[idx].id = meta.id;
+        // The minted priority replaces the `i64::MAX` "not yet minted"
+        // sentinel, so this cassette now sorts where the store says.
+        app.cassettes[idx].priority = meta.priority;
         app.clear_dirty(idx);
         Ok(())
     }
@@ -260,9 +263,13 @@ impl<'a> SessionWriter<'a> {
             // Text and topic are unchanged, so the cursor/undo short-circuit
             // still applies — but a sticky lock is metadata, not prose, and
             // can change (`queue lock`/`unlock`) with nothing else moving.
+            // Priority and status are the same kind of thing: `queue move`
+            // and `queue close` move them with the prose untouched.
             if app.cassettes[idx].locked_by != locked_by {
                 app.cassettes[idx].locked_by = locked_by;
             }
+            app.cassettes[idx].priority = stored.meta.priority;
+            app.cassettes[idx].closed = stored.meta.status == Status::Closed;
             return Ok(());
         }
         let id = c.id.clone();
@@ -273,6 +280,8 @@ impl<'a> SessionWriter<'a> {
         );
         fresh.id = id;
         fresh.locked_by = locked_by;
+        fresh.priority = stored.meta.priority;
+        fresh.closed = stored.meta.status == Status::Closed;
         app.cassettes[idx] = fresh;
         app.clear_dirty(idx);
         Ok(())
