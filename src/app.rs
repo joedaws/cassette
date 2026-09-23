@@ -257,9 +257,26 @@ impl App {
             return;
         }
         self.cassettes = cassettes;
-        self.cassettes.truncate(MAX_CASSETTES);
+        self.sort_queue();
+        // Keep every closed cassette and the best `MAX_CASSETTES` open ones.
+        // A blind `truncate` here dropped OPEN cassettes off a session with
+        // enough history, because queue order puts the closed ones in the
+        // same list — the cap is on the working set, not on what is kept.
+        let mut open_kept = 0usize;
+        self.cassettes.retain(|c| {
+            if c.closed {
+                return true;
+            }
+            open_kept += 1;
+            open_kept <= MAX_CASSETTES
+        });
         self.baseline_words = self.cassettes.iter().map(|c| c.word_count()).sum();
-        self.focus_idx = self.cassettes.len() - 1;
+        // Land on the last OPEN cassette: resuming focused on a closed one
+        // would open read-only with no way to type.
+        self.focus_idx = self
+            .open_count()
+            .saturating_sub(1)
+            .min(self.cassettes.len().saturating_sub(1));
         self.ensure_focus_visible();
     }
 
@@ -407,10 +424,13 @@ impl App {
     pub fn sort_queue(&mut self) {
         let focused_id = self.cassettes.get(self.focus_idx).map(|c| c.id.clone());
         self.cassettes.sort_by(|a, b| {
-            a.closed
-                .cmp(&b.closed)
-                .then(a.priority.cmp(&b.priority))
-                .then_with(|| a.id.cmp(&b.id))
+            // The id tie-break sorts an UNMINTED cassette (empty id) last
+            // rather than first. Plain string order would put "" ahead of
+            // every real ULID, so a Ctrl+N cassette would jump the queue for
+            // as long as it took `create_cassette` to mint its id. An
+            // unminted cassette is by definition the newest thing here.
+            let key = |c: &Cassette| (c.closed, c.priority, c.id.is_empty(), c.id.clone());
+            key(a).cmp(&key(b))
         });
         if let Some(id) = focused_id {
             if let Some(i) = self.cassettes.iter().position(|c| c.id == id) {
@@ -420,20 +440,34 @@ impl App {
         self.ensure_focus_visible();
     }
 
-    /// How many cassettes are open. Because `sort_queue` puts closed ones
-    /// last, the open set is a prefix — so this is also the index of the
-    /// first closed cassette, and no second collection is needed anywhere.
+    /// How many cassettes are open.
+    ///
+    /// Counted with a filter rather than a `take_while` over the sorted
+    /// prefix: the prefix property holds only while the list is sorted, and
+    /// a count that silently returns 0 because something pushed before
+    /// re-sorting is a trap. Callers that need the prefix — `stack_len`, and
+    /// the scroll window through it — get it from `sort_queue` maintaining
+    /// the order, not from this method assuming it.
     pub fn open_count(&self) -> usize {
-        self.cassettes.iter().take_while(|c| !c.closed).count()
+        self.cassettes.iter().filter(|c| !c.closed).count()
     }
 
     pub fn add_cassette(&mut self) {
-        if self.cassettes.len() >= MAX_CASSETTES {
+        // The cap is on the working set, not the retained history: closed
+        // cassettes fold away and are never written in, so they must not be
+        // what stops a human starting a new one.
+        if self.open_count() >= MAX_CASSETTES {
             self.status_msg = Some(format!("Cassette limit reached ({}).", MAX_CASSETTES));
             return;
         }
         self.cassettes.push(Cassette::new());
-        self.focus_idx = self.cassettes.len() - 1;
+        // Re-sort so the new cassette sits in the open section rather than
+        // after the closed ones, keeping the open-set-is-a-prefix invariant
+        // the fold and the scroll window both rely on. An unminted cassette
+        // carries `i64::MAX`, so it lands last among the open ones — which
+        // is where the human expects a brand new cassette to be.
+        self.sort_queue();
+        self.focus_idx = self.open_count().saturating_sub(1);
         self.clear_status();
         self.ensure_focus_visible();
     }
@@ -882,6 +916,64 @@ mod tests {
         assert_eq!(app.cassettes.len(), MAX_CASSETTES);
     }
 
+    /// Today's `truncate(MAX_CASSETTES)` runs over a list queue order has
+    /// already put closed cassettes inside, so a resumed session with enough
+    /// history drops OPEN cassettes off the end. The cap is on working set.
+    #[test]
+    fn loading_keeps_every_open_cassette_when_closed_ones_fill_the_list() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        let mut loaded = Vec::new();
+        for i in 0..MAX_CASSETTES {
+            let mut c = Cassette::new();
+            c.id = format!("open-{i:02}");
+            c.priority = i as i64 * 10;
+            loaded.push(c);
+        }
+        for i in 0..5 {
+            let mut c = Cassette::new();
+            c.id = format!("closed-{i}");
+            c.closed = true;
+            c.priority = i as i64;
+            loaded.push(c);
+        }
+
+        app.load_cassettes(loaded);
+
+        assert_eq!(
+            app.open_count(),
+            MAX_CASSETTES,
+            "no open cassette is dropped"
+        );
+        assert!(
+            app.cassettes.iter().any(|c| c.id == "open-35"),
+            "including the last one"
+        );
+    }
+
+    /// `Ctrl+N` is capped on the working set too, so closed history never
+    /// blocks a new cassette.
+    #[test]
+    fn add_cassette_caps_on_open_not_total() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for i in 0..5 {
+            let mut c = Cassette::new();
+            c.id = format!("closed-{i}");
+            c.closed = true;
+            app.cassettes.push(c);
+        }
+        app.sort_queue();
+        for _ in 0..MAX_CASSETTES {
+            app.add_cassette();
+        }
+        assert_eq!(app.open_count(), MAX_CASSETTES);
+        assert_eq!(
+            app.cassettes.len(),
+            MAX_CASSETTES + 5,
+            "closed ones are retained"
+        );
+    }
+
     /// Queue order is the store's, not insertion order: open before closed,
     /// then priority, then id as the tie-break. `store::priority::queue_order`
     /// is the authority on this; `sort_queue` must not disagree with it.
@@ -913,6 +1005,27 @@ mod tests {
             "open by priority then id, closed last"
         );
         assert_eq!(app.open_count(), 3);
+    }
+
+    /// An unminted cassette carries an empty id, which plain string order
+    /// would sort ahead of every real ULID — so at equal priority a brand
+    /// new cassette would jump the queue until its id was minted.
+    #[test]
+    fn an_unminted_cassette_sorts_after_minted_ones_at_the_same_priority() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        let mut minted = Cassette::new();
+        minted.id = "01JREAL0000000000000000000".to_string();
+        app.cassettes.push(minted);
+        app.cassettes.push(Cassette::new()); // same i64::MAX priority, empty id
+
+        app.sort_queue();
+
+        assert_eq!(app.cassettes[0].id, "01JREAL0000000000000000000");
+        assert!(
+            app.cassettes[1].id.is_empty(),
+            "the unminted one stays last"
+        );
     }
 
     /// Sorting moves cassettes under `focus_idx`, which is an index. Focus is
