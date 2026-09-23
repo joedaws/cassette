@@ -84,7 +84,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     // the idle nudge; otherwise a vim-style info line. `info_text` is the
     // pure text; the idle-nudge dimming is the only style decision left here.
     let mut info_style = Style::new();
-    if app.status_msg.is_none() && app.mode != Mode::Topic && app.idle_nudge() {
+    if app.status_msg.is_none() && app.mode != Mode::Topic && app.idle_nudge() && !app.read_only {
         info_style = Style::new().fg(Color::DarkGray);
     }
     frame.render_widget(
@@ -131,7 +131,11 @@ pub(crate) fn info_text(app: &App) -> String {
     if let Some(m) = &app.status_msg {
         return m.clone();
     }
-    if app.idle_nudge() {
+    // Not while locked out: "keep writing" is advice the user cannot take,
+    // and it would shadow the one line saying why — the same shadowing the
+    // busy banner was rescued from one branch below. Watching another writer
+    // work is not idling, so the nudge is wrong here on its own terms.
+    if app.idle_nudge() && !app.read_only {
         return "· · ·  tape's still rolling — keep writing  · · ·".to_string();
     }
     let c = &app.cassettes[app.focus_idx];
@@ -856,6 +860,34 @@ mod tests {
             line.contains("refactor-agent"),
             "the user must know WHO holds it: {line}"
         );
+    }
+
+    /// Ten quiet seconds on a cassette an agent holds must not replace the
+    /// reason the keyboard is dead with advice to keep typing. The nudge
+    /// sits ABOVE the read-only arm in `info_text`, so this is the same
+    /// shadowing class the busy banner was rescued from.
+    #[test]
+    fn the_idle_nudge_does_not_shadow_the_busy_banner() {
+        let mut app = App::new(
+            Some(600),
+            None,
+            None,
+            "01JTESTSESSN00000000000000".to_string(),
+        );
+        app.idle_secs = App::IDLE_NUDGE_SECS + 5;
+        assert!(
+            app.idle_nudge(),
+            "fixture must actually be nudging, or this proves nothing"
+        );
+
+        app.read_only = true;
+        app.busy_holder = Some("refactor-agent".to_string());
+        let line = crate::ui::info_text(&app);
+        assert!(
+            line.contains("READ ONLY (open by refactor-agent)"),
+            "the banner must win over the nudge: {line}"
+        );
+        assert!(!line.contains("still rolling"), "{line}");
     }
 
     /// Busy means wait; sticky means go and unlock it. A display that blurs

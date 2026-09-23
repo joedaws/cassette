@@ -136,7 +136,12 @@ impl App {
     }
 
     /// Show `msg` on the status line for `STATUS_FLASH_SECS`, with a bell.
-    fn flash(&mut self, msg: String) {
+    ///
+    /// `pub(crate)` for `main.rs`'s `try_acquire`, which reports a lock
+    /// failure that is *not* ordinary contention this way: those have no
+    /// banner of their own, and being transient news is exactly what keeps
+    /// them out of the standing-condition role `status_msg` must not take on.
+    pub(crate) fn flash(&mut self, msg: String) {
         self.status_msg = Some(msg);
         self.status_ticks = Some(STATUS_FLASH_SECS);
         self.bell = true;

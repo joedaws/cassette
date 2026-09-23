@@ -401,11 +401,14 @@ fn main() -> io::Result<()> {
         // read-only rather than refusing to start: refusing would let a
         // running agent lock a human out of their own session, and accepting
         // keystrokes with no guard to write them through would lose them.
+        // Through `try_acquire`, not by hand: it is the one place that
+        // decides what a failed acquire looks like, and hand-setting
+        // `read_only` here used to skip `busy_holder` — so the opening
+        // frames named nobody until the first tick's retry filled it in,
+        // and a non-contention failure was reported only by an `eprintln!`
+        // the alternate screen immediately wiped.
         let focus = app.focus_idx;
-        if let Err(e) = w.acquire(&mut app, focus) {
-            app.read_only = true;
-            eprintln!("cassette: {e} — opening read-only");
-        }
+        try_acquire(&mut app, w, focus);
     }
 
     // Restore the terminal before the default hook prints, so the panic
@@ -960,6 +963,19 @@ fn try_acquire(app: &mut App, w: &mut session_writer::SessionWriter, idx: usize)
         Err(e) => {
             app.read_only = true;
             app.busy_holder = busy_holder_name(&e);
+            // Ordinary contention is the case the banner was built for, and
+            // it says everything there is to say. Anything else — an `Io`
+            // from `acquire`'s own flush of the OUTGOING cassette (a full
+            // disk, a vanished session directory), a `NoSuchCassette` — has
+            // no banner of its own and would otherwise show as a bare
+            // `-- READ ONLY --` beside a help row blaming a writer who does
+            // not exist, while the user's unflushed words sit in memory.
+            // `flash` and not `status_msg` directly: this is news, it
+            // expires on its own, and each tick's `retry_lock` re-reports it
+            // for as long as the condition lasts.
+            if !matches!(e, store::lock::LockError::Busy { .. }) {
+                app.flash(format!("cannot take this cassette's lock: {e}"));
+            }
         }
     }
 }
@@ -1648,6 +1664,106 @@ mod tests {
         id
     }
 
+    /// Bump a cassette file's mtime well clear of whatever the filesystem
+    /// gave it, so the stat pass must see the change. Without this the test
+    /// would be asserting on mtime granularity rather than on sync.
+    fn touch_forward(store: &store::Store, session: &str, id: &str) {
+        let path = store
+            .cassette_path(session, id)
+            .expect("cassette path")
+            .expect("cassette exists");
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for touch");
+        f.set_modified(SystemTime::now() + std::time::Duration::from_secs(5))
+            .expect("set mtime");
+    }
+
+    /// The phase's headline feature, end to end in one process: an agent
+    /// rewrites a cassette the TUI is NOT holding, and the next tick puts
+    /// those words on screen.
+    ///
+    /// Every part of this was tested in isolation — `merge_external` in
+    /// `app.rs`, the store contract in `tests/cli.rs` — but the seam between
+    /// them was not: `read_dir` -> mtime compare -> `scan_session` ->
+    /// `split_sides` -> merge. Deleting the `merge_external` call at the end
+    /// of `sync_external_writes` left the whole suite green.
+    #[test]
+    fn sync_lands_an_external_write_on_screen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "## Side A\n\nmine\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id.clone();
+        c.insert_str("mine");
+        app.cassettes.push(c);
+
+        // First sync only seeds the mtime map: nothing has changed yet.
+        let mut mtimes = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        assert_eq!(app.cassettes[0].side_a_text(), "mine", "nothing yet");
+
+        // The agent writes, through the same store API `queue write` uses.
+        let path = store
+            .cassette_path(&session, &id)
+            .expect("path")
+            .expect("exists");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let (fm, _) = raw.split_at(raw.rfind("---\n").expect("frontmatter end") + 4);
+        std::fs::write(&path, format!("{fm}\n## Side A\n\nagent words\n")).expect("write");
+        touch_forward(&store, &session, &id);
+
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        assert_eq!(
+            app.cassettes[0].side_a_text().trim(),
+            "agent words",
+            "the agent's words must reach the screen"
+        );
+    }
+
+    /// A cassette an agent creates with `queue new` appears in the stack at
+    /// its queue position, and does NOT steal focus from the human.
+    #[test]
+    fn sync_shows_a_cassette_another_writer_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let mine = store_cassette(&store, &session, 20, "## Side A\n\nmine\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = mine.clone();
+        app.cassettes.push(c);
+        app.focus_idx = 0;
+
+        let mut mtimes = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        assert_eq!(app.cassettes.len(), 1, "only mine so far");
+
+        // Priority 10 sorts ahead of mine (20), so it lands at index 0 —
+        // which is exactly the case that could silently move focus.
+        let newcomer = store_cassette(&store, &session, 10, "## Side A\n\nfrom the agent\n");
+
+        sync_external_writes(&mut app, &store, None, &mut mtimes);
+
+        assert_eq!(app.cassettes.len(), 2, "the newcomer must appear");
+        assert_eq!(app.cassettes[0].id, newcomer, "at its queue position");
+        assert_eq!(
+            app.cassettes[0].side_a_text().trim(),
+            "from the agent",
+            "with its text"
+        );
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, mine,
+            "focus must still be on MY cassette, not dragged by an insertion"
+        );
+    }
+
     #[test]
     fn sync_never_inserts_a_newcomer_once_the_cap_is_reached() {
         // Unbounded growth from a busy multi-writer session would be worse
@@ -1845,16 +1961,19 @@ mod tests {
         );
     }
 
-    /// Being busy is a standing condition, so it is rendered from
-    /// `read_only`/`busy_holder` and must NOT be copied into `status_msg`.
-    /// `status_msg` is the one branch that outranks the whole info line, and
-    /// it belongs to transient news — a reached word goal, an expired timer.
-    /// If a failed acquire wrote there it would both cost the user ln/col,
-    /// char count, cassette position and side tag for as long as the lock is
-    /// held, and destroy whatever flash happened to be showing when they
-    /// tabbed onto the busy cassette.
+    /// Contention has a banner; nothing else does. An `Io` (`acquire`
+    /// propagates `flush_held`'s failure — a full disk, a session directory
+    /// pulled out from under us) or a `NoSuchCassette` would otherwise show
+    /// as a bare `-- READ ONLY --` beside a help row blaming a writer who
+    /// does not exist, while the words that failed to flush sit in memory.
+    /// It must reach the screen, and as a flash: news expires, so it cannot
+    /// become the standing message the banner has to own.
+    ///
+    /// The mirror property — that ordinary `Busy` leaves an unrelated flash
+    /// alone — needs a genuinely held lock and so lives in
+    /// `session_writer`'s cross-process test, not here.
     #[test]
-    fn a_failed_acquire_leaves_an_unrelated_flash_alone() {
+    fn a_non_contention_lock_failure_is_reported_not_silently_read_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = store::Store::new(dir.path().to_path_buf());
         let session = seeded_session(&store, None);
@@ -1864,9 +1983,6 @@ mod tests {
         let mut c = cassette::Cassette::new();
         c.id = id.clone();
         app.cassettes.push(c);
-
-        // A real flash is showing when the acquire is attempted.
-        app.status_msg = Some("word goal reached".to_string());
 
         // A second writer in this process cannot contend (HELD is
         // process-global), so drive the `Err` arm through the one input that
@@ -1878,9 +1994,16 @@ mod tests {
 
         assert!(app.read_only, "a failed acquire must open read-only");
         assert_eq!(
-            app.status_msg.as_deref(),
-            Some("word goal reached"),
-            "the busy state belongs in read_only/busy_holder, not on top of a flash"
+            app.busy_holder, None,
+            "there is no holder to name: this was not contention"
+        );
+        let msg = app
+            .status_msg
+            .as_deref()
+            .expect("a failure with no banner of its own must still be reported");
+        assert!(
+            msg.contains("01JNOSUCHCASSETTE000000000"),
+            "the report must carry the real cause: {msg}"
         );
     }
 

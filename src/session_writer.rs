@@ -904,6 +904,19 @@ mod tests {
         crate::retry_lock(&mut app, Some(&mut w));
         assert!(app.read_only, "still blocked: the holder hasn't let go");
 
+        // Contention is a standing condition with a banner of its own, so a
+        // retry that stays blocked must not spend `status_msg` on saying so
+        // again — that is where transient news lives, and news showing over
+        // a busy cassette has to survive the ticks that keep failing.
+        app.flash("goal reached — 500 words. keep rolling!".to_string());
+        crate::retry_lock(&mut app, Some(&mut w));
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("goal reached — 500 words. keep rolling!"),
+            "a still-contended retry must not clobber an unrelated flash"
+        );
+        app.status_msg = None;
+
         // The holder releases: closing its stdin hands it EOF, so it
         // finishes its write and exits normally — no sleep, no poll; the
         // pipe close is the synchronisation.
