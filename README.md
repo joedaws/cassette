@@ -115,6 +115,7 @@ sheet that follows the current mode.
 | `h j k l`, `w b`, `0 $`, `gg G` | normal | motions (rows are display rows) |
 | `x`, `dd`, `u` | normal | delete char / line, undo |
 | `t` | normal | set the cassette's topic (Enter saves, blank clears, Esc cancels) |
+| `z` | normal | open / shut the `▸ N closed` fold of closed cassettes |
 | `q` | normal | quit and save |
 | `Tab` / `Shift+Tab` | both | next / previous cassette |
 | `Ctrl+N` | both | new cassette |
@@ -138,6 +139,10 @@ editable on its own — there's nothing to press to notice. Since agents drive
 the queue entirely through the CLI and never need the TUI running, the norm is
 to close a session when you're done with it rather than leave the tape
 loaded — that's what actually releases the lock.
+
+A cassette that has been **closed** (`queue close`) is read-only for a different reason, and says
+so differently: `-- CLOSED --` in the info line, with the help row pointing at `cassette queue
+reopen`. Waiting won't make a closed cassette editable, only reopening it will.
 
 Undo is per side, per cassette, and entering insert mode takes one snapshot —
 so a single `u` takes back the whole burst you just typed. Pasting works the
@@ -169,9 +174,10 @@ reel. When time runs out the timer turns red and the bell rings — but the
 session keeps going so you can finish the thought. Hitting the word goal
 rings the bell once and locks the stats green.
 
-If a timed session goes quiet for ~10 seconds, the info line shows a gentle
-nudge — *tape's still rolling — keep writing* — that clears on your next
-keypress. Untimed sessions are never nudged.
+If a timed or record session goes quiet for ~10 seconds, the info line shows
+a gentle nudge — *tape's still rolling — keep writing* — that clears on your
+next keypress. Other sessions are never nudged, and neither is a cassette you
+are locked out of: watching another writer work isn't idling.
 
 ### Record mode
 
@@ -238,46 +244,6 @@ cassette resume 01K5GQ2R8V…   # …or by the id `find` printed
 cassette new myjournal        # start a *new* session aliased myjournal
 ```
 
-### Getting the words out
-
-The whole point is that your writing is plain text you own, so a session
-renders to one flat markdown file:
-
-```
-cassette export <id>              # to stdout, so it pipes
-cassette export <id> --out day.md # …or to a file
-```
-
-```
-# Cassette 1 — morning pages
-
-## Side A
-
-the first words of the day
-
-# Cassette 2 — wrapped up (closed)
-
-## Side A
-
-finished thoughts
-
-# Cassette 3 — 01M3600000000000000000BAD.md (unreadable: frontmatter is unparseable)
-```
-
-Closed cassettes are included and marked, and a file too damaged to parse
-gets a heading of its own rather than vanishing — an export is the archive,
-and a quiet one would be a lossy one. It takes no locks, so exporting a
-session an agent is writing works fine.
-
-### A note on where the store lives
-
-Keep it on a local disk. If `$CASSETTE_DATA_DIR` resolves under Dropbox,
-iCloud Drive, OneDrive or Google Drive, cassette prints a one-line warning
-and carries on: locks are local kernel state and don't sync, so two machines
-editing the same session get no mutual exclusion at all — the one guarantee
-the store exists to provide. Network mounts (NFS/SMB) have the same problem
-and can't be detected cheaply, so they're unsupported for the same reason.
-
 `cassette sessions` is the one to reach for. Sessions are named by ULID, so
 there's rarely a name to type — the picker lets you arrow to the one you
 want instead of copying 26 characters:
@@ -310,6 +276,53 @@ whichever writer opens them — and keeps writing to the same session. The
 session's stats start from zero on resume: the word-goal reel and the
 closing recap count only what you write this sitting (`12 new words in 4:10
 (773 total)`).
+
+### Getting the words out
+
+The whole point is that your writing is plain text you own, so a session
+renders to one flat markdown file:
+
+```
+cassette export <id>              # to stdout, so it pipes
+cassette export <id> --out day.md # …or to a file
+```
+
+```
+# Cassette 1 — morning pages
+
+## Side A
+
+the first words of the day
+
+# Cassette 2 — wrapped up (closed)
+
+## Side A
+
+finished thoughts
+
+# Cassette 3 — 01M3600000000000000000BAD.md (unreadable: frontmatter is unparseable)
+```
+
+Closed cassettes are included and marked, and a file too damaged to parse
+gets a heading of its own rather than vanishing — an export is the archive,
+and a quiet one would be a lossy one. It takes no locks, so exporting a
+session an agent is writing works fine.
+
+`export` is the verbatim record. For the *document* a session was converging
+on — one argument rather than a numbered list of cassettes, with unresolved
+questions kept visible — the `cassette-writeup` skill in
+[`.claude/skills/`](.claude/skills/cassette-writeup/SKILL.md) has an agent
+write it up to a file. It needs a model, so it's a skill rather than a
+subcommand.
+
+### A note on where the store lives
+
+Keep it on a local disk. If `$CASSETTE_DATA_DIR` resolves under Dropbox,
+iCloud Drive, OneDrive or Google Drive, cassette prints a one-line warning
+and carries on: locks are local kernel state and don't sync, so two machines
+editing the same session get no mutual exclusion at all — the one guarantee
+the store exists to provide. Network mounts (NFS/SMB) have the same problem
+and can't be detected cheaply, so they're unsupported for the same reason.
 
 ## Saving
 
@@ -396,8 +409,10 @@ at the keyboard, and it shows differently in the TUI too: a
 banner's transient "open by".
 
 **The TUI watches the rest of the store too.** Once a second it stats every
-cassette file in the session and re-reads any whose mtime moved since the
-last tick — skipping the one it currently holds, since nobody else can have
+cassette file in the session and re-reads any that changed since the last
+tick — judged by modification time, size and inode together, because every
+store write renames a fresh file into place and a timestamp alone can miss a
+second write within the same tick — skipping the one it currently holds, since nobody else can have
 written it. A cassette it has never seen before appears in the stack,
 minimized, at its queue priority, without moving focus off whatever you're
 writing; a cassette already on screen has its text updated in place. If
@@ -475,6 +490,7 @@ queue write <ID> --session <ID> [--side a|b] [--append|--replace]
                                                       # (side: a, default; write mode: replace, default)
 queue close <ID> --session <ID> [-m <TEXT>]
 queue reopen <ID> --session <ID>
+queue topic <ID> --session <ID> <TOPIC>             # set a cassette's topic; "" clears it
 queue move <ID> --session <ID> (--before|--after) <ID>
 queue lock <ID> --session <ID>                       # sticky-lock a cassette to yourself (human-only)
 queue unlock <ID> --session <ID>                     # clear a cassette's sticky lock, whoever holds it (human-only)
@@ -491,14 +507,25 @@ second, privileged (`human`) identity; only an unregistered `$USER` bootstraps
 a new writer on first use. `queue list` and `queue show` need no identity at
 all — they attribute nothing.
 
+**A name taken from `$USER` is credited, but carries no human authority.** An
+agent runs in your shell and inherits your `$USER`, so `$USER` alone can't tell
+the two of you apart. Writes are still attributed to that name. But for the
+things only a human may do — writing or closing over a sticky lock, `queue
+lock`, `queue unlock` — the writer is treated as an agent unless it was named
+explicitly with `--writer` (or `$CASSETTE_WRITER`). The refusal says so and
+names the fix (`… pass --writer joseph to act as yourself`), and `writer
+whoami` flags an identity that came from `$USER` alone. For the same reason,
+don't export `$CASSETTE_WRITER` globally in a shell an agent works in.
+
 Exit codes beyond the usual 0/1/2: **3** another writer currently holds the
 cassette's lock (try a different one, or wait); **4** the cassette carries a
-sticky `locked_by` claim and the acting writer is an agent, so only a human may
-write or close it — or a human's `queue lock` found it already claimed by a
+sticky `locked_by` claim and the acting writer is an agent (or a name taken
+from `$USER` alone), so only an explicitly named human may write, close or
+retitle it — or a human's `queue lock` found it already claimed by a
 *different* writer; **5** `queue next` found no open cassettes at all; **6**
 `queue new`/`queue reopen` would exceed the session's open-cassette cap
-(`max_open`, config key, default 36). An agent invoking `queue lock` or
-`queue unlock` at all is exit **2**, not 4 — it has misused the CLI, not run
+(`max_open`, config key, default 36). An agent (or a bare `$USER`) invoking
+`queue lock` or `queue unlock` at all is exit **2**, not 4 — it has misused the CLI, not run
 into someone else's claim.
 
 Exit 1 is reserved for I/O failures the caller cannot fix by trying a
@@ -525,8 +552,8 @@ JSON-success contract above only names the three queue reads), but
 `cassette session list --json | jq` will fail to parse, so don't expect JSON
 from them.
 
-Every mutating command (`queue new`, `write`, `close`, `reopen`, `move`,
-`lock`, `unlock`, and the `session`/`writer` commands) keeps the same exit
+Every mutating command (`queue new`, `write`, `close`, `reopen`, `topic`,
+`move`, `lock`, `unlock`, and the `session`/`writer` commands) keeps the same exit
 code and successful output it has without `--json`: `queue new` still prints
 the new cassette's bare ULID and nothing else, and every other mutating
 command prints nothing extra. **Any** command, on failure, emits a one-line
@@ -587,8 +614,9 @@ queue lock <ID> --session <ID>       # claim it — sets locked_by to you
 queue unlock <ID> --session <ID>     # clear it, whoever holds it
 ```
 
-**Only a human writer may set or clear the lock.** An agent calling either
-command exits 2 — misuse of the CLI, not a claim to escalate over. Locking
+**Only a human writer may set or clear the lock**, named explicitly with
+`--writer` or `$CASSETTE_WRITER`. An agent calling either command, or a
+writer resolved from `$USER` alone, exits 2 — misuse of the CLI, not a claim to escalate over. Locking
 is idempotent for its own holder (locking a cassette you already hold is a
 no-op, exit 0) and `unlock` on a cassette that isn't locked is likewise a
 no-op — neither writes the file. Locking a cassette a *different* writer
@@ -602,8 +630,9 @@ Once set, the lock has two effects on an agent, and none on a human:
   next-work-item query — the whole point of removing something from an
   agent's queue — even while it is otherwise open and unlocked at the flock
   level.
-- **`queue write` and `queue close` refuse it**, exit 4, for an agent. A
-  human may write or close a locked cassette freely; the lock only ever
+- **`queue write`, `queue close` and `queue topic` refuse it**, exit 4, for
+  an agent. A human named with `--writer` may write, close or retitle a
+  locked cassette freely; the lock only ever
   restricts agents, never other humans, so one terminal session can't lock
   another human out of their own work.
 
@@ -727,15 +756,19 @@ cassette — a freewriting TUI
 Usage: cassette [OPTIONS] [COMMAND]
 
 Commands:
-  new      start a session in a named note
-  today    open today's note, named by date
-  resume   load a saved note back into the TUI (default: most recently modified)
-  stats    streak, weekly/monthly notes and words, totals
-  find     list recent notes newest-first; TEXT filters by name, topic, or content
-  themes   list available themes (built-in and from config.toml)
-  queue    work with the shared cassette queue
-  writer   register and inspect writers
-  session  create and inspect sessions
+  new          start a new session with this alias (never resumes an existing one)
+  today        open today's session (aliased by date), creating it if needed
+  resume       reopen a session: the newest, the newest with this alias, or this id
+  stats        streak, weekly/monthly sessions and words, totals
+  find         list recent sessions newest-first; TEXT filters by id, alias, topic or content
+  themes       list available themes (built-in and from config.toml)
+  sessions     pick a session to open from a list of recent ones
+  export       render a session to a single flat markdown file (stdout by default)
+  completions  print shell completions to stdout
+  man          print the man page to stdout, or write every page to a directory
+  queue        work with the shared cassette queue
+  writer       register and inspect writers
+  session      create and inspect sessions
 
 Options:
   -t <MINUTES>         countdown timer in minutes
@@ -744,28 +777,21 @@ Options:
   -T <TEMPLATE>        start with one cassette per topic from the named [templates] entry
       --theme <NAME>   color theme for this session (overrides config)
   -R, --record         record mode: no deletions, the tape only rolls forward
-  -o, --output         print to stdout on quit instead of writing a file
-      --writer <NAME>  registered writer to act as (default: $CASSETTE_WRITER, else $USER — only $USER may register on first use)
+  -o, --output         print the session to stdout on quit instead of saving it
+      --writer <NAME>  registered writer to act as (default: $CASSETTE_WRITER, else $USER — $USER alone may register on first use but carries no human authority)
       --json           emit machine-readable JSON (full data on queue list/next/show; {"error","code"} on any command that fails)
   -h, --help           Print help
   -V, --version        Print version
 ```
 
 `queue`, `writer`, and `session` are the session-store commands — see
-"The session store" above for the full command surface.
-
-The help text above still says "note" throughout (`new`, `today`, `resume`,
-`find`) — that wording predates the session store and hasn't caught up
-(clap generates it straight from `src/cli.rs`'s doc comments), but the
-behavior underneath it is store-backed: `new NAME` creates a session
-aliased `NAME`, `today` opens or creates the session aliased with today's
-date, `resume [NAME]` loads a session back into the TUI by alias or by id
-(default: the most recently created session), and `find [TEXT]` lists recent sessions
-newest-first (date, words, topics, first line of the top cassette),
-filtered by `TEXT` when given. A bare `cassette` (no subcommand) starts a
-fresh, unaliased session. `stats` reads streak/weekly/monthly totals from
-the session store, not from any note file — see "A daily practice" above
-for what that means for notes written before the store existed.
+"The session store" above for the full command surface. `completions` and
+`man` generate shell completions and man pages from this same definition, so
+they always match it; see [docs/distribution.md](docs/distribution.md) for
+installing them. A bare `cassette` (no subcommand) starts a fresh, unaliased
+session. `stats` reads streak/weekly/monthly totals from the session store,
+not from any note file — see "A daily practice" above for what that means for
+notes written before the store existed.
 
 ## For maintainers
 
