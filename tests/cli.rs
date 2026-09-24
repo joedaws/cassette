@@ -1531,7 +1531,15 @@ fn queue_lock_then_an_agent_is_refused_and_a_human_clears_it() {
     assert_eq!(reg.status.code(), Some(0), "{}", stderr(&reg));
 
     let locked = Command::new(bin())
-        .args(["queue", "lock", &cid, "--session", &sid])
+        .args([
+            "--writer",
+            "joseph",
+            "queue",
+            "lock",
+            &cid,
+            "--session",
+            &sid,
+        ])
         .env("CASSETTE_DATA_DIR", &root)
         .env("USER", "joseph")
         .output()
@@ -1548,7 +1556,15 @@ fn queue_lock_then_an_agent_is_refused_and_a_human_clears_it() {
     assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
 
     let cleared = Command::new(bin())
-        .args(["queue", "unlock", &cid, "--session", &sid])
+        .args([
+            "--writer",
+            "joseph",
+            "queue",
+            "unlock",
+            &cid,
+            "--session",
+            &sid,
+        ])
         .env("CASSETTE_DATA_DIR", &root)
         .env("USER", "joseph")
         .output()
@@ -1586,7 +1602,15 @@ fn queue_write_is_blocked_by_a_sticky_lock() {
     assert_eq!(reg.status.code(), Some(0), "{}", stderr(&reg));
 
     let locked = Command::new(bin())
-        .args(["queue", "lock", &cid, "--session", &sid])
+        .args([
+            "--writer",
+            "joseph",
+            "queue",
+            "lock",
+            &cid,
+            "--session",
+            &sid,
+        ])
         .env("CASSETTE_DATA_DIR", &root)
         .env("USER", "joseph")
         .output()
@@ -1612,9 +1636,19 @@ fn queue_write_is_blocked_by_a_sticky_lock() {
     let refused = child.wait_with_output().expect("wait");
     assert_eq!(refused.status.code(), Some(4), "{}", stderr(&refused));
 
-    // A human may still write over the same sticky lock.
+    // A human may still write over the same sticky lock — named
+    // explicitly, since a writer taken from `$USER` carries no human
+    // authority.
     let mut child = Command::new(bin())
-        .args(["queue", "write", &cid, "--session", &sid])
+        .args([
+            "--writer",
+            "joseph",
+            "queue",
+            "write",
+            &cid,
+            "--session",
+            &sid,
+        ])
         .env("CASSETTE_DATA_DIR", &root)
         .env("USER", "joseph")
         .stdin(std::process::Stdio::piped())
@@ -2349,4 +2383,105 @@ fn a_cassette_written_behind_the_tuis_back_is_visible_to_the_next_reader() {
     );
     let body = std::fs::read_to_string(&path).expect("read");
     assert!(body.contains("agent words"), "{body}");
+}
+
+#[test]
+fn an_implicit_user_cannot_write_over_a_sticky_lock_but_an_explicit_one_can() {
+    // An agent runs in the human's shell and inherits `$USER`, which names
+    // the human's own registered identity. Only a name given explicitly —
+    // `--writer` or `$CASSETTE_WRITER` — carries human authority.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let run_as = |args: &[&str], env: &[(&str, &str)], stdin: &[u8]| {
+        let mut c = Command::new(bin());
+        c.args(args)
+            .env("CASSETTE_DATA_DIR", &root)
+            .env_remove("CASSETTE_WRITER")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        let mut child = c.spawn().expect("spawn");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(stdin)
+            .expect("stdin write");
+        child.wait_with_output().expect("wait")
+    };
+    let sid = String::from_utf8_lossy(&run_as(&["session", "new"], &[], b"").stdout)
+        .trim()
+        .to_string();
+    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    let cassettes = root.join("sessions").join(&sid).join("cassettes");
+    std::fs::create_dir_all(&cassettes).expect("mkdir");
+    std::fs::write(
+        cassettes.join(format!("gratitude-{ID}.md")),
+        format!(
+            "---\nid: {ID}\ntopic: gratitude\npriority: 10\nstatus: open\n\
+             locked_by: 01WRITER0000000000000000AB\ncreated_by: w\nlast_writer: w\n\
+             updated_at: 2026-09-14T09:25:57Z\n---\n\n## Side A\n\nhello\n"
+        ),
+    )
+    .expect("cassette");
+    let reg = run_as(
+        &["writer", "register", "--name", "joseph", "--kind", "human"],
+        &[],
+        b"",
+    );
+    assert_eq!(reg.status.code(), Some(0), "{}", stderr(&reg));
+
+    let implicit = run_as(
+        &["queue", "write", ID, "--session", &sid],
+        &[("USER", "joseph")],
+        b"x\n",
+    );
+    assert_eq!(implicit.status.code(), Some(4), "{}", stderr(&implicit));
+    assert!(
+        stderr(&implicit).contains("--writer joseph"),
+        "{}",
+        stderr(&implicit)
+    );
+
+    let via_env = run_as(
+        &["queue", "write", ID, "--session", &sid],
+        &[("USER", "joseph"), ("CASSETTE_WRITER", "joseph")],
+        b"y\n",
+    );
+    assert_eq!(
+        via_env.status.code(),
+        Some(0),
+        "$CASSETTE_WRITER is explicit: {}",
+        stderr(&via_env)
+    );
+
+    let explicit = run_as(
+        &[
+            "--writer",
+            "joseph",
+            "queue",
+            "write",
+            ID,
+            "--session",
+            &sid,
+        ],
+        &[("USER", "joseph")],
+        b"z\n",
+    );
+    assert_eq!(explicit.status.code(), Some(0), "{}", stderr(&explicit));
+
+    let unlock_implicit = run_as(
+        &["queue", "unlock", ID, "--session", &sid],
+        &[("USER", "joseph")],
+        b"",
+    );
+    assert_eq!(
+        unlock_implicit.status.code(),
+        Some(2),
+        "{}",
+        stderr(&unlock_implicit)
+    );
 }

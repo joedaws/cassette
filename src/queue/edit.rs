@@ -8,7 +8,7 @@
 //! `Store::lock_many`. `move_cassette` locks only the one cassette it
 //! ultimately writes; see its doc comment for why that is the whole design.
 
-use super::{require_error_to_queue_error, resolve_error_to_queue_error, QueueError, WriterSource};
+use super::{resolve_acting, Acting, QueueError, WriterSource};
 use crate::store::lock::{Attribution, LockError};
 use crate::store::meta::{CassetteMeta, Status};
 use crate::store::writers::Kind;
@@ -77,14 +77,7 @@ pub fn new(
     // Same rationale as `write::write`: registering/looking up the writer
     // happens before anything else, so a typo'd `--writer` or a registry
     // read failure is reported before the session is even scanned.
-    let (writer, _kind) = match source {
-        WriterSource::Env => store
-            .resolve_writer(who_name)
-            .map_err(resolve_error_to_queue_error)?,
-        WriterSource::Flag => store
-            .require_writer(who_name)
-            .map_err(require_error_to_queue_error)?,
-    };
+    let writer = resolve_acting(store, who_name, source)?.id;
 
     let scan = store
         .scan_session(session)
@@ -219,10 +212,18 @@ fn renumber_lock_error(session: &str, e: LockError) -> QueueError {
 /// Phase 4b introduced this check while nothing yet set `locked_by` — `queue
 /// lock`/`unlock` (below) are 4c, and now do. The rule landed before the
 /// command that makes it reachable, rather than the two arriving together.
-fn close_permitted(kind: Kind, locked_by: Option<&str>) -> Result<(), QueueError> {
-    match (kind, locked_by) {
+///
+/// Reads `acting.authority`, so a writer taken from `$USER` is refused even
+/// when that name is registered human — see `queue::Acting`.
+fn close_permitted(
+    acting: &Acting,
+    who_name: &str,
+    locked_by: Option<&str>,
+) -> Result<(), QueueError> {
+    match (acting.authority, locked_by) {
         (Kind::Agent, Some(holder)) => Err(QueueError::Sticky(format!(
-            "cassette is locked by '{holder}' — only a human may close it"
+            "cassette is locked by '{holder}' — only a human may close it{}",
+            acting.hint(who_name)
         ))),
         _ => Ok(()),
     }
@@ -272,14 +273,8 @@ pub fn close(
 ) -> Result<(), QueueError> {
     let line = message.map(close_message_line).transpose()?;
 
-    let (writer, kind) = match source {
-        WriterSource::Env => store
-            .resolve_writer(who_name)
-            .map_err(resolve_error_to_queue_error)?,
-        WriterSource::Flag => store
-            .require_writer(who_name)
-            .map_err(require_error_to_queue_error)?,
-    };
+    let acting = resolve_acting(store, who_name, source)?;
+    let writer = acting.id.clone();
     let who = Attribution::for_now(&writer, who_name);
 
     let guard = store
@@ -289,7 +284,7 @@ pub fn close(
     let current = guard
         .read()
         .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
-    close_permitted(kind, current.meta.locked_by.as_deref())?;
+    close_permitted(&acting, who_name, current.meta.locked_by.as_deref())?;
 
     let mut m = current.meta;
     m.status = Status::Closed;
@@ -324,14 +319,7 @@ pub fn reopen(
     source: WriterSource,
     max_open: usize,
 ) -> Result<(), QueueError> {
-    let (writer, _kind) = match source {
-        WriterSource::Env => store
-            .resolve_writer(who_name)
-            .map_err(resolve_error_to_queue_error)?,
-        WriterSource::Flag => store
-            .require_writer(who_name)
-            .map_err(require_error_to_queue_error)?,
-    };
+    let writer = resolve_acting(store, who_name, source)?.id;
     let who = Attribution::for_now(&writer, who_name);
 
     let scan = store
@@ -390,18 +378,13 @@ pub fn lock(
     who_name: &str,
     source: WriterSource,
 ) -> Result<(), QueueError> {
-    let (writer, kind) = match source {
-        WriterSource::Env => store
-            .resolve_writer(who_name)
-            .map_err(resolve_error_to_queue_error)?,
-        WriterSource::Flag => store
-            .require_writer(who_name)
-            .map_err(require_error_to_queue_error)?,
-    };
-    if kind != Kind::Human {
-        return Err(QueueError::Usage(
-            "queue lock is human-only — an agent may not set a sticky lock".to_string(),
-        ));
+    let acting = resolve_acting(store, who_name, source)?;
+    let writer = acting.id.clone();
+    if acting.authority != Kind::Human {
+        return Err(QueueError::Usage(format!(
+            "queue lock is human-only — an agent may not set a sticky lock{}",
+            acting.hint(who_name)
+        )));
     }
     let who = Attribution::for_now(&writer, who_name);
 
@@ -449,18 +432,13 @@ pub fn unlock(
     who_name: &str,
     source: WriterSource,
 ) -> Result<(), QueueError> {
-    let (writer, kind) = match source {
-        WriterSource::Env => store
-            .resolve_writer(who_name)
-            .map_err(resolve_error_to_queue_error)?,
-        WriterSource::Flag => store
-            .require_writer(who_name)
-            .map_err(require_error_to_queue_error)?,
-    };
-    if kind != Kind::Human {
-        return Err(QueueError::Usage(
-            "queue unlock is human-only — an agent may not clear a sticky lock".to_string(),
-        ));
+    let acting = resolve_acting(store, who_name, source)?;
+    let writer = acting.id.clone();
+    if acting.authority != Kind::Human {
+        return Err(QueueError::Usage(format!(
+            "queue unlock is human-only — an agent may not clear a sticky lock{}",
+            acting.hint(who_name)
+        )));
     }
     let who = Attribution::for_now(&writer, who_name);
 
@@ -741,14 +719,7 @@ pub fn move_cassette(
         )));
     }
 
-    let (writer, _kind) = match source {
-        WriterSource::Env => store
-            .resolve_writer(who_name)
-            .map_err(resolve_error_to_queue_error)?,
-        WriterSource::Flag => store
-            .require_writer(who_name)
-            .map_err(require_error_to_queue_error)?,
-    };
+    let writer = resolve_acting(store, who_name, source)?.id;
 
     // Step 1: no locks held.
     let priority = match compute_move_target(store, session, id, &anchor)? {
@@ -1045,12 +1016,24 @@ mod tests {
         // The permission boundary this phase's writer `kind` exists for.
         // Nothing in 4b SETS locked_by — `queue lock` is 4c — so this is the
         // rule being in place before the command that makes it reachable.
+        let agent = Acting {
+            id: "a".into(),
+            authority: Kind::Agent,
+            registered: Kind::Agent,
+            source: WriterSource::Flag,
+        };
+        let human = Acting {
+            id: "h".into(),
+            authority: Kind::Human,
+            registered: Kind::Human,
+            source: WriterSource::Flag,
+        };
         assert!(matches!(
-            close_permitted(Kind::Agent, Some("01WRITER")),
+            close_permitted(&agent, "bot", Some("01WRITER")),
             Err(QueueError::Sticky(_))
         ));
-        assert!(close_permitted(Kind::Human, Some("01WRITER")).is_ok());
-        assert!(close_permitted(Kind::Agent, None).is_ok());
+        assert!(close_permitted(&human, "joseph", Some("01WRITER")).is_ok());
+        assert!(close_permitted(&agent, "bot", None).is_ok());
     }
 
     #[test]

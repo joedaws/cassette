@@ -24,6 +24,7 @@ pub mod write;
 pub use edit::Placement;
 pub use write::{write, Side, WriteMode};
 
+use crate::store::writers::Kind;
 use crate::store::{writers, Store};
 
 /// The gate every `queue` command passes through before it touches the
@@ -71,6 +72,65 @@ pub enum WriterSource {
     Flag,
     /// Derived from `$USER`. An unknown name here is a first run.
     Env,
+}
+
+/// Who is acting, split into the two things the old `(id, kind)` pair
+/// conflated: **attribution** (`id` — always the registered identity) and
+/// **authority** (`authority` — the kind permission checks read).
+///
+/// Identity may be implicit; authority may not. A name that came from
+/// `$USER` is attributed as itself but acts as an agent, because an agent
+/// runs in the human's shell and inherits the human's `$USER` — the one
+/// thing that differs between the two is whether the caller *said* who it
+/// is. See `docs/superpowers/specs/2026-09-24-implicit-writer-authority-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Acting {
+    pub id: String,
+    pub authority: Kind,
+    pub registered: Kind,
+    pub source: WriterSource,
+}
+
+impl Acting {
+    /// Suffix for a refusal the downgrade caused, so the human who hits it
+    /// at their own shell learns the fix. Empty when nothing was downgraded.
+    pub fn hint(&self, name: &str) -> String {
+        if self.source == WriterSource::Env && self.registered == Kind::Human {
+            format!(
+                " — '$USER' alone does not carry human authority; pass --writer {name} to act as yourself"
+            )
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// The one place a queue command turns a writer name into an `Acting`.
+/// Every mutating command calls this; none re-derives the `Env`/`Flag`
+/// split, so a new command cannot forget the downgrade.
+pub fn resolve_acting(
+    store: &Store,
+    name: &str,
+    source: WriterSource,
+) -> Result<Acting, QueueError> {
+    let (id, registered) = match source {
+        WriterSource::Env => store
+            .resolve_writer(name)
+            .map_err(resolve_error_to_queue_error)?,
+        WriterSource::Flag => store
+            .require_writer(name)
+            .map_err(require_error_to_queue_error)?,
+    };
+    let authority = match source {
+        WriterSource::Env => Kind::Agent,
+        WriterSource::Flag => registered,
+    };
+    Ok(Acting {
+        id,
+        authority,
+        registered,
+        source,
+    })
 }
 
 /// Why a queue command failed, in the shape `main.rs` maps to an exit code.
@@ -173,5 +233,70 @@ pub(crate) fn require_error_to_queue_error(e: writers::RequireError) -> QueueErr
         writers::RequireError::EmptyName => QueueError::Usage(e.to_string()),
         writers::RequireError::Unregistered(_) => QueueError::Usage(e.to_string()),
         writers::RequireError::Io(io_e) => QueueError::Io(format!("cannot resolve writer: {io_e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = Store::new(dir.path().to_path_buf());
+        (dir, s)
+    }
+
+    #[test]
+    fn an_implicit_human_is_attributed_as_itself_but_has_agent_authority() {
+        let (_d, s) = store();
+        let id = s.ensure_writer("joseph", Kind::Human).expect("register");
+        let a = resolve_acting(&s, "joseph", WriterSource::Env).expect("resolve");
+        assert_eq!(a.id, id, "attribution is the registered identity");
+        assert_eq!(a.registered, Kind::Human);
+        assert_eq!(
+            a.authority,
+            Kind::Agent,
+            "implicit identity carries no human authority"
+        );
+        assert!(
+            a.hint("joseph").contains("--writer joseph"),
+            "{}",
+            a.hint("joseph")
+        );
+    }
+
+    #[test]
+    fn an_explicit_human_keeps_human_authority_and_no_hint() {
+        let (_d, s) = store();
+        s.ensure_writer("joseph", Kind::Human).expect("register");
+        let a = resolve_acting(&s, "joseph", WriterSource::Flag).expect("resolve");
+        assert_eq!(a.authority, Kind::Human);
+        assert_eq!(a.hint("joseph"), "");
+    }
+
+    #[test]
+    fn an_implicit_agent_is_unchanged_and_gets_no_hint() {
+        let (_d, s) = store();
+        s.ensure_writer("bot", Kind::Agent).expect("register");
+        let a = resolve_acting(&s, "bot", WriterSource::Env).expect("resolve");
+        assert_eq!((a.registered, a.authority), (Kind::Agent, Kind::Agent));
+        assert_eq!(a.hint("bot"), "");
+    }
+
+    #[test]
+    fn an_unregistered_user_still_bootstraps_as_human_but_acts_as_agent() {
+        let (_d, s) = store();
+        let a = resolve_acting(&s, "newcomer", WriterSource::Env).expect("resolve");
+        assert_eq!(a.registered, Kind::Human);
+        assert_eq!(a.authority, Kind::Agent);
+    }
+
+    #[test]
+    fn an_unknown_explicit_writer_is_still_a_usage_error() {
+        let (_d, s) = store();
+        assert!(matches!(
+            resolve_acting(&s, "typo", WriterSource::Flag),
+            Err(QueueError::Usage(_))
+        ));
     }
 }

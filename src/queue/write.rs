@@ -5,7 +5,7 @@
 //! `queue/mod.rs` instead, so this module can stay the only place a lock is
 //! ever acquired for writing.
 
-use super::{require_error_to_queue_error, resolve_error_to_queue_error, QueueError, WriterSource};
+use super::{resolve_acting, Acting, QueueError, WriterSource};
 use crate::queue::json;
 use crate::store;
 use crate::store::writers::Kind;
@@ -29,7 +29,10 @@ pub enum WriteMode {
     Replace,
 }
 
-/// Whether `kind` may write over a cassette whose `locked_by` is set.
+/// Whether `acting` may write over a cassette whose `locked_by` is set.
+/// Reads `acting.authority`, never the registered kind: a writer taken from
+/// `$USER` is refused here even when that name is registered human (see
+/// `queue::Acting`), and the refusal says how to act as yourself.
 ///
 /// The same permission boundary `queue close`'s `close_permitted` enforces,
 /// applied to `write` instead: a sticky lock is a claim on the cassette's
@@ -45,8 +48,13 @@ pub enum WriteMode {
 /// not know it (a damaged store, or a registry `store.writers()` itself
 /// could not read), the same stance `build_view` takes rather than erroring
 /// the whole write out over a cosmetic lookup.
-fn write_permitted(store: &Store, kind: Kind, locked_by: Option<&str>) -> Result<(), QueueError> {
-    match (kind, locked_by) {
+fn write_permitted(
+    store: &Store,
+    acting: &Acting,
+    who_name: &str,
+    locked_by: Option<&str>,
+) -> Result<(), QueueError> {
+    match (acting.authority, locked_by) {
         (Kind::Agent, Some(holder)) => {
             let name = store
                 .writers()
@@ -54,7 +62,8 @@ fn write_permitted(store: &Store, kind: Kind, locked_by: Option<&str>) -> Result
                 .and_then(|w| w.writers.get(holder).map(|w| w.name.clone()))
                 .unwrap_or_else(|| holder.to_string());
             Err(QueueError::Sticky(format!(
-                "cassette is locked by '{name}' — only a human may write it"
+                "cassette is locked by '{name}' — only a human may write it{}",
+                acting.hint(who_name)
             )))
         }
         _ => Ok(()),
@@ -102,25 +111,6 @@ fn apply_write(current: &str, incoming: &str, side: Side, mode: WriteMode) -> St
         }
     };
     build_body(&side_a, &side_b)
-}
-
-/// Resolve `who_name`/`source` into `(writer, kind)`, matching `close`'s
-/// rationale: which of `resolve_writer`/`require_writer` runs depends on
-/// where the name came from, not on whether it happens to be new. Shared by
-/// `write` and `write_body` so the two cannot resolve a writer differently.
-fn resolve(
-    store: &Store,
-    who_name: &str,
-    source: WriterSource,
-) -> Result<(String, Kind), QueueError> {
-    match source {
-        WriterSource::Env => store
-            .resolve_writer(who_name)
-            .map_err(resolve_error_to_queue_error),
-        WriterSource::Flag => store
-            .require_writer(who_name)
-            .map_err(require_error_to_queue_error),
-    }
 }
 
 /// Acquire `id`'s lock, mapping every `LockError` to the `QueueError` `write`
@@ -177,18 +167,18 @@ fn read_check_and_write(
     guard: &store::lock::LockGuard,
     id: &str,
     request: WriteRequest,
-    writer: String,
-    kind: Kind,
+    acting: &Acting,
+    who_name: &str,
 ) -> Result<(), QueueError> {
     let current = match guard.read() {
         Ok(c) => c,
         Err(e) => return Err(QueueError::Io(format!("cannot read '{id}': {e}"))),
     };
-    write_permitted(store, kind, current.meta.locked_by.as_deref())?;
+    write_permitted(store, acting, who_name, current.meta.locked_by.as_deref())?;
 
     let body = apply_write(&current.body, request.incoming, request.side, request.mode);
     let mut m = current.meta;
-    m.last_writer = writer;
+    m.last_writer = acting.id.clone();
     m.updated_at = store::meta::now_utc();
     if let Err(e) = guard.write(&m, &body) {
         return Err(QueueError::Io(format!("cannot write '{id}': {e}")));
@@ -226,8 +216,8 @@ pub fn write(
     // fast on a bad lock looks more logical: two writers racing for the same
     // cassette must both land in writers.toml (or both fail cleanly) even
     // when one of them loses the lock.
-    let (writer, kind) = resolve(store, who_name, source)?;
-    let who = store::lock::Attribution::for_now(&writer, who_name);
+    let acting = resolve_acting(store, who_name, source)?;
+    let who = store::lock::Attribution::for_now(&acting.id, who_name);
 
     let guard = acquire(store, session, id, &who)?;
 
@@ -246,8 +236,8 @@ pub fn write(
             side,
             mode,
         },
-        writer,
-        kind,
+        &acting,
+        who_name,
     )
 }
 
@@ -271,8 +261,8 @@ fn write_body(
     who_name: &str,
     source: WriterSource,
 ) -> Result<(), QueueError> {
-    let (writer, kind) = resolve(store, who_name, source)?;
-    let who = store::lock::Attribution::for_now(&writer, who_name);
+    let acting = resolve_acting(store, who_name, source)?;
+    let who = store::lock::Attribution::for_now(&acting.id, who_name);
     let guard = acquire(store, session, id, &who)?;
     read_check_and_write(
         store,
@@ -283,8 +273,8 @@ fn write_body(
             side,
             mode,
         },
-        writer,
-        kind,
+        &acting,
+        who_name,
     )
 }
 

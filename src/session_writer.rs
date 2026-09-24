@@ -773,10 +773,23 @@ mod tests {
         let (mut app, session) = fixture(&store, 1);
         let cid = app.cassettes[0].id.clone();
 
+        // `queue lock` is human-only, and a name taken from `$USER` carries
+        // no human authority — the human names themselves explicitly.
+        store
+            .ensure_writer("joseph", crate::store::writers::Kind::Human)
+            .expect("register human");
         let lock = std::process::Command::new(bin_path())
-            .args(["queue", "lock", &cid, "--session", &session])
+            .args([
+                "--writer",
+                "joseph",
+                "queue",
+                "lock",
+                &cid,
+                "--session",
+                &session,
+            ])
             .env("CASSETTE_DATA_DIR", &root)
-            .env("USER", "joseph")
+            .env_remove("CASSETTE_WRITER")
             .output()
             .expect("spawn queue lock");
         assert_eq!(lock.status.code(), Some(0), "{lock:?}");
