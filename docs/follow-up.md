@@ -1,0 +1,122 @@
+# Follow-up work
+
+The session-store redesign closed with Phase 6 (merged `1f8e8a8`, 2026-09-23). Its six phase
+specs each carried an "Open items" list forward to the next phase; with no next phase, they
+collect here instead.
+
+There is no external issue tracker. This file is the durable record, the way the spec files are
+for designs — if something here gets built, it gets a spec and this entry goes away.
+
+Ordered roughly by how much they would change the tool, not by effort.
+
+---
+
+## Reader mode — focus without holding the lock
+
+**Raised 2026-09-23, during the Stage 2 multi-writer trial, by the user.**
+
+Today **focus means held**: the TUI takes a cassette's lock the moment you focus it and keeps
+it until you move away. So there is no way to *watch* a cassette being written. To let an agent
+write one you must Tab off it, and then it collapses to its last line — you can read it
+properly or let the agent write it, never both.
+
+That assumption dates from Phase 5a and was reasonable when a cassette had one author. It is
+wrong under the distillation model the trial arrived at (below), where the whole point is
+watching a shared nugget get refined.
+
+Sketch, which is less work than it sounds because the machinery exists:
+
+- A fourth `ReadOnly` variant, `Reading`, beside `No`/`Busy`/`Closed`. `modify_focused` already
+  drops edits for any non-`No` variant, so keystrokes stop for free.
+- A binding that releases the held lock while keeping focus. The release path is what `Tab`
+  already does, minus the focus move.
+- `sync_external_writes` already merges every cassette this process does **not** hold, so a
+  released-but-focused cassette starts syncing full-height with no new sync code.
+- 5b's follow-if-at-end cursor rule then does the right thing unmodified: a cursor at the end
+  follows incoming text, one parked mid-paragraph stays put.
+- Banner `-- READING (open to writers) --`, distinct from `BUSY` (someone took it) and `CLOSED`
+  (needs a reopen) — this one is voluntary, which is what needs conveying.
+
+**The larger question inside it:** whether this is a mode you toggle, or whether focus should
+stop implying the lock at all — take it on the first keystroke, release it on idle. That would
+make reading the default and writing the claim, which matches how the user actually worked
+through the entire trial.
+
+---
+
+## Man page, shell completions, release packaging
+
+**Deferred out of Phase 6, 2026-09-23, at the user's direction.**
+
+`clap_mangen` + `clap_complete` generating from the `cli::Cli` derive tree, so they cannot
+drift from the real command surface. Blocked on a structural choice: `build.rs` cannot reach
+the clap tree, because `include!("src/cli.rs")` does not compile — `cli.rs` uses nine `crate::`
+paths (`queue::Placement`, `queue::Side`, `store::writers::Kind`, …) directly in its derive.
+
+Three ways out, none obviously right, each a decision about the crate rather than about
+packaging:
+
+1. **Generate at runtime** from the live `Command` (`--generate-man`, `--generate-completions
+   <shell>`). Zero drift by construction, no `build.rs` — but both crates become runtime
+   dependencies of the shipped binary.
+2. **Make `cli.rs` self-contained**, moving those domain enums behind local arg types and
+   converting in `into_args` — the pattern `WriterKindArg` already establishes. Keeps the deps
+   build-only and arguably improves the layering, but touches the queue and writer command
+   surface.
+3. **Add a lib target** so `build.rs` can import the module. The standard answer, but this
+   crate has deliberately had no `lib.rs`; CLAUDE.md cites its absence as why there is no
+   public escape hatch to the store.
+
+Whichever is chosen, packaging the artifacts into a release belongs in `docs/distribution.md`.
+
+---
+
+## What the Stage 2 trial found
+
+Recorded because they are design findings, not defects.
+
+- **A cassette is a distillation, not a transcript.** The user's model, arrived at mid-trial:
+  each writer rewrites the whole cassette into the current shared understanding rather than
+  appending a turn. This makes `queue write`'s replace-the-body default correct and `--append`
+  the exception, recasts `last_writer` as "whose turn ended last" (a routing hint, which is
+  exactly what `waiting_on` derives from it), and makes an export a *document* rather than a
+  log. It also settles the inline-attribution question in the negative: a rewritten cassette
+  has no history to attribute. What is lost is the path — if that ever matters it wants git on
+  the store, not speaker prefixes in the prose.
+- **Sharing a cassette is the natural move, not a collision.** The user replied *inside* the
+  agent's cassette twice within ten minutes, unprompted. The design had assumed one writer per
+  cassette. The lock still behaved correctly — the agent's write was refused with exit 3 — but
+  the two writers were queued behind each other for no reason.
+- **Top-priority replies turn the queue into a feed.** Moving each answer to position 1 means
+  the newest is always where you land, but it orders the session by recency of reply rather
+  than by topic. Plausibly right for a conversational session and wrong for morning pages;
+  worth a deliberate choice rather than a default.
+
+---
+
+## Carried triage
+
+Small, none blocking, each verified to still exist as of Phase 6.
+
+- **`$USER` bootstrap registers a *human*-kind writer**, the privileged kind. An agent that
+  relies on it is silently not an agent — sticky locks do not bind it and `write_permitted`
+  waves it through. This produced a false bug report during trial Stage 1: the sticky lock
+  appeared broken when in fact the "agent" was a human. It fails *permissive*, which is the
+  wrong direction. (Related to 4b's ruling that an unknown `--writer` must be a usage error for
+  exactly this reason.)
+- **`src/store/mod.rs` still carries a module-wide `#![allow(dead_code)]`** from Phase 2,
+  masking `StoredCassette.path`, `LockGuard::path` and `meta::parse_frontmatter`. Its comment
+  says "remove when Phase 4 lands"; Phase 4 landed three phases ago. Deferring was deliberate —
+  one is a public store field, which is a design call rather than a cleanup — but Phase 6's
+  whole thesis is that such an allow hides unfinished deletions.
+- **`assert!(after >= before)` in `tests/cli.rs`** passes when the mtime did not move. Tracking
+  `(mtime, len)` instead of `mtime` would shrink the degenerate case further.
+- **After a side-B merge, `cursor_for_a` is hardcoded to `0`** while the mirror case keeps side
+  B's stored cursor. Harmless, undocumented asymmetry.
+- **`queue::write::write_permitted` keeps an inline id→name lookup** beside the shared
+  `store::writers::display_name`.
+- **`cassette sessions` scans every cassette of every session before its first frame.**
+  Pre-existing — `find` pays the same cost — but it is now on an interactive path. Worth
+  measuring before the store reaches four digits of sessions.
+- **A newcomer arriving above a scrolled viewport shifts the visible set by one row.** Focus
+  identity is preserved, so this is cosmetic.

@@ -118,5 +118,11 @@ tracker; the spec files are the durable record.
 - Promote durable decisions out of specs into real docs (`docs/distribution.md`, README).
   A spec is scaffolding, not documentation; git history is the archive.
 
+`docs/follow-up.md` is the backlog. Each phase spec carried an "Open items" list to the next
+phase; with the redesign closed there is no next phase, so they collect there — along with
+work deferred out of a phase (man page and completions) and design findings from the Stage 2
+multi-writer trial. No external issue tracker: that file is the durable record the way the
+spec files are for designs. If something there gets built, it gets a spec and the entry goes.
+
 `docs/plans/` holds older plan files from a retired tracker; they are named by issue
 number and those issues no longer exist. Treat them as reference, not as live work.
