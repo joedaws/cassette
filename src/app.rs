@@ -102,13 +102,14 @@ pub struct App {
     /// is `main.rs`'s job, not `App`'s. Empty only in `-o` mode, which
     /// persists nothing.
     pub session: String,
-    /// The focused cassette's lock could not be taken — another writer holds
-    /// it. The text is shown but not editable: accepting keystrokes with no
-    /// guard to write them through would lose them at the next flush, and
-    /// refusing to start would let an agent lock a human out of their own
-    /// session. `modify_focused` is the gate; `main.rs` sets the flag when
-    /// `SessionWriter::acquire` fails.
     /// Why the focused cassette cannot be written, or `No` when it can.
+    ///
+    /// The text is still shown either way: accepting keystrokes with no
+    /// guard to write them through would lose them at the next flush, and
+    /// refusing to open would let an agent lock a human out of their own
+    /// session. `modify_focused` is the gate; `main.rs` sets this from
+    /// `SessionWriter::acquire`'s outcome and from the focused cassette's
+    /// own `closed` flag.
     pub read_only: ReadOnly,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
@@ -243,7 +244,16 @@ impl App {
     /// How many cassettes fit on screen at once: the focused one full-height,
     /// the rest minimized to `MINIMIZED_ROWS` each.
     pub fn visible_cassette_count(&self) -> usize {
-        let available = self.term_height.saturating_sub(UI_OVERHEAD);
+        // The fold row and the damaged rows are laid out between the stack
+        // and the footer, so they come out of the same budget. Without this
+        // a full stack plus a few damaged files pushed the reel bar, info
+        // line and help row clean off the bottom of the screen, with nothing
+        // left to say why.
+        let extra_rows = u16::from(self.closed_count() > 0) + self.damaged.len() as u16;
+        let available = self
+            .term_height
+            .saturating_sub(UI_OVERHEAD)
+            .saturating_sub(extra_rows);
         let focused = self.rows_per_cassette();
         if available <= focused {
             return 1;
@@ -314,8 +324,8 @@ impl App {
 
     /// Merge one cassette read from the store into the list: update it in
     /// place if this process already holds a copy (by store id, not by
-    /// index — an earlier insertion may have shifted it), or insert `incoming`
-    /// as a newcomer at `insert_at`.
+    /// index — an earlier insertion may have shifted it), or place
+    /// `incoming` as a newcomer at its own queue priority.
     ///
     /// Position is not a parameter: `Cassette` carries its own `priority`,
     /// so a newcomer is pushed and the list re-sorted. Phase 5b passed an
@@ -492,6 +502,17 @@ impl App {
                 self.focus_idx = i;
             }
         }
+        // The focused cassette may have just become closed — by an agent's
+        // `queue close`, arriving through sync or through the re-read inside
+        // `acquire`. It has now sorted past `stack_len()`, where nothing is
+        // drawn and `focus_next` cannot reach it. Open the fold rather than
+        // moving focus: the human is reading that cassette, and yanking them
+        // somewhere else to report that it closed is the ruder of the two.
+        // Expanding always restores the invariant, since the expanded stack
+        // is the whole list.
+        if self.focus_idx >= self.stack_len() {
+            self.closed_expanded = true;
+        }
         self.ensure_focus_visible();
     }
 
@@ -509,15 +530,17 @@ impl App {
 
     /// How many cassettes the scroll window and focus movement cover.
     ///
-    /// Closed cassettes join it only while the fold is open. Because
-    /// `sort_queue` keeps them last, "the open set" is the prefix
-    /// `0..open_count()`, so folding is a bound rather than a filter — and
-    /// Tab needs no special case to stay out of closed cassettes.
     /// How many closed cassettes the fold is hiding or showing.
     pub fn closed_count(&self) -> usize {
         self.cassettes.len() - self.open_count()
     }
 
+    /// How many cassettes the scroll window and focus movement cover.
+    ///
+    /// Closed cassettes join it only while the fold is open. Because
+    /// `sort_queue` keeps them last, "the open set" is the prefix
+    /// `0..open_count()`, so folding is a bound rather than a filter — and
+    /// Tab needs no special case to stay out of closed cassettes.
     pub fn stack_len(&self) -> usize {
         if self.closed_expanded {
             self.cassettes.len()
@@ -1066,6 +1089,30 @@ mod tests {
             app.cassettes.len(),
             MAX_CASSETTES + 5,
             "closed ones are retained"
+        );
+    }
+
+    /// The fold row and the damaged rows share the screen with the footer.
+    /// Ignoring them pushed the reel bar, info line and help row off the
+    /// bottom entirely, with no indication why.
+    #[test]
+    fn the_height_budget_accounts_for_the_fold_and_damaged_rows() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.term_height = 24;
+        app.term_width = 80;
+        let plain = app.visible_cassette_count();
+
+        let mut closed = Cassette::new();
+        closed.id = "c".to_string();
+        closed.closed = true;
+        app.cassettes.push(closed);
+        app.damaged = (0..6)
+            .map(|i| (format!("bad-{i}"), "unreadable".to_string()))
+            .collect();
+
+        assert!(
+            app.visible_cassette_count() < plain,
+            "seven extra rows must come out of the cassette budget, not the footer's"
         );
     }
 

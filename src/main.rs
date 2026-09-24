@@ -991,8 +991,30 @@ fn retry_lock(app: &mut App, writer: Option<&mut session_writer::SessionWriter>)
 /// expired — still shows for its few seconds while a cassette is busy, and
 /// the banner returns underneath it when it expires.
 fn try_acquire(app: &mut App, w: &mut session_writer::SessionWriter, idx: usize) {
+    // The id, not the index: `acquire`'s `refresh_from_disk` may have
+    // adopted a new `priority`/`closed` from disk, and the re-sort below
+    // moves cassettes.
+    let id = app.cassettes.get(idx).map(|c| c.id.clone());
     match w.acquire(app, idx) {
-        Ok(()) => app.read_only = app::ReadOnly::No,
+        Ok(()) => {
+            // `refresh_from_disk` is the second place queue metadata enters
+            // memory, and unlike `merge_external` it does not sort. Without
+            // this, a cassette an agent closed keeps its old slot, the open
+            // set stops being a prefix, and everything reading `stack_len()`
+            // is reading a lie.
+            app.sort_queue();
+            let closed = id
+                .as_deref()
+                .and_then(|id| app.cassettes.iter().find(|c| c.id == id))
+                .is_some_and(|c| c.closed);
+            // Winning the lock does not make a closed cassette writable: its
+            // lock was never the obstacle, so `Ok` alone says nothing here.
+            app.read_only = if closed {
+                app::ReadOnly::Closed
+            } else {
+                app::ReadOnly::No
+            };
+        }
         Err(e) => {
             app.read_only = app::ReadOnly::Busy {
                 holder: busy_holder_name(&e),
@@ -1047,11 +1069,10 @@ fn busy_holder_name(e: &store::lock::LockError) -> Option<String> {
 ///    could only replace the human's unsaved keystrokes with whatever was
 ///    last flushed.
 /// 2. **Only if something moved**, call `Store::scan_session` once for the
-///    whole session — which is also where `insert_at` for a newcomer comes
-///    from: `scan_session` already returns cassettes in queue order
-///    (`store::priority::queue_order`, applied inside the scan), so
-///    `insert_at` is just a count of known ids preceding the newcomer in
-///    that order. Only the ids the first pass actually flagged are merged;
+///    whole session — the one place statuses and priorities are read while
+///    running, so it is also what refreshes `App.damaged`. A newcomer needs
+///    no insertion index: it carries its own priority and `merge_external`
+///    re-sorts. Only the ids the first pass actually flagged are merged;
 ///    an untouched cassette is left alone, keeping its cursor and undo
 ///    stack exactly as they were.
 ///
@@ -1720,6 +1741,130 @@ mod tests {
             .expect("open for touch");
         f.set_modified(SystemTime::now() + std::time::Duration::from_secs(5))
             .expect("set mtime");
+    }
+
+    /// The spec's headline behaviour for the fold: focusing a closed
+    /// cassette yields `ReadOnly::Closed`, so `modify_focused` drops the
+    /// edit through the gate that already exists.
+    #[test]
+    fn focusing_a_closed_cassette_opens_it_read_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "## Side A\n\nshut\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id;
+        c.priority = 10;
+        c.closed = true;
+        app.cassettes.push(c);
+        app.closed_expanded = true;
+        let mut w = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+
+        follow_focus(&mut app, Some(&mut w));
+
+        assert_eq!(app.read_only, app::ReadOnly::Closed);
+        app.modify_focused(|c| c.insert('x'));
+        assert!(
+            !app.cassettes[0].side_a_text().contains('x'),
+            "a closed cassette must not take the keystroke"
+        );
+    }
+
+    /// And the way back out: a `queue reopen` while the cassette is focused
+    /// must clear the banner. Without this the TUI would read `-- CLOSED --`
+    /// for the rest of the session on a cassette that is writable again.
+    #[test]
+    fn a_reopen_clears_the_closed_banner_without_refocusing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let id = store_cassette(&store, &session, 10, "## Side A\n\nshut\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        let mut c = cassette::Cassette::new();
+        c.id = id.clone();
+        c.priority = 10;
+        app.cassettes.push(c);
+        let mut w = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+
+        // Take the lock first, so the held-lock fast path is the one under
+        // test rather than a fresh acquire.
+        follow_focus(&mut app, Some(&mut w));
+        assert_eq!(app.read_only, app::ReadOnly::No);
+
+        // An agent closes it, then reopens it, while we hold the lock.
+        app.cassettes[0].closed = true;
+        follow_focus(&mut app, Some(&mut w));
+        assert_eq!(app.read_only, app::ReadOnly::Closed, "closed while focused");
+
+        app.cassettes[0].closed = false;
+        follow_focus(&mut app, Some(&mut w));
+        assert_eq!(
+            app.read_only,
+            app::ReadOnly::No,
+            "a reopen must not leave the banner stuck"
+        );
+    }
+
+    /// `refresh_from_disk` is a SECOND place `priority`/`closed` enter
+    /// memory, and it used to leave the queue unsorted and the banner
+    /// saying editable. An agent closes a cassette while we hold nothing;
+    /// the next acquire adopts `closed: true` and then reported `No`.
+    ///
+    /// Three things went wrong at once: the human typed into a closed
+    /// cassette and the flush wrote it out; the still-open cassette sorted
+    /// behind it became invisible (`render` lays out `0..stack_len()`) and
+    /// unreachable (`focus_next` wraps within the stack); and `stack_len()`
+    /// stopped describing a prefix, which every other consumer assumes.
+    #[test]
+    fn acquiring_a_cassette_an_agent_closed_does_not_report_it_editable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store::Store::new(dir.path().to_path_buf());
+        let session = seeded_session(&store, None);
+        let a = store_cassette(&store, &session, 10, "## Side A\n\na\n");
+        let b = store_cassette(&store, &session, 20, "## Side A\n\nb\n");
+        let mut app = App::new(None, None, None, session.clone());
+        app.cassettes.clear();
+        for (id, priority) in [(&a, 10), (&b, 20)] {
+            let mut c = cassette::Cassette::new();
+            c.id = id.clone();
+            c.priority = priority;
+            app.cassettes.push(c);
+        }
+        app.focus_idx = 0;
+
+        // An agent closes `a` while this process holds no lock on it.
+        let path = store.cassette_path(&session, &a).expect("p").expect("e");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, raw.replace("status: open", "status: closed")).expect("write");
+
+        let mut w = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        try_acquire(&mut app, &mut w, 0);
+
+        assert_eq!(
+            app.read_only,
+            app::ReadOnly::Closed,
+            "winning the lock does not make a closed cassette writable"
+        );
+        assert_eq!(app.open_count(), 1, "`a` left the working set");
+        assert!(
+            app.cassettes
+                .iter()
+                .take(app.open_count())
+                .all(|c| !c.closed),
+            "the open set must still be a prefix: {:?}",
+            app.cassettes.iter().map(|c| c.closed).collect::<Vec<_>>()
+        );
+        assert!(
+            app.focus_idx < app.stack_len(),
+            "focus must stay inside the drawn stack"
+        );
+        assert!(
+            app.cassettes.iter().any(|c| c.id == b && !c.closed),
+            "the still-open cassette must not be stranded"
+        );
     }
 
     /// A closed cassette's lock is FREE, so a tick that retries it succeeds

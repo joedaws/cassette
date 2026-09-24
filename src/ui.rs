@@ -136,7 +136,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
 pub(crate) fn help_text(app: &App) -> &'static str {
     match app.mode {
         _ if matches!(app.read_only, ReadOnly::Closed) => {
-            "this cassette is closed  `cassette queue reopen` to write in it again  Tab:next  ^C:quit & save"
+            "this cassette is closed  `cassette queue reopen` to write in it again  z:fold  Tab:next  ^C:quit & save"
         }
         _ if app.read_only.is_read_only() => {
             "keys ignored: another writer holds this cassette's lock  Tab:next  ^N:new  ^C:quit & save"
@@ -146,7 +146,7 @@ pub(crate) fn help_text(app: &App) -> &'static str {
         }
         Mode::Insert => "Esc:normal  Enter:newline  ^W:del word  ^T:topic  ^B:flip side  Tab:next  ^N:new  ^C:quit",
         Mode::Normal => {
-            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  t:topic  ^B:flip  q:quit"
+            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  t:topic  z:fold  ^B:flip  q:quit"
         }
         Mode::Topic => "Enter:set topic  Esc:cancel  (empty input clears the topic)",
     }
@@ -173,12 +173,12 @@ pub(crate) fn closed_row_text(app: &App) -> Option<String> {
 /// style decision (dimming the idle nudge).
 ///
 /// A read-only cassette names its holder — `open by refactor-agent` — rather
-/// than showing the bare `-- READ ONLY --` 5a left: `app.busy_holder` is
+/// than showing the bare `-- READ ONLY --` 5a left: `ReadOnly::Busy`'s holder is
 /// `None` only when there is genuinely no name to show (a garbled lock
 /// anchor), in which case the bare label is all that's left to say.
 ///
 /// That arm is reachable only because `try_acquire` records a busy cassette
-/// in `read_only`/`busy_holder` and leaves `status_msg` — checked above it —
+/// in `read_only`'s own variant and leaves `status_msg` — checked above it —
 /// for transient news. `pub(crate)` so the cross-process contention test in
 /// `session_writer` can assert the banner reaches the screen under a real
 /// held lock, rather than only from hand-set fields.
@@ -221,7 +221,10 @@ pub(crate) fn info_text(app: &App) -> String {
         col,
         c.char_count(),
         app.focus_idx + 1,
-        app.cassettes.len(),
+        // The STACK, not the whole list: with twelve closed cassettes folded
+        // away, `cassette 1/13` beside a Tab cycle of one contradicts the
+        // fold's whole premise.
+        app.stack_len(),
         side
     )
 }
@@ -681,6 +684,127 @@ mod tests {
     use crate::app::App;
     use ratatui::{backend::TestBackend, Terminal};
 
+    /// Build an app with `open` open cassettes, `closed` closed ones and
+    /// `damaged` damaged rows, laid out at 80x24 — the shape the fold and
+    /// the error rows are actually seen at.
+    fn folded_app(open: usize, closed: usize, damaged: usize) -> App {
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
+        app.cassettes.clear();
+        // Topics, not just ids: a cassette's id is never drawn, so a
+        // fixture without one of these has nothing on screen to assert the
+        // absence of — the test would pass whether or not it was laid out.
+        for i in 0..open {
+            let mut c = Cassette::new();
+            c.id = format!("open-{i:02}");
+            c.topic = Some(format!("opentopic{i}"));
+            c.priority = i as i64 * 10;
+            app.cassettes.push(c);
+        }
+        for i in 0..closed {
+            let mut c = Cassette::new();
+            c.id = format!("shut-{i:02}");
+            c.topic = Some(format!("shuttopic{i}"));
+            c.priority = 1000 + i as i64;
+            c.closed = true;
+            app.cassettes.push(c);
+        }
+        app.damaged = (0..damaged)
+            .map(|i| (format!("bad-{i}"), "could not be read".to_string()))
+            .collect();
+        app.sort_queue();
+        app.resize(80, 24);
+        app
+    }
+
+    fn drawn(app: &App) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render(f, app, &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    /// The fold's central rendering guarantee: a folded session lays out no
+    /// closed cassette at all. `render`'s window spans `stack_len()`, and
+    /// swapping that back to `cassettes.len()` must fail a test.
+    #[test]
+    fn a_folded_session_draws_no_closed_cassette() {
+        let app = folded_app(2, 3, 0);
+        assert!(!app.closed_expanded);
+        let screen = drawn(&app).join("\n");
+
+        assert!(
+            screen.contains("opentopic0"),
+            "the open ones ARE drawn, so absence below means something:\n{screen}"
+        );
+        assert!(
+            !screen.contains("shuttopic"),
+            "closed cassettes must not be drawn while folded:\n{screen}"
+        );
+        assert!(screen.contains("▸ 3 closed"), "{screen}");
+    }
+
+    /// The fold row sits directly under the stack, and the damaged rows
+    /// directly under it — both above the separator that closes the stack.
+    #[test]
+    fn the_fold_row_and_damaged_rows_sit_between_the_stack_and_the_separator() {
+        let app = folded_app(1, 2, 2);
+        let rows = drawn(&app);
+        let fold = rows
+            .iter()
+            .position(|r| r.contains("▸ 2 closed"))
+            .expect("fold row is drawn");
+        let first_damaged = rows
+            .iter()
+            .position(|r| r.contains("bad-0"))
+            .expect("damaged row is drawn");
+        let second_damaged = rows
+            .iter()
+            .position(|r| r.contains("bad-1"))
+            .expect("second damaged row is drawn");
+
+        assert_eq!(first_damaged, fold + 1, "damaged rows follow the fold row");
+        assert_eq!(second_damaged, fold + 2, "and each other, in order");
+    }
+
+    /// Every widget after the stack indexes off one `after_stack` offset.
+    /// Dropping the `+ damaged.len()` term silently slid the footer up over
+    /// the damaged rows — the exact failure CLAUDE.md's `ui.rs` entry warns
+    /// about — so the footer's position is pinned with them on screen.
+    #[test]
+    fn the_footer_still_lands_below_the_damaged_rows() {
+        let app = folded_app(1, 1, 3);
+        let rows = drawn(&app);
+        let last_damaged = rows
+            .iter()
+            .rposition(|r| r.contains("bad-2"))
+            .expect("last damaged row is drawn");
+
+        // The info line carries the mode; it must sit below every ⚠ row and
+        // must not have overwritten one.
+        let info = rows
+            .iter()
+            .rposition(|r| r.contains("-- INSERT --"))
+            .expect("info line is drawn");
+        assert!(
+            info > last_damaged,
+            "footer must stay below the damaged rows (info {info}, last ⚠ {last_damaged})"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("⚠")).count(),
+            3,
+            "all three damaged rows survive the footer's layout"
+        );
+    }
+
     /// The reel/status/help footer pins to the bottom of the window; the
     /// filler sits between the cassette stack and the footer, not below it.
     #[test]
@@ -987,6 +1111,22 @@ mod tests {
     fn no_closed_row_without_closed_cassettes() {
         let app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
         assert_eq!(crate::ui::closed_row_text(&app), None);
+    }
+
+    /// `z` is the only way into the closed fold, and the only way out of a
+    /// session whose cassettes are all closed. A binding discoverable
+    /// nowhere on screen is close to not shipped.
+    #[test]
+    fn the_help_row_advertises_the_fold_key() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.mode = Mode::Normal;
+        assert!(crate::ui::help_text(&app).contains("z:fold"));
+
+        app.read_only = ReadOnly::Closed;
+        assert!(
+            crate::ui::help_text(&app).contains("z:fold"),
+            "especially here, where the fold is how you get back out"
+        );
     }
 
     /// The help row must name the remedy. Closed needs an action
