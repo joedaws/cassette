@@ -12,7 +12,7 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
 | 2 | `$USER` bootstrap registers a human-kind writer | done | `specs/2026-09-24-implicit-writer-authority-design.md` | `plans/2026-09-24-implicit-writer-authority.md` |
 | 3 | Carried triage cleanups (bundle) | done | `specs/2026-09-24-carried-triage-design.md` | `plans/2026-09-24-carried-triage.md` |
 | 4 | Reader mode — focus without holding the lock | done | `specs/2026-09-24-reader-mode-design.md` | `plans/2026-09-24-reader-mode.md` |
-| 5 | Man page, completions, release packaging | todo | | |
+| 5 | Man page, completions, release packaging | done | `specs/2026-09-24-man-and-completions-design.md` | `plans/2026-09-24-man-and-completions.md` |
 | 6 | Document export mode 2 (agent-written document) | todo | | |
 | 7 | Queue ordering policy (feed vs topic order) | todo | | |
 | — | Tune the agent's cassette length | skipped | needs usage data, not design | |
@@ -44,3 +44,11 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
 - **(4) Key choice `r`** (vim's replace-char isn't implemented here). Fallbacks: `R` or `Ctrl+R`.
 - **(4) Plan note:** a few Task 2 and 3 tests are specified as named assertions next to existing
   fixtures rather than as full code, because those fixtures are long. Worth a look before executing.
+- **(5) The follow-up's premise was stale.** The clap derive tree in `cli.rs` has no `crate::`
+  paths. They're all in the lowered `Args`/`QueueCmd` types and `From` impls, so option 2 is cheap.
+  The spec still picks **runtime generation** (`cassette completions <shell>`, `cassette man`),
+  because `cargo install` users never receive `build.rs` output. The cost is two runtime deps;
+  the plan measures the size added to the binary.
+- **(5) `docs/distribution.md` doesn't exist**, although CLAUDE.md cites it. The plan creates it
+  and moves the README's release steps there.
+- **(5) Human step:** only a real GitHub release exercises the workflow change.
