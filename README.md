@@ -235,6 +235,37 @@ cassette resume 01K5GQ2R8V…   # …or by the id `find` printed
 cassette new myjournal        # start a *new* session aliased myjournal
 ```
 
+### Getting the words out
+
+The whole point is that your writing is plain text you own, so a session
+renders to one flat markdown file:
+
+```
+cassette export <id>              # to stdout, so it pipes
+cassette export <id> --out day.md # …or to a file
+```
+
+```
+# Cassette 1 — morning pages
+
+## Side A
+
+the first words of the day
+
+# Cassette 2 — wrapped up (closed)
+
+## Side A
+
+finished thoughts
+
+# Cassette 3 — 01M3600000000000000000BAD.md (unreadable: frontmatter is unparseable)
+```
+
+Closed cassettes are included and marked, and a file too damaged to parse
+gets a heading of its own rather than vanishing — an export is the archive,
+and a quiet one would be a lossy one. It takes no locks, so exporting a
+session an agent is writing works fine.
+
 `cassette sessions` is the one to reach for. Sessions are named by ULID, so
 there's rarely a name to type — the picker lets you arrow to the one you
 want instead of copying 26 characters:
@@ -613,10 +644,10 @@ mkdir -p ~/.config/cassette
 $EDITOR ~/.config/cassette/config.toml
 ```
 
-Every key is optional. `notes_dir` (from before the session store) still
-parses if you have it set, but nothing reads it any more — `stats`, `find`,
-and every session cassette now live under `$CASSETTE_DATA_DIR`/the XDG data
-default instead:
+Every key is optional. `notes_dir` is **deprecated**: it still parses if you
+have it set, so an old config keeps working, but nothing reads it — `stats`,
+`find`, and every session cassette live under `$CASSETTE_DATA_DIR` or the XDG
+data default instead:
 
 ```toml
 # Alias pattern for `cassette today`'s session, in chrono strftime syntax
