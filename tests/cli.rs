@@ -16,6 +16,30 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).to_string()
 }
 
+/// Both of these exit inside clap, before `main` reaches any store code, so
+/// they are safe without `CASSETTE_DATA_DIR` — every test that DOES reach
+/// the store sets it, because otherwise it writes the user's real notes.
+#[test]
+fn sessions_help_parses() {
+    let out = run(&["sessions", "--help"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("pick a session"),
+        "the subcommand describes itself: {text}"
+    );
+}
+
+#[test]
+fn sessions_rejects_an_unexpected_argument() {
+    let out = run(&["sessions", "nope"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "bad input exits 2 through clap: {out:?}"
+    );
+}
+
 #[test]
 fn version_flag_prints_name_and_version() {
     let out = run(&["-V"]);

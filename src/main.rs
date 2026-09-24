@@ -20,6 +20,7 @@ mod cli;
 mod config;
 mod find;
 mod output;
+mod picker;
 mod queue;
 mod session;
 mod session_writer;
@@ -68,7 +69,7 @@ fn restore_terminal() {
 }
 
 fn main() -> io::Result<()> {
-    let args = cli::parse();
+    let mut args = cli::parse();
     let cfg = config::load_config().unwrap_or_else(|e| exit_with(2, &e, args.json));
 
     if args.list_themes {
@@ -89,6 +90,22 @@ fn main() -> io::Result<()> {
             stats::render(&metas, chrono::Local::now().date_naive(), unreadable)
         );
         return Ok(());
+    }
+
+    // The picker resolves a session id and then falls through to the
+    // ordinary TUI path, rather than launching it itself: returning a choice
+    // keeps `Picker` a state machine tests can drive without a terminal.
+    if args.pick_session {
+        let store = store::Store::new(store_root(args.json));
+        let (entries, unreadable) = find::scan_store(&store);
+        match run_picker(picker::Picker::new(entries), unreadable)? {
+            // Handed to `resume`, which already resolves a session id and
+            // loads its cassettes. A second opening path would be a second
+            // set of rules about what an id means.
+            Some(id) => args.resume = Some(Some(id)),
+            // Quitting the picker is a normal exit, not a refusal.
+            None => return Ok(()),
+        }
     }
 
     if let Some(words) = &args.find {
@@ -770,6 +787,73 @@ fn print_themes(cfg: &config::Config) {
         }
         println!("{line}");
     }
+}
+
+/// Show the sessions picker and return the chosen session id, or `None`
+/// when the human quit without opening one.
+///
+/// Owns terminal setup and teardown for its own screen. The panic hook is
+/// installed here too, not only in the TUI's `run`: a picker that panics
+/// with raw mode enabled leaves the user's shell unusable just as surely.
+fn run_picker(mut picker: picker::Picker, unreadable: usize) -> io::Result<Option<String>> {
+    if unreadable > 0 {
+        eprintln!("cassette: {unreadable} cassette file(s) could not be read");
+    }
+
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let theme = theme::Theme::default();
+    let chosen = loop {
+        terminal.draw(|f| ui::render_picker(f, &picker, &theme))?;
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != event::KeyEventKind::Press {
+            continue;
+        }
+        // While the filter prompt is open it owns the keyboard, so `q` types
+        // a `q` rather than quitting. Same rule `Mode::Topic` follows in the
+        // main TUI, and the leak it prevents is why that rule exists.
+        if picker.filtering {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => picker.end_filter(),
+                KeyCode::Backspace => picker.pop_filter(),
+                KeyCode::Char(c) => picker.push_filter(c),
+                _ => {}
+            }
+            continue;
+        }
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
+            KeyCode::Char('q') | KeyCode::Esc => break None,
+            KeyCode::Char('j') | KeyCode::Down => picker.move_down(),
+            KeyCode::Char('k') | KeyCode::Up => picker.move_up(),
+            KeyCode::Char('a') => picker.toggle_all(),
+            KeyCode::Char('/') => picker.start_filter(),
+            // Enter on an empty list is a no-op, not a crash: an empty store
+            // and a filter that matches nothing are ordinary states here.
+            KeyCode::Enter => {
+                if let Some(e) = picker.selected() {
+                    break Some(e.id.clone());
+                }
+            }
+            _ => {}
+        }
+    };
+
+    restore_terminal();
+    let _ = panic::take_hook();
+    Ok(chosen)
 }
 
 fn run(

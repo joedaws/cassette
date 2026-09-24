@@ -22,6 +22,41 @@ pub struct NoteEntry {
     haystack: String,
 }
 
+impl NoteEntry {
+    /// Whether this session matches an already-lowercased query, against
+    /// the same haystack `find`'s own listing matches — so the picker's
+    /// filter and `cassette find` can never disagree about what a word
+    /// finds.
+    pub(crate) fn matches(&self, lowercased_query: &str) -> bool {
+        self.haystack.contains(lowercased_query)
+    }
+
+    /// A fixture entry for tests in other modules, which cannot build
+    /// `haystack` themselves. It goes through `build_haystack` for the
+    /// reason that function's own doc gives: a fixture that assembles the
+    /// field by hand tests a shape the real scanner never produces.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        id: &str,
+        alias: Option<&str>,
+        date: NaiveDateTime,
+        words: usize,
+        topics: &[&str],
+    ) -> Self {
+        let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
+        let preview = format!("body of {id}");
+        Self {
+            haystack: build_haystack(id, alias, &topics, &preview),
+            id: id.to_string(),
+            alias: alias.map(|a| a.to_string()),
+            date,
+            words,
+            topics,
+            preview,
+        }
+    }
+}
+
 const PREVIEW_CHARS: usize = 72;
 
 fn truncate(s: &str, max: usize) -> String {
@@ -88,7 +123,7 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>, unreadable: usize) -> 
     let mut matched: Vec<&NoteEntry> = match query {
         Some(q) => {
             let q = q.to_lowercase();
-            entries.iter().filter(|e| e.haystack.contains(&q)).collect()
+            entries.iter().filter(|e| e.matches(&q)).collect()
         }
         None => entries.iter().collect(),
     };

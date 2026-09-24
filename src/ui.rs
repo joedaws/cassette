@@ -152,6 +152,87 @@ pub(crate) fn help_text(app: &App) -> &'static str {
     }
 }
 
+/// Draw the `cassette sessions` picker: a title, one line per visible
+/// session, the filter prompt when it is open, and a key hint.
+///
+/// Rows show the alias where a session has one and the id otherwise — the
+/// id is what `resume` takes, but a human who named a session should see
+/// the name. All colours come from the `Theme`, like everything else here.
+pub(crate) fn render_picker(frame: &mut Frame, picker: &crate::picker::Picker, theme: &Theme) {
+    let area = frame.area();
+    let rows = picker.visible();
+
+    let mut lines: Vec<Line> = Vec::new();
+    let dim = Style::new().fg(theme.unfocused_fg);
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+
+    lines.push(Line::from(Span::styled(
+        format!(
+            "cassette sessions — {} of {}{}",
+            rows.len(),
+            picker.total(),
+            if picker.show_all { "" } else { "  (a: all)" }
+        ),
+        bold,
+    )));
+    lines.push(Line::from(""));
+
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if picker.total() == 0 {
+                "no sessions yet — the first session starts the count".to_string()
+            } else {
+                format!("nothing matches '{}'", picker.query)
+            },
+            dim,
+        )));
+    }
+
+    // One row per session. The marker carries the highlight rather than a
+    // background colour: a themed background can be indistinguishable from
+    // the terminal's own, and the marker is legible on every theme.
+    for (i, e) in rows.iter().enumerate() {
+        let marker = if i == picker.cursor { "> " } else { "  " };
+        let name = e.alias.as_deref().unwrap_or(&e.id);
+        let mut text = format!(
+            "{marker}{}  {:>5} words  {name}",
+            e.date.format("%Y-%m-%d %H:%M"),
+            e.words
+        );
+        if !e.topics.is_empty() {
+            text.push_str(&format!("  — {}", e.topics.join(", ")));
+        }
+        let style = if i == picker.cursor {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new()
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+
+    lines.push(Line::from(""));
+    if picker.filtering {
+        lines.push(Line::from(Span::styled(
+            format!("/{}▏", picker.query),
+            bold,
+        )));
+    } else if !picker.query.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("filter: {}  (/ to edit)", picker.query),
+            dim,
+        )));
+    }
+
+    let help = if picker.filtering {
+        "type:filter  Enter:apply  Esc:done"
+    } else {
+        "j/k:move  Enter:open  /:filter  a:all  q:quit"
+    };
+    lines.push(help_line(help, theme));
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
 /// The closed fold's row — `▸ 12 closed` shut, `▾ 12 closed` open — or
 /// `None` when the session has no closed cassettes, since an affordance for
 /// nothing is noise. Pure text; `render` applies the theme's `unfocused_fg`,
@@ -730,6 +811,90 @@ mod tests {
         (0..24)
             .map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect())
             .collect()
+    }
+
+    /// 5c shipped two display bugs a green suite could not see. The fixture
+    /// must make rows distinguishable ON SCREEN — a row whose alias is
+    /// absent proves nothing by being absent.
+    #[test]
+    fn the_picker_draws_rows_and_marks_the_cursor() {
+        use crate::picker::Picker;
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 9, 23)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap();
+        let mut p = Picker::new(vec![
+            crate::find::NoteEntry::for_test(
+                "01M3AAA0000000000000000AAA",
+                Some("morningpages"),
+                d,
+                120,
+                &["gratitude"],
+            ),
+            crate::find::NoteEntry::for_test(
+                "01M3BBB0000000000000000BBB",
+                Some("eveningreview"),
+                d,
+                80,
+                &["review"],
+            ),
+        ]);
+        p.move_down();
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_picker(f, &p, &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect();
+        let screen = rows.join("\n");
+
+        assert!(screen.contains("morningpages"), "{screen}");
+        assert!(screen.contains("eveningreview"), "{screen}");
+        assert!(screen.contains("gratitude"), "topics are shown: {screen}");
+
+        let cursor_row = rows
+            .iter()
+            .position(|r| r.contains("eveningreview"))
+            .expect("the second row is drawn");
+        assert!(
+            rows[cursor_row].trim_start().starts_with('>'),
+            "the highlighted row carries the marker: {:?}",
+            rows[cursor_row]
+        );
+        let other = rows
+            .iter()
+            .position(|r| r.contains("morningpages"))
+            .expect("the first row is drawn");
+        assert!(
+            !rows[other].trim_start().starts_with('>'),
+            "and only that row: {:?}",
+            rows[other]
+        );
+    }
+
+    /// An empty store is a normal state; the picker says so rather than
+    /// drawing a blank screen.
+    #[test]
+    fn the_picker_says_so_when_there_are_no_sessions() {
+        use crate::picker::Picker;
+        let p = Picker::new(Vec::new());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render_picker(f, &p, &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let screen: String = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("no sessions yet"), "{screen}");
     }
 
     /// The fold's central rendering guarantee: a folded session lays out no
