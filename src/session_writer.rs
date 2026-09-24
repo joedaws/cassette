@@ -143,6 +143,9 @@ impl<'a> SessionWriter<'a> {
         let body = output::cassette_body(&app.cassettes[idx]);
         self.store.add_cassette(&self.session, &meta, &body)?;
         app.cassettes[idx].id = meta.id;
+        // The minted priority replaces the `i64::MAX` "not yet minted"
+        // sentinel, so this cassette now sorts where the store says.
+        app.cassettes[idx].priority = meta.priority;
         app.clear_dirty(idx);
         Ok(())
     }
@@ -260,9 +263,13 @@ impl<'a> SessionWriter<'a> {
             // Text and topic are unchanged, so the cursor/undo short-circuit
             // still applies — but a sticky lock is metadata, not prose, and
             // can change (`queue lock`/`unlock`) with nothing else moving.
+            // Priority and status are the same kind of thing: `queue move`
+            // and `queue close` move them with the prose untouched.
             if app.cassettes[idx].locked_by != locked_by {
                 app.cassettes[idx].locked_by = locked_by;
             }
+            app.cassettes[idx].priority = stored.meta.priority;
+            app.cassettes[idx].closed = stored.meta.status == Status::Closed;
             return Ok(());
         }
         let id = c.id.clone();
@@ -273,6 +280,8 @@ impl<'a> SessionWriter<'a> {
         );
         fresh.id = id;
         fresh.locked_by = locked_by;
+        fresh.priority = stored.meta.priority;
+        fresh.closed = stored.meta.status == Status::Closed;
         app.cassettes[idx] = fresh;
         app.clear_dirty(idx);
         Ok(())
@@ -361,7 +370,7 @@ impl<'a> SessionWriter<'a> {
         let Ok(scan) = self.store.scan_session(&self.session) else {
             return false;
         };
-        if scan.unreadable > 0 {
+        if scan.unreadable() > 0 {
             return false;
         }
         for stored in &scan.cassettes {
@@ -878,9 +887,15 @@ mod tests {
 
         let mut w = SessionWriter::open(&store, &session, true, "w", "w");
         crate::try_acquire(&mut app, &mut w, 0);
-        assert!(app.read_only, "busy while the subprocess holds the lock");
-        let holder_name = app
-            .busy_holder
+        assert!(
+            app.read_only.is_read_only(),
+            "busy while the subprocess holds the lock"
+        );
+        // `holder` is already the subprocess here, so bind the name apart.
+        let crate::app::ReadOnly::Busy { holder: who } = &app.read_only else {
+            panic!("a held lock must read as Busy, not {:?}", app.read_only);
+        };
+        let holder_name = who
             .clone()
             .expect("the user must know WHO holds it, not just that it's busy");
 
@@ -902,7 +917,10 @@ mod tests {
 
         // Still busy on a tick that finds nothing changed.
         crate::retry_lock(&mut app, Some(&mut w));
-        assert!(app.read_only, "still blocked: the holder hasn't let go");
+        assert!(
+            app.read_only.is_read_only(),
+            "still blocked: the holder hasn't let go"
+        );
 
         // Contention is a standing condition with a banner of its own, so a
         // retry that stays blocked must not spend `status_msg` on saying so
@@ -927,8 +945,11 @@ mod tests {
         // The next tick's retry wins with no keypress at all — the point of
         // this task.
         crate::retry_lock(&mut app, Some(&mut w));
-        assert!(!app.read_only, "editable once the holder released");
-        assert_eq!(app.busy_holder, None);
+        assert!(
+            !app.read_only.is_read_only(),
+            "editable once the holder released"
+        );
+        assert_eq!(app.read_only, crate::app::ReadOnly::No);
     }
 
     /// The reviewer's data-loss reproduction, end to end: the TUI must not

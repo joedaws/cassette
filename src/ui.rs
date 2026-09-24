@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Mode, GUTTER_WIDTH, MINIMIZED_ROWS};
+use crate::app::{App, Mode, ReadOnly, GUTTER_WIDTH, MINIMIZED_ROWS};
 use crate::cassette::{char_width, pos_to_row_col, wrap_spans, Cassette, Side};
 use crate::theme::Theme;
 
@@ -20,12 +20,11 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
 
     // Only the window of cassettes starting at `cassette_scroll` is laid out:
     // the focused one full-height, the others minimized to their last line.
-    let first = app
-        .cassette_scroll
-        .min(app.cassettes.len().saturating_sub(1));
-    let n = app
-        .visible_cassette_count()
-        .min(app.cassettes.len() - first);
+    // The window covers the STACK, which excludes closed cassettes while the
+    // fold is shut — so a folded session never lays one out at all.
+    let stack = app.stack_len();
+    let first = app.cassette_scroll.min(stack.saturating_sub(1));
+    let n = app.visible_cassette_count().min(stack - first);
 
     let mut constraints: Vec<Constraint> = (first..first + n)
         .map(|i| {
@@ -36,6 +35,13 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
             }
         })
         .collect();
+    let closed_row = closed_row_text(app);
+    if closed_row.is_some() {
+        constraints.push(Constraint::Length(1)); // the closed fold's own row
+    }
+    for _ in &app.damaged {
+        constraints.push(Constraint::Length(1)); // one row per damaged file
+    }
     constraints.push(Constraint::Length(1)); // bottom separator (closes the stack)
     constraints.push(Constraint::Min(0)); // filler: pins the footer to the window bottom
     constraints.push(Constraint::Length(1)); // reel stats
@@ -66,8 +72,29 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         }
     }
 
+    // Everything after the stack shifts down by one when the fold row is
+    // drawn, so the offset is computed once rather than spelled per chunk.
+    let after_stack = if let Some(row) = &closed_row {
+        let style = Style::new().fg(theme.unfocused_fg);
+        frame.render_widget(Paragraph::new(row.clone()).style(style), chunks[n]);
+        n + 1
+    } else {
+        n
+    };
+
+    // Damaged files sit below the fold row: both are outside the working
+    // set, which is what they have in common.
+    let damaged_style = Style::new().fg(theme.unfocused_fg);
+    for (i, (label, reason)) in app.damaged.iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(format!("⚠ {label} — {reason}")).style(damaged_style),
+            chunks[after_stack + i],
+        );
+    }
+    let after_stack = after_stack + app.damaged.len();
+
     let sep = "─".repeat(area.width as usize);
-    frame.render_widget(Paragraph::new(sep), chunks[n]);
+    frame.render_widget(Paragraph::new(sep), chunks[after_stack]);
 
     // Overflow indicators for cassettes scrolled out of view.
     let (above, below) = app.hidden_cassettes();
@@ -75,25 +102,43 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         render_overflow_hint(frame, chunks[0], above, '↑');
     }
     if below > 0 {
-        render_overflow_hint(frame, chunks[n], below, '↓');
+        render_overflow_hint(frame, chunks[after_stack], below, '↓');
     }
 
-    render_reel_stats(frame, chunks[n + 2], app);
+    render_reel_stats(frame, chunks[after_stack + 2], app);
 
     // The topic prompt owns the line while open; then status messages; then
     // the idle nudge; otherwise a vim-style info line. `info_text` is the
     // pure text; the idle-nudge dimming is the only style decision left here.
     let mut info_style = Style::new();
-    if app.status_msg.is_none() && app.mode != Mode::Topic && app.idle_nudge() && !app.read_only {
+    if app.status_msg.is_none()
+        && app.mode != Mode::Topic
+        && app.idle_nudge()
+        && !app.read_only.is_read_only()
+    {
         info_style = Style::new().fg(Color::DarkGray);
     }
     frame.render_widget(
         Paragraph::new(info_text(app)).style(info_style),
-        chunks[n + 3],
+        chunks[after_stack + 3],
     );
 
-    let help = match app.mode {
-        _ if app.read_only => {
+    let help = help_text(app);
+    frame.render_widget(
+        Paragraph::new(help_line(help, theme)),
+        chunks[after_stack + 4],
+    );
+}
+
+/// The help row's text for the current mode and read-only reason. Pure, so
+/// tests can assert the remedy each state names without a terminal —
+/// `render` applies the key/description styling.
+pub(crate) fn help_text(app: &App) -> &'static str {
+    match app.mode {
+        _ if matches!(app.read_only, ReadOnly::Closed) => {
+            "this cassette is closed  `cassette queue reopen` to write in it again  z:fold  Tab:next  ^C:quit & save"
+        }
+        _ if app.read_only.is_read_only() => {
             "keys ignored: another writer holds this cassette's lock  Tab:next  ^N:new  ^C:quit & save"
         }
         Mode::Insert if app.record => {
@@ -101,11 +146,24 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         }
         Mode::Insert => "Esc:normal  Enter:newline  ^W:del word  ^T:topic  ^B:flip side  Tab:next  ^N:new  ^C:quit",
         Mode::Normal => {
-            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  t:topic  ^B:flip  q:quit"
+            "i/a/o:insert  hjkl:move  w/b:word  0/$:line  x/dd:del  u:undo  gg/G:jump  t:topic  z:fold  ^B:flip  q:quit"
         }
         Mode::Topic => "Enter:set topic  Esc:cancel  (empty input clears the topic)",
-    };
-    frame.render_widget(Paragraph::new(help_line(help, theme)), chunks[n + 4]);
+    }
+}
+
+/// The closed fold's row — `▸ 12 closed` shut, `▾ 12 closed` open — or
+/// `None` when the session has no closed cassettes, since an affordance for
+/// nothing is noise. Pure text; `render` applies the theme's `unfocused_fg`,
+/// following the `info_text`/`separator_text` precedent so production and
+/// tests can never disagree about the wording.
+pub(crate) fn closed_row_text(app: &App) -> Option<String> {
+    let n = app.closed_count();
+    if n == 0 {
+        return None;
+    }
+    let arrow = if app.closed_expanded { '▾' } else { '▸' };
+    Some(format!("{arrow} {n} closed"))
 }
 
 /// The vim-style info line's text: topic prompt, status message, or idle
@@ -115,12 +173,12 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
 /// style decision (dimming the idle nudge).
 ///
 /// A read-only cassette names its holder — `open by refactor-agent` — rather
-/// than showing the bare `-- READ ONLY --` 5a left: `app.busy_holder` is
+/// than showing the bare `-- READ ONLY --` 5a left: `ReadOnly::Busy`'s holder is
 /// `None` only when there is genuinely no name to show (a garbled lock
 /// anchor), in which case the bare label is all that's left to say.
 ///
 /// That arm is reachable only because `try_acquire` records a busy cassette
-/// in `read_only`/`busy_holder` and leaves `status_msg` — checked above it —
+/// in `read_only`'s own variant and leaves `status_msg` — checked above it —
 /// for transient news. `pub(crate)` so the cross-process contention test in
 /// `session_writer` can assert the banner reaches the screen under a real
 /// held lock, rather than only from hand-set fields.
@@ -135,15 +193,17 @@ pub(crate) fn info_text(app: &App) -> String {
     // and it would shadow the one line saying why — the same shadowing the
     // busy banner was rescued from one branch below. Watching another writer
     // work is not idling, so the nudge is wrong here on its own terms.
-    if app.idle_nudge() && !app.read_only {
+    if app.idle_nudge() && !app.read_only.is_read_only() {
         return "· · ·  tape's still rolling — keep writing  · · ·".to_string();
     }
     let c = &app.cassettes[app.focus_idx];
     let (ln, col) = c.cursor_line_col();
     let mode_str = match app.mode {
-        _ if app.read_only => match &app.busy_holder {
-            Some(holder) => format!("-- READ ONLY (open by {holder}) --"),
-            None => "-- READ ONLY --".to_string(),
+        _ if app.read_only.is_read_only() => match &app.read_only {
+            ReadOnly::Busy { holder: Some(h) } => format!("-- READ ONLY (open by {h}) --"),
+            ReadOnly::Busy { holder: None } => "-- READ ONLY --".to_string(),
+            ReadOnly::Closed => "-- CLOSED --".to_string(),
+            ReadOnly::No => unreachable!("guarded by is_read_only above"),
         },
         Mode::Insert if app.record => "-- RECORD --".to_string(),
         Mode::Insert => "-- INSERT --".to_string(),
@@ -161,7 +221,10 @@ pub(crate) fn info_text(app: &App) -> String {
         col,
         c.char_count(),
         app.focus_idx + 1,
-        app.cassettes.len(),
+        // The STACK, not the whole list: with twelve closed cassettes folded
+        // away, `cassette 1/13` beside a Tab cycle of one contradicts the
+        // fold's whole premise.
+        app.stack_len(),
         side
     )
 }
@@ -621,6 +684,127 @@ mod tests {
     use crate::app::App;
     use ratatui::{backend::TestBackend, Terminal};
 
+    /// Build an app with `open` open cassettes, `closed` closed ones and
+    /// `damaged` damaged rows, laid out at 80x24 — the shape the fold and
+    /// the error rows are actually seen at.
+    fn folded_app(open: usize, closed: usize, damaged: usize) -> App {
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
+        app.cassettes.clear();
+        // Topics, not just ids: a cassette's id is never drawn, so a
+        // fixture without one of these has nothing on screen to assert the
+        // absence of — the test would pass whether or not it was laid out.
+        for i in 0..open {
+            let mut c = Cassette::new();
+            c.id = format!("open-{i:02}");
+            c.topic = Some(format!("opentopic{i}"));
+            c.priority = i as i64 * 10;
+            app.cassettes.push(c);
+        }
+        for i in 0..closed {
+            let mut c = Cassette::new();
+            c.id = format!("shut-{i:02}");
+            c.topic = Some(format!("shuttopic{i}"));
+            c.priority = 1000 + i as i64;
+            c.closed = true;
+            app.cassettes.push(c);
+        }
+        app.damaged = (0..damaged)
+            .map(|i| (format!("bad-{i}"), "could not be read".to_string()))
+            .collect();
+        app.sort_queue();
+        app.resize(80, 24);
+        app
+    }
+
+    fn drawn(app: &App) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render(f, app, &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    /// The fold's central rendering guarantee: a folded session lays out no
+    /// closed cassette at all. `render`'s window spans `stack_len()`, and
+    /// swapping that back to `cassettes.len()` must fail a test.
+    #[test]
+    fn a_folded_session_draws_no_closed_cassette() {
+        let app = folded_app(2, 3, 0);
+        assert!(!app.closed_expanded);
+        let screen = drawn(&app).join("\n");
+
+        assert!(
+            screen.contains("opentopic0"),
+            "the open ones ARE drawn, so absence below means something:\n{screen}"
+        );
+        assert!(
+            !screen.contains("shuttopic"),
+            "closed cassettes must not be drawn while folded:\n{screen}"
+        );
+        assert!(screen.contains("▸ 3 closed"), "{screen}");
+    }
+
+    /// The fold row sits directly under the stack, and the damaged rows
+    /// directly under it — both above the separator that closes the stack.
+    #[test]
+    fn the_fold_row_and_damaged_rows_sit_between_the_stack_and_the_separator() {
+        let app = folded_app(1, 2, 2);
+        let rows = drawn(&app);
+        let fold = rows
+            .iter()
+            .position(|r| r.contains("▸ 2 closed"))
+            .expect("fold row is drawn");
+        let first_damaged = rows
+            .iter()
+            .position(|r| r.contains("bad-0"))
+            .expect("damaged row is drawn");
+        let second_damaged = rows
+            .iter()
+            .position(|r| r.contains("bad-1"))
+            .expect("second damaged row is drawn");
+
+        assert_eq!(first_damaged, fold + 1, "damaged rows follow the fold row");
+        assert_eq!(second_damaged, fold + 2, "and each other, in order");
+    }
+
+    /// Every widget after the stack indexes off one `after_stack` offset.
+    /// Dropping the `+ damaged.len()` term silently slid the footer up over
+    /// the damaged rows — the exact failure CLAUDE.md's `ui.rs` entry warns
+    /// about — so the footer's position is pinned with them on screen.
+    #[test]
+    fn the_footer_still_lands_below_the_damaged_rows() {
+        let app = folded_app(1, 1, 3);
+        let rows = drawn(&app);
+        let last_damaged = rows
+            .iter()
+            .rposition(|r| r.contains("bad-2"))
+            .expect("last damaged row is drawn");
+
+        // The info line carries the mode; it must sit below every ⚠ row and
+        // must not have overwritten one.
+        let info = rows
+            .iter()
+            .rposition(|r| r.contains("-- INSERT --"))
+            .expect("info line is drawn");
+        assert!(
+            info > last_damaged,
+            "footer must stay below the damaged rows (info {info}, last ⚠ {last_damaged})"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("⚠")).count(),
+            3,
+            "all three damaged rows survive the footer's layout"
+        );
+    }
+
     /// The reel/status/help footer pins to the bottom of the window; the
     /// filler sits between the cassette stack and the footer, not below it.
     #[test]
@@ -853,8 +1037,9 @@ mod tests {
     #[test]
     fn the_busy_indicator_names_the_holder() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.read_only = true;
-        app.busy_holder = Some("refactor-agent".to_string());
+        app.read_only = ReadOnly::Busy {
+            holder: Some("refactor-agent".to_string()),
+        };
         let line = crate::ui::info_text(&app);
         assert!(
             line.contains("refactor-agent"),
@@ -880,8 +1065,9 @@ mod tests {
             "fixture must actually be nudging, or this proves nothing"
         );
 
-        app.read_only = true;
-        app.busy_holder = Some("refactor-agent".to_string());
+        app.read_only = ReadOnly::Busy {
+            holder: Some("refactor-agent".to_string()),
+        };
         let line = crate::ui::info_text(&app);
         assert!(
             line.contains("READ ONLY (open by refactor-agent)"),
@@ -890,17 +1076,116 @@ mod tests {
         assert!(!line.contains("still rolling"), "{line}");
     }
 
+    /// The fold's own row: how much history is there, and which way it
+    /// opens.
+    #[test]
+    fn the_closed_row_counts_and_points() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        let mut open = Cassette::new();
+        open.id = "a".to_string();
+        open.priority = 1;
+        app.cassettes.push(open);
+        for i in 0..12 {
+            let mut c = Cassette::new();
+            c.id = format!("c{i:02}");
+            c.priority = 10 + i;
+            c.closed = true;
+            app.cassettes.push(c);
+        }
+        app.sort_queue();
+
+        assert_eq!(
+            crate::ui::closed_row_text(&app).as_deref(),
+            Some("▸ 12 closed")
+        );
+        app.toggle_closed_fold();
+        assert_eq!(
+            crate::ui::closed_row_text(&app).as_deref(),
+            Some("▾ 12 closed")
+        );
+    }
+
+    /// No closed cassettes, no row — an affordance for nothing is noise.
+    #[test]
+    fn no_closed_row_without_closed_cassettes() {
+        let app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        assert_eq!(crate::ui::closed_row_text(&app), None);
+    }
+
+    /// `z` is the only way into the closed fold, and the only way out of a
+    /// session whose cassettes are all closed. A binding discoverable
+    /// nowhere on screen is close to not shipped.
+    #[test]
+    fn the_help_row_advertises_the_fold_key() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.mode = Mode::Normal;
+        assert!(crate::ui::help_text(&app).contains("z:fold"));
+
+        app.read_only = ReadOnly::Closed;
+        assert!(
+            crate::ui::help_text(&app).contains("z:fold"),
+            "especially here, where the fold is how you get back out"
+        );
+    }
+
+    /// The help row must name the remedy. Closed needs an action
+    /// (`queue reopen`); busy only needs patience, and telling a human to
+    /// wait for a closed cassette leaves them waiting forever.
+    #[test]
+    fn the_help_row_names_the_remedy_for_closed() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.read_only = ReadOnly::Closed;
+        let help = crate::ui::help_text(&app);
+        assert!(help.contains("queue reopen"), "{help}");
+
+        app.read_only = ReadOnly::Busy { holder: None };
+        let busy = crate::ui::help_text(&app);
+        assert!(busy.contains("another writer"), "{busy}");
+        assert!(!busy.contains("queue reopen"), "{busy}");
+    }
+
+    /// Busy, sticky and closed are three states with three different
+    /// remedies: wait, go unlock it, go reopen it. 5b established that the
+    /// display must tell busy and sticky apart; closed is the third, and a
+    /// human sent to wait for a closed cassette waits forever.
+    #[test]
+    fn a_closed_cassette_does_not_read_like_a_busy_one() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.read_only = ReadOnly::Busy {
+            holder: Some("refactor-agent".to_string()),
+        };
+        let busy = crate::ui::info_text(&app);
+
+        app.read_only = ReadOnly::Closed;
+        let closed = crate::ui::info_text(&app);
+
+        assert!(
+            busy.contains("READ ONLY (open by refactor-agent)"),
+            "{busy}"
+        );
+        assert!(closed.contains("-- CLOSED --"), "{closed}");
+        assert!(
+            !closed.contains("READ ONLY"),
+            "closed is not 'someone else has it': {closed}"
+        );
+        assert!(
+            closed.contains("cassette 1/"),
+            "and it keeps the rest of the info line: {closed}"
+        );
+    }
+
     /// Busy means wait; sticky means go and unlock it. A display that blurs
     /// them sends the user to wait for something that will never free itself.
     #[test]
     fn a_busy_cassette_and_a_sticky_one_do_not_read_the_same() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.read_only = true;
-        app.busy_holder = Some("refactor-agent".to_string());
+        app.read_only = ReadOnly::Busy {
+            holder: Some("refactor-agent".to_string()),
+        };
         let busy = crate::ui::info_text(&app);
 
-        app.read_only = false;
-        app.busy_holder = None;
+        app.read_only = ReadOnly::No;
         app.cassettes[0].locked_by = Some("joseph".to_string());
         let sticky = crate::ui::separator_text(&app, 0);
 

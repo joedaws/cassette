@@ -12,7 +12,7 @@ pub enum Side {
 /// Each cassette has two sides (A and B, like a tape). The zipper always holds the
 /// active side; `flip` swaps it with the stored back side, so each side keeps its
 /// own cursor position across flips.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Cassette {
     pub left: String,
     pub right: String,
@@ -39,10 +39,46 @@ pub struct Cassette {
     /// stored `CassetteMeta` — `Cassette` does no store I/O of its own, so it
     /// carries the name, not the id, ready for `ui.rs` to show verbatim.
     /// `None` for a cassette with no sticky lock, which is most of them.
-    /// Distinct from `App.busy_holder`: this is a durable claim only a human
-    /// can clear (`queue unlock`); a busy cassette is transiently held by a
-    /// live process and frees itself.
+    /// Distinct from a busy cassette, which is transiently held by a live
+    /// process and frees itself; this is a durable claim only a human can
+    /// clear (`queue unlock`).
     pub locked_by: Option<String>,
+    /// This cassette's queue priority, mirroring `store::meta::CassetteMeta`'s.
+    /// A plain `i64` so this module needs no store import — the same reason
+    /// `locked_by` carries a resolved name rather than a writer id.
+    /// `i64::MAX` means "no store counterpart yet": a `Ctrl+N` cassette holds
+    /// it until `session_writer::create_cassette` mints the real tail-of-queue
+    /// value, so an unminted cassette sorts to the tail rather than the head.
+    /// The TUI never writes this back — `flush_held` owns only `topic`,
+    /// `last_writer` and `updated_at`, so priority stays the queue commands'.
+    pub priority: i64,
+    /// Whether this cassette is closed in the store (`queue close`). A `bool`
+    /// rather than `store::meta::Status`, to keep this module import-free.
+    /// Closed cassettes fold away in the TUI and open read-only; reopening is
+    /// a CLI act, so the TUI never writes this back either.
+    pub closed: bool,
+}
+
+// Hand-written rather than derived: `priority` defaults to `i64::MAX`, the
+// "not yet minted" sentinel, and every constructor funnels through here.
+impl Default for Cassette {
+    fn default() -> Self {
+        Self {
+            left: String::new(),
+            right: String::new(),
+            back_left: String::new(),
+            back_right: String::new(),
+            side: Side::A,
+            topic: None,
+            undo: Vec::new(),
+            back_undo: Vec::new(),
+            id: String::new(),
+            dirty: false,
+            locked_by: None,
+            priority: i64::MAX,
+            closed: false,
+        }
+    }
 }
 
 /// Maximum undo snapshots kept per cassette side.

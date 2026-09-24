@@ -22,9 +22,14 @@ them.
   is fine and being *unable* to is its own distraction. And if a timed or
   record session goes quiet, a gentle nudge reminds you the tape's still
   rolling — no punishment, no deleted words.
-- **Multiple cassettes** — up to 36 independent writing surfaces in one
-  session. Keep separate threads of thought separate; Tab between them. The
-  focused cassette is full height, the rest minimize to their last line.
+- **Multiple cassettes** — up to 36 *open* writing surfaces in one session.
+  Keep separate threads of thought separate; Tab between them. The focused
+  cassette is full height, the rest minimize to their last line. They sit in
+  queue order — the order `cassette queue list` shows — so the TUI and the
+  CLI never disagree about what comes next. Cassettes an agent has closed
+  fold away into a single `▸ 3 closed` row you open with `z`; they don't
+  count against the 36, so a long-lived daily session hits the cap on what
+  you're working on rather than on what you've kept.
 - **Every tape has two sides** — flip to side B with Ctrl+B for scratch
   space: an outline, a stray tangent, notes to future you. Each side keeps
   its own cursor and undo history, and both sides land in the saved file.
@@ -340,7 +345,12 @@ writing; a cassette already on screen has its text updated in place. If
 you'd scrolled up in a cassette being written elsewhere, new text pulls your
 view along only when your cursor was already sitting at the end — scrolled
 away to reread something, you stay put. New arrivals stop once the session
-is already at the 36-cassette cap, the same limit `Ctrl+N` respects.
+already has 36 **open** cassettes, the same limit `Ctrl+N` respects — one
+that arrives already closed never counts against it, since it is history
+rather than work. A file too damaged to parse is not silently skipped
+either: it gets a `⚠ <id> — frontmatter is unparseable` row of its own under
+the fold, because a cassette that vanishes from every view is invisible
+work.
 
 **There is no active session.** Cassette never remembers which session you were
 last using: every `queue` command takes an explicit `--session <id>`, and if

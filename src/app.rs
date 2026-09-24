@@ -30,11 +30,48 @@ pub enum Mode {
     Topic,
 }
 
+/// Why the focused cassette cannot be written, or `No` when it can.
+///
+/// One field rather than a `bool` plus a separate holder name: 5b shipped a
+/// display bug caused by recording one fact in two places, and adding
+/// "closed" as a second reason to be unwritable would have compounded it.
+/// Each variant carries exactly what its own banner needs, so the renderer
+/// cannot be handed a state that contradicts itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReadOnly {
+    #[default]
+    No,
+    /// Another live writer holds the lock. It frees itself, so the remedy is
+    /// to wait. `holder` is `None` only when the lock anchor yields no name
+    /// (a crashed or garbled write).
+    Busy { holder: Option<String> },
+    /// Closed in the store (`queue close`). Only `queue reopen` clears it,
+    /// so the remedy is an action, not patience — which is why this must not
+    /// read like `Busy` on screen.
+    Closed,
+}
+
+impl ReadOnly {
+    /// True for every reason the focused cassette cannot be written.
+    pub fn is_read_only(&self) -> bool {
+        !matches!(self, ReadOnly::No)
+    }
+}
+
 pub struct App {
     pub cassettes: Vec<Cassette>,
     pub focus_idx: usize,
     /// Index of the first cassette shown on screen (whole-cassette scrolling).
     pub cassette_scroll: usize,
+    /// Files in this session that exist but could not be loaded, as
+    /// (label, reason) — plain strings, because these are not cassettes and
+    /// `App` holds no store types. Rendered as unfocusable rows: they are
+    /// not in `cassettes`, so focus movement cannot reach them at all.
+    pub damaged: Vec<(String, String)>,
+    /// Whether the closed-cassette fold is open. Closed cassettes are in the
+    /// scroll window only while it is, which is what keeps Tab out of them
+    /// without a special case in focus movement.
+    pub closed_expanded: bool,
     pub term_width: u16,
     pub term_height: u16,
     pub status_msg: Option<String>,
@@ -65,24 +102,15 @@ pub struct App {
     /// is `main.rs`'s job, not `App`'s. Empty only in `-o` mode, which
     /// persists nothing.
     pub session: String,
-    /// The focused cassette's lock could not be taken — another writer holds
-    /// it. The text is shown but not editable: accepting keystrokes with no
+    /// Why the focused cassette cannot be written, or `No` when it can.
+    ///
+    /// The text is still shown either way: accepting keystrokes with no
     /// guard to write them through would lose them at the next flush, and
-    /// refusing to start would let an agent lock a human out of their own
-    /// session. `modify_focused` is the gate; `main.rs` sets the flag when
-    /// `SessionWriter::acquire` fails.
-    pub read_only: bool,
-    /// While `read_only` is set, the name of the writer holding the lock —
-    /// from the lock anchor's own attribution, the same source `queue
-    /// write`'s exit-3 message reads (`LockError::Busy`'s `holder`). `None`
-    /// when read-only for a reason with no name to show (no writer, or a
-    /// holder whose anchor could not be read). `main.rs` sets this alongside
-    /// `read_only`, on every acquire attempt — keypress-driven and, from this
-    /// task, tick-driven too. Distinct from a cassette's own `locked_by`: a
-    /// busy holder is transient and frees itself; a sticky lock is durable
-    /// and needs a human to clear it (`queue unlock`) — the two must not
-    /// render the same way.
-    pub busy_holder: Option<String>,
+    /// refusing to open would let an agent lock a human out of their own
+    /// session. `modify_focused` is the gate; `main.rs` sets this from
+    /// `SessionWriter::acquire`'s outcome and from the focused cassette's
+    /// own `closed` flag.
+    pub read_only: ReadOnly,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
     /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
@@ -107,6 +135,8 @@ impl App {
             cassettes: vec![Cassette::new()],
             focus_idx: 0,
             cassette_scroll: 0,
+            damaged: Vec::new(),
+            closed_expanded: false,
             term_width: 80,
             term_height: 24,
             status_msg: None,
@@ -126,8 +156,7 @@ impl App {
             baseline_words: 0,
             idle_secs: 0,
             session,
-            read_only: false,
-            busy_holder: None,
+            read_only: ReadOnly::No,
             bell: false,
             suspend: false,
             status_ticks: None,
@@ -215,7 +244,16 @@ impl App {
     /// How many cassettes fit on screen at once: the focused one full-height,
     /// the rest minimized to `MINIMIZED_ROWS` each.
     pub fn visible_cassette_count(&self) -> usize {
-        let available = self.term_height.saturating_sub(UI_OVERHEAD);
+        // The fold row and the damaged rows are laid out between the stack
+        // and the footer, so they come out of the same budget. Without this
+        // a full stack plus a few damaged files pushed the reel bar, info
+        // line and help row clean off the bottom of the screen, with nothing
+        // left to say why.
+        let extra_rows = u16::from(self.closed_count() > 0) + self.damaged.len() as u16;
+        let available = self
+            .term_height
+            .saturating_sub(UI_OVERHEAD)
+            .saturating_sub(extra_rows);
         let focused = self.rows_per_cassette();
         if available <= focused {
             return 1;
@@ -226,7 +264,7 @@ impl App {
     /// Keep `focus_idx` inside the visible window, clamped to the cassette list.
     fn ensure_focus_visible(&mut self) {
         let visible = self.visible_cassette_count();
-        let max_scroll = self.cassettes.len().saturating_sub(visible);
+        let max_scroll = self.stack_len().saturating_sub(visible);
         self.cassette_scroll = self.cassette_scroll.min(max_scroll);
         if self.focus_idx < self.cassette_scroll {
             self.cassette_scroll = self.focus_idx;
@@ -257,24 +295,43 @@ impl App {
             return;
         }
         self.cassettes = cassettes;
-        self.cassettes.truncate(MAX_CASSETTES);
+        self.sort_queue();
+        // Keep every closed cassette and the best `MAX_CASSETTES` open ones.
+        // A blind `truncate` here dropped OPEN cassettes off a session with
+        // enough history, because queue order puts the closed ones in the
+        // same list — the cap is on the working set, not on what is kept.
+        let mut open_kept = 0usize;
+        self.cassettes.retain(|c| {
+            if c.closed {
+                return true;
+            }
+            open_kept += 1;
+            open_kept <= MAX_CASSETTES
+        });
         self.baseline_words = self.cassettes.iter().map(|c| c.word_count()).sum();
-        self.focus_idx = self.cassettes.len() - 1;
+        // Land on the last OPEN cassette: resuming focused on a closed one
+        // would open read-only with no way to type.
+        self.focus_idx = self
+            .open_count()
+            .saturating_sub(1)
+            .min(self.cassettes.len().saturating_sub(1));
+        // A session whose cassettes are ALL closed has nothing to show
+        // folded, so it opens expanded — there would otherwise be an empty
+        // screen and no valid focus.
+        self.closed_expanded = self.open_count() == 0;
         self.ensure_focus_visible();
     }
 
     /// Merge one cassette read from the store into the list: update it in
     /// place if this process already holds a copy (by store id, not by
-    /// index — an earlier insertion may have shifted it), or insert `incoming`
-    /// as a newcomer at `insert_at`.
+    /// index — an earlier insertion may have shifted it), or place
+    /// `incoming` as a newcomer at its own queue priority.
     ///
-    /// `insert_at` is the caller's job, not this method's: priority lives in
-    /// `store::meta::CassetteMeta`, which `Cassette` — a pure data type with
-    /// no store knowledge — does not carry and which this task does not add
-    /// to it. `main.rs`, which already reads the store's priority order to
-    /// decide what to merge in the first place, is where that ordering
-    /// knowledge already lives; passing the position here keeps it there
-    /// instead of duplicating it onto `Cassette`.
+    /// Position is not a parameter: `Cassette` carries its own `priority`,
+    /// so a newcomer is pushed and the list re-sorted. Phase 5b passed an
+    /// `insert_at` computed by the caller because priority lived only in
+    /// `store::meta::CassetteMeta`; 5c put it on the cassette and retired
+    /// the parameter.
     ///
     /// The cursor rule (the point of this method): if the existing
     /// cassette's cursor sat at the end of its active side, the merged
@@ -303,14 +360,15 @@ impl App {
     ///   would look like a first-sight change to `main.rs`'s sync step and
     ///   silently discard the cassette's undo stack and reset its cursor on
     ///   every tab-away, even though disk and memory already agreed. `incoming`'s
-    ///   `locked_by` is still applied when it's the only thing that moved
-    ///   (a `queue lock`/`unlock` with no text change) — it's metadata, not
-    ///   prose, and updating it in place costs the cursor/undo state nothing.
+    ///   `locked_by`, `priority` and `closed` are still applied when one of
+    ///   them is the only thing that moved (a `queue lock`/`move`/`close`
+    ///   with no text change) — they are metadata, not prose, and updating
+    ///   them in place costs the cursor/undo state nothing.
     ///
     /// Called from `main.rs`'s live-sync step (Task 4), on the existing
     /// one-second tick, for any cassette whose lock this process does not
     /// hold and whose file mtime has moved since it was last seen.
-    pub fn merge_external(&mut self, id: &str, incoming: Cassette, insert_at: usize) {
+    pub fn merge_external(&mut self, id: &str, incoming: Cassette) {
         let focused_id = self.cassettes.get(self.focus_idx).map(|c| c.id.clone());
 
         if let Some(idx) = self.cassettes.iter().position(|c| c.id == id) {
@@ -337,8 +395,19 @@ impl App {
                 && incoming.side_b_text().trim() == existing.side_b_text().trim()
                 && incoming.topic == existing.topic
             {
+                // `queue move` and `queue close` are the same kind of
+                // event as `queue lock`: metadata moving with the prose
+                // untouched. Re-sorting only when one actually changed keeps
+                // the overwhelmingly common no-op tick free of work.
+                let requeued = self.cassettes[idx].priority != incoming.priority
+                    || self.cassettes[idx].closed != incoming.closed;
+                self.cassettes[idx].priority = incoming.priority;
+                self.cassettes[idx].closed = incoming.closed;
                 if self.cassettes[idx].locked_by != incoming.locked_by {
                     self.cassettes[idx].locked_by = incoming.locked_by;
+                }
+                if requeued {
+                    self.sort_queue();
                 }
                 return;
             }
@@ -378,13 +447,26 @@ impl App {
                 merged.set_cursor(target);
             }
             merged.id = id.to_string();
+            // Queue metadata survives the rebuild. `merged` is built from
+            // the incoming TEXT, so anything not copied here silently
+            // reverts to `Cassette::default()` — which for `priority` is the
+            // `i64::MAX` unminted sentinel, and would send an established
+            // cassette to the tail of the queue on its next merge.
+            merged.priority = incoming.priority;
+            merged.closed = incoming.closed;
             merged.locked_by = incoming.locked_by;
             self.cassettes[idx] = merged;
+            self.sort_queue();
         } else {
             let mut merged = incoming;
             merged.id = id.to_string();
-            let at = insert_at.min(self.cassettes.len());
-            self.cassettes.insert(at, merged);
+            // Push and sort: the cassette carries its own priority, so its
+            // position is a property of the data rather than something the
+            // caller computes. `sort_queue` restores focus by id, which is
+            // what keeps an arrival ahead of the focused cassette from
+            // silently stealing focus.
+            self.cassettes.push(merged);
+            self.sort_queue();
         }
 
         if let Some(fid) = focused_id {
@@ -395,26 +477,129 @@ impl App {
         self.ensure_focus_visible();
     }
 
+    /// Cassettes in queue order: open before closed, then priority, then id.
+    /// Mirrors `store::priority::queue_order`, which stays the authority on
+    /// what queue order means — `App` is pure and cannot import it, so the
+    /// two are kept in step by tests that pin the same three keys.
+    ///
+    /// Focus is preserved by **identity**, not position: sorting moves
+    /// cassettes under `focus_idx`. Doing that here rather than in each
+    /// caller is the discipline `merge_external` already follows, and the
+    /// reason 5b bound the held lock guard to an id instead of an index.
+    pub fn sort_queue(&mut self) {
+        let focused_id = self.cassettes.get(self.focus_idx).map(|c| c.id.clone());
+        self.cassettes.sort_by(|a, b| {
+            // The id tie-break sorts an UNMINTED cassette (empty id) last
+            // rather than first. Plain string order would put "" ahead of
+            // every real ULID, so a Ctrl+N cassette would jump the queue for
+            // as long as it took `create_cassette` to mint its id. An
+            // unminted cassette is by definition the newest thing here.
+            let key = |c: &Cassette| (c.closed, c.priority, c.id.is_empty(), c.id.clone());
+            key(a).cmp(&key(b))
+        });
+        if let Some(id) = focused_id {
+            if let Some(i) = self.cassettes.iter().position(|c| c.id == id) {
+                self.focus_idx = i;
+            }
+        }
+        // The focused cassette may have just become closed — by an agent's
+        // `queue close`, arriving through sync or through the re-read inside
+        // `acquire`. It has now sorted past `stack_len()`, where nothing is
+        // drawn and `focus_next` cannot reach it. Open the fold rather than
+        // moving focus: the human is reading that cassette, and yanking them
+        // somewhere else to report that it closed is the ruder of the two.
+        // Expanding always restores the invariant, since the expanded stack
+        // is the whole list.
+        if self.focus_idx >= self.stack_len() {
+            self.closed_expanded = true;
+        }
+        self.ensure_focus_visible();
+    }
+
+    /// How many cassettes are open.
+    ///
+    /// Counted with a filter rather than a `take_while` over the sorted
+    /// prefix: the prefix property holds only while the list is sorted, and
+    /// a count that silently returns 0 because something pushed before
+    /// re-sorting is a trap. Callers that need the prefix — `stack_len`, and
+    /// the scroll window through it — get it from `sort_queue` maintaining
+    /// the order, not from this method assuming it.
+    pub fn open_count(&self) -> usize {
+        self.cassettes.iter().filter(|c| !c.closed).count()
+    }
+
+    /// How many cassettes the scroll window and focus movement cover.
+    ///
+    /// How many closed cassettes the fold is hiding or showing.
+    pub fn closed_count(&self) -> usize {
+        self.cassettes.len() - self.open_count()
+    }
+
+    /// How many cassettes the scroll window and focus movement cover.
+    ///
+    /// Closed cassettes join it only while the fold is open. Because
+    /// `sort_queue` keeps them last, "the open set" is the prefix
+    /// `0..open_count()`, so folding is a bound rather than a filter — and
+    /// Tab needs no special case to stay out of closed cassettes.
+    pub fn stack_len(&self) -> usize {
+        if self.closed_expanded {
+            self.cassettes.len()
+        } else {
+            self.open_count()
+        }
+    }
+
+    /// Toggle the closed fold (`z`).
+    ///
+    /// Refuses to collapse when nothing is open: that would leave a
+    /// zero-length stack with no valid focus and an empty screen. Collapsing
+    /// from a closed cassette moves focus to the last open one first, since
+    /// `focus_idx` would otherwise sit outside `stack_len()`.
+    pub fn toggle_closed_fold(&mut self) {
+        if self.closed_expanded {
+            if self.open_count() == 0 {
+                return;
+            }
+            self.closed_expanded = false;
+            if self.focus_idx >= self.open_count() {
+                self.focus_idx = self.open_count() - 1;
+            }
+        } else {
+            self.closed_expanded = true;
+        }
+        self.clear_status();
+        self.ensure_focus_visible();
+    }
+
     pub fn add_cassette(&mut self) {
-        if self.cassettes.len() >= MAX_CASSETTES {
+        // The cap is on the working set, not the retained history: closed
+        // cassettes fold away and are never written in, so they must not be
+        // what stops a human starting a new one.
+        if self.open_count() >= MAX_CASSETTES {
             self.status_msg = Some(format!("Cassette limit reached ({}).", MAX_CASSETTES));
             return;
         }
         self.cassettes.push(Cassette::new());
-        self.focus_idx = self.cassettes.len() - 1;
+        // Re-sort so the new cassette sits in the open section rather than
+        // after the closed ones, keeping the open-set-is-a-prefix invariant
+        // the fold and the scroll window both rely on. An unminted cassette
+        // carries `i64::MAX`, so it lands last among the open ones — which
+        // is where the human expects a brand new cassette to be.
+        self.sort_queue();
+        self.focus_idx = self.open_count().saturating_sub(1);
         self.clear_status();
         self.ensure_focus_visible();
     }
 
     pub fn focus_next(&mut self) {
-        let n = self.cassettes.len().max(1);
+        let n = self.stack_len().max(1);
         self.focus_idx = (self.focus_idx + 1) % n;
         self.clear_status();
         self.ensure_focus_visible();
     }
 
     pub fn focus_prev(&mut self) {
-        let n = self.cassettes.len().max(1);
+        let n = self.stack_len().max(1);
         self.focus_idx = (self.focus_idx + n - 1) % n;
         self.clear_status();
         self.ensure_focus_visible();
@@ -426,7 +611,7 @@ impl App {
     /// the writer; one that reaches it and is then discarded at the next
     /// flush is not.
     pub fn modify_focused<F: FnOnce(&mut Cassette)>(&mut self, f: F) {
-        if self.read_only {
+        if self.read_only.is_read_only() {
             return;
         }
         if let Some(c) = self.cassettes.get_mut(self.focus_idx) {
@@ -503,8 +688,7 @@ impl App {
     pub fn hidden_cassettes(&self) -> (usize, usize) {
         let visible = self.visible_cassette_count();
         let below = self
-            .cassettes
-            .len()
+            .stack_len()
             .saturating_sub(self.cassette_scroll + visible);
         (self.cassette_scroll, below)
     }
@@ -850,6 +1034,258 @@ mod tests {
         assert_eq!(app.cassettes.len(), MAX_CASSETTES);
     }
 
+    /// Today's `truncate(MAX_CASSETTES)` runs over a list queue order has
+    /// already put closed cassettes inside, so a resumed session with enough
+    /// history drops OPEN cassettes off the end. The cap is on working set.
+    #[test]
+    fn loading_keeps_every_open_cassette_when_closed_ones_fill_the_list() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        let mut loaded = Vec::new();
+        for i in 0..MAX_CASSETTES {
+            let mut c = Cassette::new();
+            c.id = format!("open-{i:02}");
+            c.priority = i as i64 * 10;
+            loaded.push(c);
+        }
+        for i in 0..5 {
+            let mut c = Cassette::new();
+            c.id = format!("closed-{i}");
+            c.closed = true;
+            c.priority = i as i64;
+            loaded.push(c);
+        }
+
+        app.load_cassettes(loaded);
+
+        assert_eq!(
+            app.open_count(),
+            MAX_CASSETTES,
+            "no open cassette is dropped"
+        );
+        assert!(
+            app.cassettes.iter().any(|c| c.id == "open-35"),
+            "including the last one"
+        );
+    }
+
+    /// `Ctrl+N` is capped on the working set too, so closed history never
+    /// blocks a new cassette.
+    #[test]
+    fn add_cassette_caps_on_open_not_total() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for i in 0..5 {
+            let mut c = Cassette::new();
+            c.id = format!("closed-{i}");
+            c.closed = true;
+            app.cassettes.push(c);
+        }
+        app.sort_queue();
+        for _ in 0..MAX_CASSETTES {
+            app.add_cassette();
+        }
+        assert_eq!(app.open_count(), MAX_CASSETTES);
+        assert_eq!(
+            app.cassettes.len(),
+            MAX_CASSETTES + 5,
+            "closed ones are retained"
+        );
+    }
+
+    /// The fold row and the damaged rows share the screen with the footer.
+    /// Ignoring them pushed the reel bar, info line and help row off the
+    /// bottom entirely, with no indication why.
+    #[test]
+    fn the_height_budget_accounts_for_the_fold_and_damaged_rows() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.term_height = 24;
+        app.term_width = 80;
+        let plain = app.visible_cassette_count();
+
+        let mut closed = Cassette::new();
+        closed.id = "c".to_string();
+        closed.closed = true;
+        app.cassettes.push(closed);
+        app.damaged = (0..6)
+            .map(|i| (format!("bad-{i}"), "unreadable".to_string()))
+            .collect();
+
+        assert!(
+            app.visible_cassette_count() < plain,
+            "seven extra rows must come out of the cassette budget, not the footer's"
+        );
+    }
+
+    /// Collapsed, Tab must not reach a closed cassette: expansion is what
+    /// makes them reachable, so focus movement needs no special case.
+    #[test]
+    fn tab_skips_closed_cassettes_while_folded() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for (id, priority, closed) in [("a", 10, false), ("b", 20, false), ("c", 30, true)] {
+            let mut c = Cassette::new();
+            c.id = id.to_string();
+            c.priority = priority;
+            c.closed = closed;
+            app.cassettes.push(c);
+        }
+        app.sort_queue();
+        assert!(!app.closed_expanded, "folded by default");
+
+        app.focus_idx = 1; // "b", the last open one
+        app.focus_next();
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, "a",
+            "wraps within the open set"
+        );
+
+        app.toggle_closed_fold();
+        app.focus_idx = 1;
+        app.focus_next();
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, "c",
+            "expanded, it is reachable"
+        );
+    }
+
+    /// Collapsing while focused on a closed cassette would leave `focus_idx`
+    /// outside `stack_len()` — pointing at a cassette no longer drawn.
+    #[test]
+    fn collapsing_moves_focus_off_a_closed_cassette() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for (id, closed) in [("a", false), ("c", true)] {
+            let mut c = Cassette::new();
+            c.id = id.to_string();
+            c.closed = closed;
+            app.cassettes.push(c);
+        }
+        app.sort_queue();
+        app.toggle_closed_fold();
+        app.focus_idx = 1; // the closed one
+
+        app.toggle_closed_fold(); // collapse
+
+        assert!(!app.closed_expanded);
+        assert_eq!(app.cassettes[app.focus_idx].id, "a");
+        assert!(app.focus_idx < app.stack_len());
+    }
+
+    /// A session whose cassettes are all closed has nothing to focus when
+    /// folded, so the fold opens and refuses to close.
+    #[test]
+    fn a_fully_closed_session_stays_expanded() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        let mut c = Cassette::new();
+        c.id = "c".to_string();
+        c.closed = true;
+        app.load_cassettes(vec![c]);
+
+        assert!(app.closed_expanded, "nothing else could be shown");
+        app.toggle_closed_fold();
+        assert!(
+            app.closed_expanded,
+            "refuses to collapse to an empty screen"
+        );
+    }
+
+    /// Queue order is the store's, not insertion order: open before closed,
+    /// then priority, then id as the tie-break. `store::priority::queue_order`
+    /// is the authority on this; `sort_queue` must not disagree with it.
+    #[test]
+    fn sort_queue_orders_open_before_closed_then_priority_then_id() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for (id, priority, closed) in [
+            ("z", 20, false),
+            ("b", 10, true),
+            ("a", 20, false),
+            ("m", 10, false),
+        ] {
+            let mut c = Cassette::new();
+            c.id = id.to_string();
+            c.priority = priority;
+            c.closed = closed;
+            app.cassettes.push(c);
+        }
+
+        app.sort_queue();
+
+        assert_eq!(
+            app.cassettes
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m", "a", "z", "b"],
+            "open by priority then id, closed last"
+        );
+        assert_eq!(app.open_count(), 3);
+    }
+
+    /// An unminted cassette carries an empty id, which plain string order
+    /// would sort ahead of every real ULID — so at equal priority a brand
+    /// new cassette would jump the queue until its id was minted.
+    #[test]
+    fn an_unminted_cassette_sorts_after_minted_ones_at_the_same_priority() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        let mut minted = Cassette::new();
+        minted.id = "01JREAL0000000000000000000".to_string();
+        app.cassettes.push(minted);
+        app.cassettes.push(Cassette::new()); // same i64::MAX priority, empty id
+
+        app.sort_queue();
+
+        assert_eq!(app.cassettes[0].id, "01JREAL0000000000000000000");
+        assert!(
+            app.cassettes[1].id.is_empty(),
+            "the unminted one stays last"
+        );
+    }
+
+    /// Sorting moves cassettes under `focus_idx`, which is an index. Focus is
+    /// identity, not position — the same rule `merge_external` already follows
+    /// and the reason 5b bound the lock guard to an id.
+    #[test]
+    fn sort_queue_keeps_focus_on_the_same_cassette() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        for (id, priority) in [("z", 30), ("a", 10)] {
+            let mut c = Cassette::new();
+            c.id = id.to_string();
+            c.priority = priority;
+            app.cassettes.push(c);
+        }
+        app.focus_idx = 0; // "z"
+
+        app.sort_queue();
+
+        assert_eq!(
+            app.cassettes[app.focus_idx].id, "z",
+            "focus follows the cassette"
+        );
+        assert_eq!(app.focus_idx, 1, "which is now at the tail");
+    }
+
+    /// A `Ctrl+N` cassette has no store priority yet. It must sort to the tail
+    /// rather than to the head, so a new cassette appears where the human
+    /// expects it until `create_cassette` mints the real value.
+    #[test]
+    fn an_unminted_cassette_sorts_to_the_tail() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes.clear();
+        let mut stored = Cassette::new();
+        stored.id = "a".to_string();
+        stored.priority = 10;
+        app.cassettes.push(stored);
+        app.cassettes.push(Cassette::new()); // unminted: empty id, i64::MAX
+
+        app.sort_queue();
+
+        assert_eq!(app.cassettes[0].id, "a");
+        assert!(app.cassettes[1].id.is_empty(), "the new one stays last");
+    }
+
     #[test]
     fn add_cassette_stops_at_max() {
         let mut app = test_app();
@@ -905,7 +1341,7 @@ mod tests {
         // of the cassette it just released focus on, not an external
         // writer's edit.
         let incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].cursor_pos(),
@@ -931,7 +1367,7 @@ mod tests {
 
         let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
         incoming.locked_by = Some("joseph".to_string());
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(app.cassettes[0].locked_by.as_deref(), Some("joseph"));
     }
@@ -955,7 +1391,7 @@ mod tests {
 
         let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
         incoming.locked_by = Some("joseph".to_string());
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].locked_by.as_deref(),
@@ -988,7 +1424,7 @@ mod tests {
         );
 
         let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(app.cassettes[0].side_a_text(), "first and more");
         assert_eq!(
@@ -1008,7 +1444,7 @@ mod tests {
         assert_eq!(app.cassettes[0].cursor_pos(), 0);
 
         let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].cursor_pos(),
@@ -1028,14 +1464,22 @@ mod tests {
         app.clear_dirty(1);
 
         let incoming = Cassette::from_sides("updated".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes.len(),
             2,
             "no insertion — this id already existed"
         );
-        assert_eq!(app.cassettes[1].side_a_text(), "updated");
+        // By id, not by index: the merge re-sorts, and these two share the
+        // unminted priority so the id tie-break decides where each lands.
+        // Asserting a fixed index here would be testing the fixture.
+        let updated = app
+            .cassettes
+            .iter()
+            .find(|c| c.id == "aaa00000000000000000000000")
+            .expect("the merged cassette is still present");
+        assert_eq!(updated.side_a_text(), "updated");
     }
 
     #[test]
@@ -1051,7 +1495,7 @@ mod tests {
         newcomer.id = "aaa00000000000000000000000".to_string();
         // Priority puts the newcomer ahead of the focused cassette: index 0
         // shifts to index 1, so this also exercises invariant 1.
-        app.merge_external("aaa00000000000000000000000", newcomer, 0);
+        app.merge_external("aaa00000000000000000000000", newcomer);
 
         assert_eq!(app.cassettes.len(), 2);
         assert_eq!(
@@ -1071,7 +1515,7 @@ mod tests {
 
         let mut newcomer = Cassette::new();
         newcomer.id = "second000000000000000000000".to_string();
-        app.merge_external("second000000000000000000000", newcomer, 1);
+        app.merge_external("second000000000000000000000", newcomer);
 
         assert_eq!(app.cassettes.len(), 3);
         assert_eq!(app.cassettes[0].id, "first0000000000000000000000");
@@ -1106,7 +1550,7 @@ mod tests {
             "scratch and more".to_string(),
             None,
         );
-        app.merge_external("aaa00000000000000000000000", incoming, 0);
+        app.merge_external("aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].side,
@@ -1125,7 +1569,7 @@ mod tests {
     #[test]
     fn read_only_ignores_text_keys_but_allows_leaving() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.read_only = true;
+        app.read_only = ReadOnly::Closed;
         let before = app.cassettes[app.focus_idx].side_a_text();
 
         app.modify_focused(|c| c.insert('x'));
