@@ -2564,3 +2564,67 @@ fn queue_topic_rejects_a_newline_with_exit_two() {
     let out = cmd(&["queue", "topic", &cid, "--session", &sid, "two\nlines"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
+
+#[test]
+fn completions_cover_the_queue_surface_for_each_shell() {
+    for shell in ["bash", "zsh", "fish"] {
+        let out = Command::new(bin())
+            .args(["completions", shell])
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{shell}: {}", stderr(&out));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("queue") && text.contains("write"), "{shell}");
+    }
+}
+
+#[test]
+fn completions_reject_an_unknown_shell() {
+    let out = Command::new(bin())
+        .args(["completions", "nope"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn generators_ignore_config_and_never_create_the_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("cfg");
+    std::fs::create_dir_all(cfg.join("cassette")).expect("mkdir");
+    std::fs::write(cfg.join("cassette/config.toml"), "this is = = not toml").expect("write");
+    let store = dir.path().join("never");
+    for args in [&["completions", "zsh"][..], &["man"][..]] {
+        let out = Command::new(bin())
+            .args(args)
+            .env("XDG_CONFIG_HOME", &cfg)
+            .env("CASSETTE_DATA_DIR", &store)
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+    }
+    assert!(!store.exists(), "no data dir is created");
+}
+
+#[test]
+fn man_prints_the_top_page_and_out_dir_writes_one_per_subcommand() {
+    let out = Command::new(bin()).arg("man").output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let page = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        page.lines()
+            .any(|l| l.starts_with(".TH") && l.contains("cassette")),
+        "{page}"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("man1");
+    let out = Command::new(bin())
+        .args(["man", "--out-dir"])
+        .arg(&target)
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(target.join("cassette.1").is_file());
+    assert!(target.join("cassette-queue-write.1").is_file());
+}

@@ -37,6 +37,10 @@ pub struct Args {
     pub session_cmd: Option<SessionCmd>,
     /// emit machine-readable JSON instead of prose.
     pub json: bool,
+    /// `completions <SHELL>`.
+    pub completions: Option<clap_complete::Shell>,
+    /// `man`: `Some(None)` prints cassette.1; `Some(Some(dir))` writes the set.
+    pub man: Option<Option<PathBuf>>,
 }
 
 /// `queue …` as `main()` consumes it. Every variant carries `session`:
@@ -228,6 +232,17 @@ enum Command {
         /// write to this path instead of stdout
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+    },
+    /// print shell completions to stdout
+    Completions {
+        #[arg(value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
+    /// print the man page to stdout, or write every page to a directory
+    Man {
+        /// write cassette.1 and one page per subcommand here instead
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
     },
     /// work with the shared cassette queue
     Queue {
@@ -491,6 +506,8 @@ impl Cli {
             Some(Command::Find { query }) => args.find = Some(query),
             Some(Command::Themes) => args.list_themes = true,
             Some(Command::Sessions) => args.pick_session = true,
+            Some(Command::Completions { shell }) => args.completions = Some(shell),
+            Some(Command::Man { out_dir }) => args.man = Some(out_dir),
             Some(Command::Export { session, out }) => {
                 args.export = Some(session);
                 args.export_out = out;
@@ -621,6 +638,13 @@ impl Cli {
 /// is nothing ambiguous left for clap to need help with.
 pub fn parse() -> Args {
     Cli::parse().into_args()
+}
+
+/// The clap command `parse()` parses. The one source the man page and the
+/// completions are generated from, so neither can drift from the real
+/// surface.
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
 }
 
 #[cfg(test)]

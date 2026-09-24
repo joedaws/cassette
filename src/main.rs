@@ -57,6 +57,15 @@ fn install_signal_handlers() -> io::Result<SignalFlags> {
     Ok(SignalFlags { terminate, suspend })
 }
 
+/// A write whose reader went away (`| head`) is the reader being done, not
+/// a failure. Every other error still propagates.
+fn tolerate_broken_pipe(r: io::Result<()>) -> io::Result<()> {
+    match r {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
 /// Best-effort terminal restore; must be safe to call twice and mid-panic.
 fn restore_terminal() {
     let _ = disable_raw_mode();
@@ -71,6 +80,39 @@ fn restore_terminal() {
 
 fn main() -> io::Result<()> {
     let mut args = cli::parse();
+
+    // Generators first: they describe the CLI, not a store, so neither a
+    // broken config.toml nor a missing data dir may stop them.
+    // Both render into memory and write once, so a reader that closes the
+    // pipe early (`cassette man | head`) ends the write cleanly instead of
+    // panicking or printing `Error: BrokenPipe`.
+    if let Some(shell) = args.completions {
+        let mut out = Vec::new();
+        clap_complete::generate(shell, &mut cli::command(), "cassette", &mut out);
+        return tolerate_broken_pipe(io::stdout().write_all(&out));
+    }
+    if let Some(out_dir) = args.man.take() {
+        let cmd = cli::command();
+        match out_dir {
+            None => {
+                let mut out = Vec::new();
+                clap_mangen::Man::new(cmd).render(&mut out)?;
+                return tolerate_broken_pipe(io::stdout().write_all(&out));
+            }
+            Some(dir) => {
+                if let Err(e) =
+                    std::fs::create_dir_all(&dir).and_then(|()| clap_mangen::generate_to(cmd, &dir))
+                {
+                    die_with(
+                        1,
+                        &format!("cannot write man pages to {}: {e}", dir.display()),
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let cfg = config::load_config().unwrap_or_else(|e| exit_with(2, &e, args.json));
 
     if args.list_themes {
@@ -1977,6 +2019,17 @@ mod tests {
         let second = change_stamp(&std::fs::metadata(&path).expect("stat")).expect("stamp");
 
         assert_ne!(first, second, "same mtime and length, new inode: a change");
+    }
+
+    #[test]
+    fn a_closed_pipe_is_not_an_error_for_generated_output() {
+        // `cassette man | head` closes the pipe early; that is the reader
+        // being done, not a failure worth an `Error:` line.
+        let broken = io::Error::new(io::ErrorKind::BrokenPipe, "closed");
+        assert!(tolerate_broken_pipe(Err(broken)).is_ok());
+        let other = io::Error::other("disk on fire");
+        assert!(tolerate_broken_pipe(Err(other)).is_err());
+        assert!(tolerate_broken_pipe(Ok(())).is_ok());
     }
 
     fn type_str(app: &mut App, s: &str) {
