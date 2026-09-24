@@ -29,7 +29,7 @@ this phase could remove its contents:
 | `output::parse_markdown` | 0 calls (1 doc-comment mention) | Delete, and fix the comment |
 | `config::find_available_path` | 0 | Delete |
 | `config::newest_note` | 0 | Delete |
-| `config::notes_dir`, `default_notes_dir` | 0 calls | See below — **not** a simple delete |
+| `config::notes_dir`, `default_notes_dir` | 0 calls | Delete — see below; the compatibility argument for keeping the field was wrong |
 
 Two things the parent spec lists as Phase 6 work are **already done** and this phase does not
 redo them: `stats` and `find` moved to the store in 5a, and `today`/`resume` have resolved
@@ -38,17 +38,26 @@ against store sessions since 5a's `resolve_session`. The spec's phase list preda
 `clear_draft_flag` and the `[y/N]` crash-recovery prompt named in the spec's Deletions do not
 exist in the tree at all — removed earlier or never built. Nothing to do.
 
-### `notes_dir` is a compatibility surface, not dead code
+### `notes_dir` — the compatibility argument was wrong, and the field is deleted
 
-`Config.notes_dir` has no callers, but deleting the **field** would make an existing
-`config.toml` that still sets `notes_dir` fail to parse — and `config::load_config` exits 2 on
-a parse error, so a user who has not touched their config since before 5a would find every
-command broken by an upgrade.
+**Corrected 2026-09-23, after review.** This section originally argued that `Config.notes_dir`
+had to survive: deleting the field would make an existing `config.toml` that still set it fail
+to parse, and `load_config` exits 2 on a parse error, so an upgrade would break every command
+for anyone who had not edited their config since 5a.
 
-So: the field stays and keeps parsing; `default_notes_dir` and the resolution helpers go. The
-field is marked deprecated in its doc comment and in the README's config table, and reading it
-does nothing. Removing it outright belongs to a release that can state a breaking change,
-which this is not.
+**That premise is false.** `Config` derives `Deserialize` with no `#[serde(deny_unknown_fields)]`,
+and serde's derive ignores unknown fields by default. Verified against the real binary: a
+config containing `this_key_does_not_exist = "hello"` parses fine and every command exits 0.
+Removing the field breaks nobody.
+
+Worse, the "regression test" this section justified passed identically with the field deleted —
+it guarded nothing while being described in three places as the one thing standing between an
+upgrade and a broken config. A test that cannot fail is worse than no test, because it is a
+false assurance resting on a wrong belief.
+
+So `notes_dir` is deleted along with the rest, and the test is replaced by one that pins what
+is actually true and load-bearing: an unknown key is ignored rather than erroring. Adding
+`deny_unknown_fields` makes that test fail, which the old one would not have noticed.
 
 ## `cassette export`
 
@@ -89,7 +98,10 @@ never briefly world-readable, and parents keep their own permissions. Four tests
 `registering_a_writer_creates_a_private_root`, `the_data_dirs_parent_keeps_its_own_permissions`).
 
 It also **does** tighten an existing directory that is looser than `0700`, which this spec had
-said it should not. On reflection the shipped behaviour is right: a store that is already
+said it should not. Bounded after review: it now clears only the group and other bits
+(`mode & !0o077`) rather than calling `set_mode(0o700)` wholesale, which had silently stripped
+setgid from a deliberately shared `2770` directory on every run. A test pins that `2770`
+becomes `2700`, not `700`. On reflection the shipped behaviour is right: a store that is already
 world-readable holds private writing that stays exposed for as long as nobody notices, and
 "don't surprise the user" is a weaker argument than "don't leave their journal readable". The
 spec is corrected to the code, not the code to the spec — changing tested security behaviour to
@@ -154,15 +166,15 @@ completions and release packaging get their own design alongside `docs/distribut
   permissions is left unchanged. `#[cfg(unix)]`.
 - **The sync warning** — a `data_dir` under a `Dropbox` path warns, an ordinary path does not,
   and in both cases the command still runs.
-- **Config compatibility** — a `config.toml` setting `notes_dir` still parses and does not
-  exit 2. This is the one test standing between an upgrade and a user's broken config.
+- **Config compatibility** — an *unknown* key is ignored rather than erroring, which is what
+  actually lets an older config keep working. Pinned by a test that fails if
+  `deny_unknown_fields` is ever added.
 
 ## Out of scope
 
 - Migrating the legacy `notes/` directory into the store. The files are untouched on disk and
   a migration is its own phase if it is ever wanted; the user accepted in 5a, with the cost
   stated, that those 45 notes stopped being counted.
-- Removing `Config.notes_dir` outright — see above.
 - Detecting network filesystems.
 - The man page, shell completions, and packaging them into releases — deferred to their own
   phase, above.

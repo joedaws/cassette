@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+The session-store redesign: `cassette` moves from one markdown file per
+session to a session directory of per-cassette files, so a human and one or
+more agents can write different cassettes of the same session concurrently.
+
+### Added
+- **A shared session store** under `$CASSETTE_DATA_DIR` (or the XDG data
+  directory). Each session is a directory of per-cassette markdown files with
+  frontmatter, plus `flock`-based lock anchors. Sessions are named by ULID;
+  an alias is a display label that never resolves in place of an id.
+- **`cassette queue`** — `list`, `show`, `next`, `new`, `write`, `close`,
+  `reopen`, `move`, `lock`, `unlock`: the scriptable surface an agent drives.
+  `--json` on `list`/`next`/`show` emits full objects, and any failing
+  command emits an `{"error", "code"}` envelope.
+- **`cassette session`** (`new`, `list`, `alias`) and **`cassette writer`**
+  (`register`, `list`, `whoami`). A writer's `kind` — human or agent — is a
+  permission boundary declared once at registration.
+- **`cassette sessions`** — an interactive picker over recent sessions, since
+  ULIDs leave no name to type. `j/k`, `/` to filter, `a` for all, Enter opens.
+- **`cassette export <id> [--out PATH]`** — a session rendered to one flat
+  markdown file. Closed and unreadable cassettes are included and marked.
+- **Live multi-writer TUI.** The editor holds the lock only for the focused
+  cassette, notices what other writers do once a second, shows a cassette
+  another writer holds as read-only naming the holder, and becomes editable
+  again by itself when they release it.
+- **Queue-shaped display.** Cassettes appear in queue order; closed ones fold
+  into a `▸ N closed` row toggled with `z`; damaged files get a visible row
+  instead of vanishing.
+- A warning when the store sits under a syncing folder (Dropbox, iCloud,
+  OneDrive, Google Drive). Locks are local kernel state and do not sync, so
+  two machines editing one session get no mutual exclusion.
+
+### Changed
+- **Where your writing lives.** `stats`, `find`, `today` and `resume` all read
+  the session store. Notes written before this change are untouched on disk
+  but are no longer counted by `stats` or listed by `find`.
+- The data directory is created `0700`; an existing one looser than that has
+  its group and other bits cleared.
+
+### Removed
+- The flat-note format and its machinery: the append-and-re-sum path and its
+  `## Session N — HH:MM` headings, the `draft: true` marker and crash-recovery
+  prompt, and the `_1.md` conflict-rename dance (ULIDs do not collide).
+- The `notes_dir` config key. Unrecognised keys are ignored, so an old config
+  still loads — you can delete the line or leave it.
+
 ## 0.10.0 - 2026-09-13
 
 ### Added

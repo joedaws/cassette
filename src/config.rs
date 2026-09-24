@@ -7,15 +7,6 @@ use crate::theme::ThemeSpec;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
-    /// **Deprecated and read by nothing.** `stats` and `find` moved to the
-    /// session store in 5a and the flat-note writer was deleted in Phase 6.
-    ///
-    /// The FIELD survives deliberately: `load_config` exits 2 on a parse
-    /// error, so removing it would break every command for anyone whose
-    /// `config.toml` still sets it and who has not edited it since. Dropping
-    /// it belongs to a release that can announce a breaking change.
-    #[allow(dead_code)]
-    pub notes_dir: Option<PathBuf>,
     /// Text rows shown per cassette; overridden by the `-l` CLI flag.
     pub visible_lines: Option<usize>,
     /// Name of the theme to use; overridden by the `--theme` CLI flag.
@@ -68,21 +59,20 @@ pub fn load_config() -> Result<Config, String> {
 
 #[cfg(test)]
 mod tests {
-    /// `notes_dir` has no readers since 5a, but the FIELD must keep parsing.
-    /// `load_config` exits 2 on a parse error, so removing it would break
-    /// every command for anyone whose config still sets it and who has not
-    /// edited it since. This test is the whole reason the field survives.
+    /// An unknown key is IGNORED, not an error — serde's derive skips
+    /// fields it does not know and `Config` sets no `deny_unknown_fields`.
+    /// That is what lets a config written for an older version keep working,
+    /// and it is why `notes_dir` could be deleted outright rather than kept
+    /// as a parsing stub: the earlier belief that removing the field would
+    /// break such configs was simply wrong.
     #[test]
-    fn a_config_that_still_sets_notes_dir_keeps_parsing() {
-        let toml = r#"
-notes_dir = "/home/someone/notes"
-visible_lines = 8
-"#;
+    fn an_unknown_config_key_is_ignored_rather_than_an_error() {
+        let toml = "notes_dir = \"/home/someone/notes\"\nvisible_lines = 8\n";
         let cfg: Config = toml::from_str(toml).expect("an old config must still load");
         assert_eq!(
             cfg.visible_lines,
             Some(8),
-            "and the rest of it still applies"
+            "and the keys it does know still apply"
         );
     }
 

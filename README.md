@@ -266,6 +266,15 @@ gets a heading of its own rather than vanishing — an export is the archive,
 and a quiet one would be a lossy one. It takes no locks, so exporting a
 session an agent is writing works fine.
 
+### A note on where the store lives
+
+Keep it on a local disk. If `$CASSETTE_DATA_DIR` resolves under Dropbox,
+iCloud Drive, OneDrive or Google Drive, cassette prints a one-line warning
+and carries on: locks are local kernel state and don't sync, so two machines
+editing the same session get no mutual exclusion at all — the one guarantee
+the store exists to provide. Network mounts (NFS/SMB) have the same problem
+and can't be detected cheaply, so they're unsupported for the same reason.
+
 `cassette sessions` is the one to reach for. Sessions are named by ULID, so
 there's rarely a name to type — the picker lets you arrow to the one you
 want instead of copying 26 characters:
@@ -644,10 +653,11 @@ mkdir -p ~/.config/cassette
 $EDITOR ~/.config/cassette/config.toml
 ```
 
-Every key is optional. `notes_dir` is **deprecated**: it still parses if you
-have it set, so an old config keeps working, but nothing reads it — `stats`,
-`find`, and every session cassette live under `$CASSETTE_DATA_DIR` or the XDG
-data default instead:
+Every key is optional, and keys cassette does not recognise are ignored — so
+a config written for an older version keeps working. `notes_dir` is one of
+those now: it was removed when `stats`, `find` and every session cassette
+moved under `$CASSETTE_DATA_DIR` or the XDG data default. You can delete the
+line; leaving it does no harm.
 
 ```toml
 # Alias pattern for `cassette today`'s session, in chrono strftime syntax

@@ -127,13 +127,21 @@ mod tests {
         let second = out.find("archived words").expect("closed cassette");
         assert!(first < second, "queue order: open before closed\n{out}");
         assert!(out.contains("# Cassette 1 — morning\n"), "{out}");
+        // A blank line between cassettes, so consecutive ones do not run
+        // together into one block when the file is read as markdown.
+        assert!(
+            out.contains("first words\n\n# Cassette 2"),
+            "cassettes are separated by a blank line: {out:?}"
+        );
         assert!(
             out.contains("# Cassette 2 — done (closed)"),
             "closed cassettes are marked: {out}"
         );
+        // The number, the filename and the reason in one assertion: each
+        // was independently deletable with the suite green.
         assert!(
-            out.contains("01M3600000000000000000BAD") && out.contains("unreadable"),
-            "a damaged cassette is named, not dropped: {out}"
+            out.contains("# Cassette 3 — 01M3600000000000000000BAD.md (unreadable: frontmatter is unparseable)"),
+            "a damaged cassette is named and numbered after the real ones: {out}"
         );
     }
 

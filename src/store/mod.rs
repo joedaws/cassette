@@ -109,10 +109,22 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
-        let mut perms = std::fs::metadata(dir)?.permissions();
-        if perms.mode() & 0o777 != 0o700 {
-            perms.set_mode(0o700);
-            std::fs::set_permissions(dir, perms)?;
+        // Tighten an existing directory that is looser than 0700 — a store
+        // that is already world-readable holds private writing that stays
+        // exposed until somebody notices, which is worse than the surprise
+        // of narrowing it.
+        //
+        // But narrow ONLY the group and other bits: `set_mode(0o700)`
+        // wholesale also strips setgid and the sticky bit, silently undoing
+        // a deliberate `2770` on a shared directory on every single run.
+        // Clearing `0o077` leaves everything outside the permission triad
+        // alone, so 2770 becomes 2700 rather than 700.
+        let perms = std::fs::metadata(dir)?.permissions();
+        let mode = perms.mode();
+        if mode & 0o077 != 0 {
+            let mut tightened = perms;
+            tightened.set_mode(mode & !0o077);
+            std::fs::set_permissions(dir, tightened)?;
         }
     }
     #[cfg(not(unix))]
@@ -1108,6 +1120,25 @@ mod tests {
             0o700,
             "a loose existing root must be tightened"
         );
+    }
+
+    /// Tightening must not strip setgid. A `2770` shared directory losing
+    /// its setgid bit on every run is a side effect nobody asked for, and it
+    /// would silently undo a deliberate group-sharing setup.
+    #[cfg(unix)]
+    #[test]
+    fn tightening_preserves_bits_outside_the_permission_triad() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("shared");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
+
+        ensure_private_dir(&root).expect("ensure");
+
+        let mode = std::fs::metadata(&root).expect("root").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "group and other are cleared");
+        assert_eq!(mode & 0o2000, 0o2000, "but setgid survives: {mode:o}");
     }
 
     #[cfg(unix)]

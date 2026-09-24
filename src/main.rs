@@ -102,14 +102,39 @@ fn main() -> io::Result<()> {
         if let Err(e) = queue::require_session(&store, session) {
             exit_queue_err(&e, args.json);
         }
-        let scan = store
-            .scan_session(session)
-            .unwrap_or_else(|e| die(&format!("cannot read session '{session}': {e}")));
+        // Exit 1, not 2: these are I/O failures the caller cannot fix by
+        // trying a different invocation, and `--help` does not help with
+        // `Is a directory`. Routed through `exit_with` so `--json` gets the
+        // {error, code} envelope an agent branches on, rather than prose.
+        let scan = store.scan_session(session).unwrap_or_else(|e| {
+            exit_with(
+                1,
+                &format!("cannot read session '{session}': {e}"),
+                args.json,
+            )
+        });
         let rendered = export::render(&scan);
         match &args.export_out {
-            Some(path) => std::fs::write(path, &rendered)
-                .unwrap_or_else(|e| die(&format!("cannot write '{}': {e}", path.display()))),
-            None => print!("{rendered}"),
+            Some(path) => std::fs::write(path, &rendered).unwrap_or_else(|e| {
+                exit_with(
+                    1,
+                    &format!("cannot write '{}': {e}", path.display()),
+                    args.json,
+                )
+            }),
+            // `write_all`, not `print!`: Rust ignores SIGPIPE, so `print!`
+            // PANICS when the reader closes the pipe — and `export … | head`
+            // or `| less` is the documented way to read one. A closed pipe
+            // is the reader saying "enough", which is a clean exit, not an
+            // error worth a backtrace.
+            None => {
+                use std::io::Write;
+                if let Err(e) = io::stdout().write_all(rendered.as_bytes()) {
+                    if e.kind() != io::ErrorKind::BrokenPipe {
+                        exit_with(1, &format!("cannot write to stdout: {e}"), args.json);
+                    }
+                }
+            }
         }
         return Ok(());
     }
@@ -1809,17 +1834,6 @@ fn exit_usage(msg: &str, json: bool) -> ! {
     exit_with(2, msg, json)
 }
 
-/// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.
-///
-/// The environment override exists so tests never touch the real store at
-/// `~/.local/share/cassette`. Phase 6 adds a `data_dir` config key beside it;
-/// the existing `notes_dir` key points at the old flat notes folder and is
-/// deliberately NOT consulted here.
-///
-/// Failing to determine a data dir at all is an I/O failure the caller cannot
-/// fix by retrying with different arguments (README's exit-1 rule), not a
-/// usage error — and, like every other failure under `--json`, it must still
-/// emit the `{"error","code"}` envelope rather than bare stderr prose.
 /// Whether `root` sits under a directory a consumer sync client owns.
 ///
 /// A substring match on lowercased path components, not a filesystem probe —
@@ -1833,16 +1847,24 @@ fn exit_usage(msg: &str, json: bool) -> ! {
 /// tell whether a given mount's `flock` is cross-client safe, and guessing
 /// from the mount type would give false confidence rather than protection.
 fn looks_synced(root: &Path) -> bool {
-    const SYNC_ROOTS: [&str; 6] = [
+    const SYNC_ROOTS: [&str; 7] = [
         "dropbox",
         "mobile documents", // iCloud Drive's on-disk name
         "icloud drive",
         "onedrive",
         "google drive",
         "sync.com",
+        // Since macOS 12.3, OneDrive and Google Drive live under
+        // `~/Library/CloudStorage/<Provider>-<Account>` — a hyphen, which
+        // neither clause below catches. The parent component is the reliable
+        // signal there, and it belongs to no other kind of directory.
+        "cloudstorage",
     ];
     root.components().any(|c| {
         let name = c.as_os_str().to_string_lossy().to_lowercase();
+        // Equality, or a `<name> ` prefix so `Dropbox (Personal)` and
+        // `OneDrive - Acme Corp` are caught. `Dropbox Backup` is caught too;
+        // that false positive is accepted, because this only ever warns.
         SYNC_ROOTS
             .iter()
             .any(|s| name == *s || name.starts_with(&format!("{s} ")))
@@ -1865,6 +1887,17 @@ fn warn_if_synced(root: &Path) {
     }
 }
 
+/// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.
+///
+/// The environment override exists so tests never touch the real store at
+/// `~/.local/share/cassette`. There is no `data_dir` config key — earlier
+/// comments here promised one for Phase 6, which closed the redesign without
+/// adding it.
+///
+/// Failing to determine a data dir at all is an I/O failure the caller cannot
+/// fix by retrying with different arguments (README's exit-1 rule), not a
+/// usage error — and, like every other failure under `--json`, it must still
+/// emit the `{"error","code"}` envelope rather than bare stderr prose.
 fn store_root(json: bool) -> PathBuf {
     let root = std::env::var_os("CASSETTE_DATA_DIR")
         .filter(|v| !v.is_empty())
@@ -2359,6 +2392,18 @@ mod tests {
             "/Users/me/Library/Mobile Documents/cassette",
             "/home/me/OneDrive/notes/cassette",
             "/home/me/Google Drive/cassette",
+            // The `<name> ` prefix clause. Untested until now: deleting it
+            // outright left every test green, so the half of the rule with
+            // real-world consequences was unexercised.
+            "/home/me/Dropbox (Personal)/cassette",
+            "/home/me/OneDrive - Acme Corp/cassette",
+            // Accepted false positive — this only warns, so over-flagging a
+            // folder name costs a line of stderr and nothing else.
+            "/home/me/Dropbox Backup/cassette",
+            // macOS 12.3+ puts these under CloudStorage with a HYPHEN, which
+            // neither the equality nor the prefix clause matches.
+            "/Users/me/Library/CloudStorage/OneDrive-Personal/cassette",
+            "/Users/me/Library/CloudStorage/GoogleDrive-me@gmail.com/cassette",
         ] {
             assert!(looks_synced(Path::new(p)), "should flag {p}");
         }
