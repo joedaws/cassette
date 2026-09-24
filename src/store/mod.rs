@@ -1,9 +1,3 @@
-// Nothing in the non-test build reaches the store until Phase 4 wires the CLI
-// to it, so every item here is dead code to clippy until then. Lint attributes
-// are inherited by nested modules, so this one covers the whole subtree.
-// Remove it when Phase 4 lands.
-#![allow(dead_code)]
-
 //! The session store: session directories of per-cassette markdown files.
 //!
 //! Layout under the data dir (created `0700`):
@@ -200,7 +194,6 @@ impl DamagedCassette {
 /// One cassette as it exists on disk.
 #[derive(Debug, Clone)]
 pub struct StoredCassette {
-    pub path: PathBuf,
     pub meta: CassetteMeta,
     /// Everything after the frontmatter, byte-for-byte.
     pub body: String,
@@ -626,7 +619,6 @@ impl Store {
                 continue;
             };
             found.push(StoredCassette {
-                path,
                 meta,
                 body: body.to_string(),
             });
@@ -1091,8 +1083,9 @@ mod tests {
         );
         assert_eq!(found.cassettes[0].body, "new\n");
         assert_eq!(
-            found.cassettes[0]
-                .path
+            s.cassette_path(&sid, &m.id)
+                .expect("io")
+                .expect("exists")
                 .file_name()
                 .unwrap()
                 .to_string_lossy(),

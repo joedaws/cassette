@@ -257,7 +257,6 @@ pub fn show_view(store: &Store, session: &str, id: &str) -> Result<json::Cassett
         ))
     })?;
     let stored = StoredCassette {
-        path,
         meta,
         body: body.to_string(),
     };
@@ -396,7 +395,6 @@ mod tests {
 
     fn stored(m: CassetteMeta) -> StoredCassette {
         StoredCassette {
-            path: std::path::PathBuf::from(format!("{}.md", m.id)),
             meta: m,
             body: "## Side A\n\nwords here\n".to_string(),
         }

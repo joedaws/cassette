@@ -17,7 +17,7 @@ pub const STEP: i64 = 10;
 ///
 /// Returns `Option` rather than a bare `i64` so an unrepresentable result is a
 /// value the caller must handle, not a debug-build panic. Priorities come from
-/// frontmatter, which `parse_frontmatter` will accept as any i64-parseable
+/// frontmatter, which `meta::split` will accept as any i64-parseable
 /// string, so `i64::MAX` is reachable by hand-editing a file.
 pub fn last(existing: &[i64]) -> Option<i64> {
     existing
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn tail_placement_refuses_to_overflow() {
-        // Reachable from a hand-edited frontmatter priority: `parse_frontmatter`
+        // Reachable from a hand-edited frontmatter priority: `meta::split`
         // accepts any i64-parseable string. A debug build panicked here.
         assert_eq!(last(&[i64::MAX]), None, "no room above i64::MAX");
         assert_eq!(last(&[i64::MAX - 1]), None, "nor within one STEP of it");

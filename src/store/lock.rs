@@ -295,10 +295,6 @@ impl LockGuard {
         &self.id
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// The cassette's current state, read under the lock.
     ///
     /// Assumes `path` holds a cassette file (frontmatter + body). The guard
@@ -318,7 +314,6 @@ impl LockGuard {
             )
         })?;
         Ok(StoredCassette {
-            path: self.path.clone(),
             meta,
             body: body.to_string(),
         })

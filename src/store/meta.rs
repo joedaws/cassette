@@ -150,12 +150,6 @@ fn parse_block(block: &str) -> Option<CassetteMeta> {
     })
 }
 
-/// Parse the leading `---` block. `None` when there is no well-formed
-/// frontmatter or when `id` is missing.
-pub fn parse_frontmatter(content: &str) -> Option<CassetteMeta> {
-    parse_block(split_parts(content)?.0)
-}
-
 /// Frontmatter plus the body after it, with the body byte-for-byte intact.
 /// `build_frontmatter` ends in `---\n` and writers add one blank line, so that
 /// blank line is consumed here and re-added on write. When the frontmatter is
@@ -196,7 +190,7 @@ mod tests {
     #[test]
     fn frontmatter_round_trips() {
         let m = meta();
-        let parsed = parse_frontmatter(&build_frontmatter(&m)).expect("parses");
+        let parsed = split(&build_frontmatter(&m)).0.expect("parses");
         assert_eq!(parsed, m);
     }
 
@@ -219,14 +213,14 @@ mod tests {
         let m = meta();
         let text = build_frontmatter(&m);
         assert!(text.contains("\nlocked_by:\n"), "{text}");
-        assert_eq!(parse_frontmatter(&text).unwrap().locked_by, None);
+        assert_eq!(split(&text).0.unwrap().locked_by, None);
     }
 
     #[test]
     fn a_held_lock_round_trips() {
         let mut m = meta();
         m.locked_by = Some("01K5H3AGENTID00000000000000".to_string());
-        let parsed = parse_frontmatter(&build_frontmatter(&m)).unwrap();
+        let parsed = split(&build_frontmatter(&m)).0.unwrap();
         assert_eq!(
             parsed.locked_by.as_deref(),
             Some("01K5H3AGENTID00000000000000")
@@ -237,7 +231,7 @@ mod tests {
     fn a_missing_topic_round_trips_as_none() {
         let mut m = meta();
         m.topic = None;
-        let parsed = parse_frontmatter(&build_frontmatter(&m)).unwrap();
+        let parsed = split(&build_frontmatter(&m)).0.unwrap();
         assert_eq!(parsed.topic, None);
     }
 
@@ -247,7 +241,7 @@ mod tests {
         // the value, so an embedded colon must not truncate it.
         let mut m = meta();
         m.topic = Some("re: yesterday".to_string());
-        let parsed = parse_frontmatter(&build_frontmatter(&m)).unwrap();
+        let parsed = split(&build_frontmatter(&m)).0.unwrap();
         assert_eq!(parsed.topic.as_deref(), Some("re: yesterday"));
     }
 
@@ -256,7 +250,7 @@ mod tests {
         let mut m = meta();
         m.status = Status::Closed;
         assert_eq!(
-            parse_frontmatter(&build_frontmatter(&m)).unwrap().status,
+            split(&build_frontmatter(&m)).0.unwrap().status,
             Status::Closed
         );
         // A hand-edited file must not vanish from the queue.
@@ -283,7 +277,7 @@ mod tests {
     fn a_topic_containing_a_newline_cannot_break_out_of_the_block() {
         let mut m = meta();
         m.topic = Some("x\n---\nid: EVIL".to_string());
-        let parsed = parse_frontmatter(&build_frontmatter(&m)).expect("parses");
+        let parsed = split(&build_frontmatter(&m)).0.expect("parses");
         assert_eq!(parsed.id, m.id, "a topic must not be able to set the id");
         assert_eq!(parsed.priority, m.priority, "later fields must survive");
         assert_eq!(parsed.updated_at, m.updated_at, "later fields must survive");
@@ -305,10 +299,7 @@ mod tests {
             "a malformed fence must not scan as a cassette"
         );
         assert_eq!(body, content, "and the content must be returned untouched");
-        assert!(
-            parse_frontmatter(content).is_none(),
-            "both entry points must agree"
-        );
+        assert!(split(content).0.is_none(), "both entry points must agree");
     }
 
     #[test]
@@ -324,7 +315,7 @@ mod tests {
     fn frontmatter_missing_required_fields_is_rejected() {
         // A file we cannot identify must not silently become a cassette
         // with an empty id that later collides.
-        assert!(parse_frontmatter("---\ntopic: x\n---\n").is_none());
+        assert!(split("---\ntopic: x\n---\n").0.is_none());
     }
 
     #[test]
