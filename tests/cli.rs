@@ -19,6 +19,28 @@ fn stderr(out: &Output) -> String {
 /// Both of these exit inside clap, before `main` reaches any store code, so
 /// they are safe without `CASSETTE_DATA_DIR` — every test that DOES reach
 /// the store sets it, because otherwise it writes the user's real notes.
+/// Both rejection paths exit 2 with their own message: a malformed id and a
+/// well-formed one naming nothing are different mistakes. Neither touches
+/// the store, so these need no CASSETTE_DATA_DIR.
+#[test]
+fn export_rejects_a_malformed_session_id() {
+    let out = run(&["export", "not-a-ulid"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(stderr(&out).contains("malformed"), "{}", stderr(&out));
+}
+
+#[test]
+fn export_help_parses() {
+    let out = run(&["export", "--help"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("flat markdown"), "{text}");
+    assert!(
+        text.contains("--out"),
+        "the path flag is documented: {text}"
+    );
+}
+
 #[test]
 fn sessions_help_parses() {
     let out = run(&["sessions", "--help"]);

@@ -18,6 +18,7 @@ mod app;
 mod cassette;
 mod cli;
 mod config;
+mod export;
 mod find;
 mod output;
 mod picker;
@@ -89,6 +90,27 @@ fn main() -> io::Result<()> {
             "{}",
             stats::render(&metas, chrono::Local::now().date_naive(), unreadable)
         );
+        return Ok(());
+    }
+
+    if let Some(session) = &args.export {
+        let store = store::Store::new(store_root(args.json));
+        // The same validation gate the queue commands pass through: an
+        // unvalidated id is joined straight onto the store root, and
+        // `scan_session` treats a missing directory as an empty session — so
+        // a typo would export silence instead of failing.
+        if let Err(e) = queue::require_session(&store, session) {
+            exit_queue_err(&e, args.json);
+        }
+        let scan = store
+            .scan_session(session)
+            .unwrap_or_else(|e| die(&format!("cannot read session '{session}': {e}")));
+        let rendered = export::render(&scan);
+        match &args.export_out {
+            Some(path) => std::fs::write(path, &rendered)
+                .unwrap_or_else(|e| die(&format!("cannot write '{}': {e}", path.display()))),
+            None => print!("{rendered}"),
+        }
         return Ok(());
     }
 
