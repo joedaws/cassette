@@ -24,8 +24,8 @@ pub struct Args {
     pub stats: bool,
     /// `find` with the query words that followed it; empty = list all.
     pub find: Option<Vec<String>>,
-    /// `resume` with an optional note name: `Some(None)` resumes the most
-    /// recently modified note.
+    /// `resume` with an optional alias or session id: `Some(None)` resumes
+    /// the newest session.
     pub resume: Option<Option<String>>,
     /// `queue …`, if that's what was invoked.
     pub queue_cmd: Option<QueueCmd>,
@@ -180,7 +180,7 @@ struct Cli {
     #[arg(short = 'R', long, global = true)]
     record: bool,
 
-    /// print to stdout on quit instead of writing a file
+    /// print the session to stdout on quit instead of saving it
     #[arg(short = 'o', long = "output", global = true)]
     print_stdout: bool,
 
@@ -196,21 +196,21 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// start a session in a named note
+    /// start a new session with this alias (never resumes an existing one)
     New {
         #[arg(value_name = "NAME")]
         name: String,
     },
-    /// open today's note, named by date
+    /// open today's session (aliased by date), creating it if needed
     Today,
-    /// load a saved note back into the TUI (default: most recently modified)
+    /// reopen a session: the newest, the newest with this alias, or this id
     Resume {
-        #[arg(value_name = "FILE")]
+        #[arg(value_name = "NAME_OR_ID")]
         file: Option<String>,
     },
-    /// streak, weekly/monthly notes and words, totals
+    /// streak, weekly/monthly sessions and words, totals
     Stats,
-    /// list recent notes newest-first; TEXT filters by name, topic, or content
+    /// list recent sessions newest-first; TEXT filters by id, alias, topic or content
     Find {
         // NOT `trailing_var_arg = true`: that captures flags after the first
         // query word, so `find foo -t 10` would yield query ["foo","-t","10"].
