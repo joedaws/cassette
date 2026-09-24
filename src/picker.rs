@@ -14,8 +14,15 @@ use crate::session::DEFAULT_LIST_LIMIT;
 /// one fact, which is the shape Phases 5b and 5c each shipped a bug from.
 pub(crate) struct Picker {
     entries: Vec<NoteEntry>,
+    /// Cassette files that could not be read, shown as a footer the way
+    /// `find` does. An `eprintln!` here landed on the normal screen an
+    /// instant before the alternate screen hid it, which is no report at all.
+    pub unreadable: usize,
     /// Index into `visible()`, not into `entries`.
     pub cursor: usize,
+    /// First visible row drawn, so a cursor past the bottom of the screen
+    /// scrolls the list instead of walking off it.
+    pub scroll: usize,
     /// Show every session rather than the `DEFAULT_LIST_LIMIT` most recent.
     pub show_all: bool,
     /// The live filter text. Empty means no filter, whether or not the
@@ -28,10 +35,12 @@ pub(crate) struct Picker {
 }
 
 impl Picker {
-    pub fn new(entries: Vec<NoteEntry>) -> Self {
+    pub fn new(entries: Vec<NoteEntry>, unreadable: usize) -> Self {
         Self {
             entries,
+            unreadable,
             cursor: 0,
+            scroll: 0,
             show_all: false,
             query: String::new(),
             filtering: false,
@@ -79,6 +88,12 @@ impl Picker {
     /// The row count changes under the cursor, so the highlight is restored
     /// **by id**: the human is looking at a session, not at a position. Same
     /// rule `App::sort_queue` follows when the stack reorders beneath focus.
+    ///
+    /// Today this is forward-insurance rather than an observable guarantee:
+    /// the recent view is a strict prefix of the all view, so an entry's
+    /// index is identical in both and pure clamping would agree. It stops
+    /// being equivalent the moment `visible()` ever sorts or groups, which
+    /// is exactly when the bug would be hardest to see.
     pub fn toggle_all(&mut self) {
         let was = self.selected().map(|e| e.id.clone());
         self.show_all = !self.show_all;
@@ -122,11 +137,62 @@ impl Picker {
         } else if self.cursor >= n {
             self.cursor = n - 1;
         }
+        // The window has to follow: a scroll left past the end of a
+        // narrowed list would draw blank rows below the last match.
+        if self.scroll > self.cursor {
+            self.scroll = self.cursor;
+        }
+    }
+
+    /// A picker with no damaged files, for tests that are not about them.
+    #[cfg(test)]
+    pub fn new_for_test(entries: Vec<NoteEntry>) -> Self {
+        Self::new(entries, 0)
     }
 
     /// How many sessions exist in total, for the "showing N of M" footer.
     pub fn total(&self) -> usize {
         self.entries.len()
+    }
+
+    /// How many session rows fit in a terminal `height` rows tall.
+    ///
+    /// One place, used by both `run_picker` (to clamp the scroll before
+    /// drawing) and `render_picker` (to slice). Two answers here would put
+    /// the cursor outside the rows actually drawn, which is the whole bug
+    /// this exists to prevent. At least one row always, so a very short
+    /// terminal still shows the highlighted session rather than nothing.
+    pub fn rows_capacity(height: u16) -> usize {
+        // title, blank, blank-before-footer, filter/standing line, help.
+        const CHROME_ROWS: u16 = 5;
+        height.saturating_sub(CHROME_ROWS).max(1) as usize
+    }
+
+    /// Keep the cursor inside the `capacity` rows that will actually be
+    /// drawn, scrolling the window rather than letting it walk off screen.
+    ///
+    /// Without this the list looks frozen while the cursor keeps advancing
+    /// into undrawn rows, and Enter opens a session the human never saw —
+    /// which at a session a day is the steady state within a month.
+    pub fn ensure_cursor_visible(&mut self, capacity: usize) {
+        let n = self.visible().len();
+        let max_scroll = n.saturating_sub(capacity);
+        if self.scroll > max_scroll {
+            self.scroll = max_scroll;
+        }
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + capacity {
+            self.scroll = self.cursor + 1 - capacity;
+        }
+    }
+
+    /// Rows above and below the window, for the `↑ N more` / `↓ N more`
+    /// hints the cassette stack already uses for the same situation.
+    pub fn hidden_rows(&self, capacity: usize) -> (usize, usize) {
+        let n = self.visible().len();
+        let below = n.saturating_sub(self.scroll + capacity);
+        (self.scroll, below)
     }
 }
 
@@ -152,7 +218,7 @@ mod tests {
     /// disorienting, so movement clamps at both ends.
     #[test]
     fn movement_clamps_rather_than_wrapping() {
-        let mut p = Picker::new(vec![entry("a", None, "x"), entry("b", None, "y")]);
+        let mut p = Picker::new_for_test(vec![entry("a", None, "x"), entry("b", None, "y")]);
         p.move_up();
         assert_eq!(p.cursor, 0, "already at the top");
         p.move_down();
@@ -168,7 +234,7 @@ mod tests {
         let entries: Vec<NoteEntry> = (0..20)
             .map(|i| entry(&format!("id{i:02}"), None, "t"))
             .collect();
-        let mut p = Picker::new(entries);
+        let mut p = Picker::new_for_test(entries);
         assert_eq!(p.visible().len(), DEFAULT_LIST_LIMIT, "recent by default");
         p.move_down();
         p.move_down();
@@ -184,7 +250,7 @@ mod tests {
     /// cursor valid rather than pointing past the end.
     #[test]
     fn filtering_narrows_and_leaves_the_cursor_valid() {
-        let mut p = Picker::new(vec![
+        let mut p = Picker::new_for_test(vec![
             entry("a", Some("morning"), "gratitude"),
             entry("b", Some("evening"), "review"),
         ]);
@@ -212,7 +278,7 @@ mod tests {
     /// the cursor usable — the recovery path from the case above.
     #[test]
     fn popping_a_filter_restores_the_rows() {
-        let mut p = Picker::new(vec![
+        let mut p = Picker::new_for_test(vec![
             entry("a", Some("morning"), "gratitude"),
             entry("b", Some("evening"), "review"),
         ]);
@@ -234,7 +300,7 @@ mod tests {
     /// filter would throw away work the human just did.
     #[test]
     fn ending_the_filter_keeps_the_query() {
-        let mut p = Picker::new(vec![entry("a", Some("morning"), "x")]);
+        let mut p = Picker::new_for_test(vec![entry("a", Some("morning"), "x")]);
         p.start_filter();
         p.push_filter('m');
         p.end_filter();
@@ -242,10 +308,101 @@ mod tests {
         assert_eq!(p.query, "m", "the narrowing survives closing the prompt");
     }
 
+    /// The discriminating case for `clamp_cursor`: a cursor PAST the end of
+    /// a narrowed list. The empty-list case cannot catch it — `selected()`
+    /// is `None` either way — so without this the clamp could be deleted
+    /// with the suite still green.
+    #[test]
+    fn narrowing_under_a_moved_cursor_keeps_a_row_selected() {
+        let mut p = Picker::new_for_test(vec![
+            entry("a", Some("morning"), "gratitude"),
+            entry("b", Some("evening"), "review"),
+        ]);
+        p.move_down();
+        assert_eq!(p.cursor, 1);
+
+        p.start_filter();
+        for c in "morn".chars() {
+            p.push_filter(c);
+        }
+
+        assert_eq!(p.visible().len(), 1, "one row left");
+        assert!(
+            p.selected().is_some(),
+            "a list with a row on it must have that row selected — unclamped, \
+             the cursor still points at index 1 and Enter does nothing"
+        );
+        assert_eq!(
+            p.selected().expect("a row").alias.as_deref(),
+            Some("morning")
+        );
+    }
+
+    /// The cursor must never point at a row the draw will omit: the list
+    /// would look frozen while the highlight walked off the bottom, and
+    /// Enter would open a session the human never saw.
+    #[test]
+    fn the_window_follows_the_cursor_past_the_bottom() {
+        let entries: Vec<NoteEntry> = (0..40)
+            .map(|i| entry(&format!("id{i:02}"), None, "t"))
+            .collect();
+        let mut p = Picker::new_for_test(entries);
+        p.toggle_all();
+        let capacity = 10;
+
+        for _ in 0..25 {
+            p.move_down();
+            p.ensure_cursor_visible(capacity);
+        }
+
+        assert_eq!(p.cursor, 25);
+        assert!(
+            p.cursor >= p.scroll && p.cursor < p.scroll + capacity,
+            "cursor {} outside the drawn window {}..{}",
+            p.cursor,
+            p.scroll,
+            p.scroll + capacity
+        );
+        let (above, below) = p.hidden_rows(capacity);
+        assert!(above > 0 && below > 0, "hints both ways: {above} / {below}");
+    }
+
+    /// Scrolling back up brings the window with it.
+    #[test]
+    fn the_window_follows_the_cursor_back_up() {
+        let entries: Vec<NoteEntry> = (0..40)
+            .map(|i| entry(&format!("id{i:02}"), None, "t"))
+            .collect();
+        let mut p = Picker::new_for_test(entries);
+        p.toggle_all();
+        for _ in 0..30 {
+            p.move_down();
+            p.ensure_cursor_visible(8);
+        }
+        assert!(p.scroll > 0);
+
+        for _ in 0..30 {
+            p.move_up();
+            p.ensure_cursor_visible(8);
+        }
+
+        assert_eq!(p.cursor, 0);
+        assert_eq!(p.scroll, 0, "the window came back with it");
+    }
+
+    /// A very short terminal still draws the highlighted row rather than
+    /// nothing at all.
+    #[test]
+    fn capacity_never_falls_to_zero() {
+        assert_eq!(Picker::rows_capacity(0), 1);
+        assert_eq!(Picker::rows_capacity(5), 1);
+        assert!(Picker::rows_capacity(24) > 10);
+    }
+
     /// An empty store is a normal state, not an error and not a panic.
     #[test]
     fn an_empty_picker_selects_nothing() {
-        let p = Picker::new(Vec::new());
+        let p = Picker::new_for_test(Vec::new());
         assert!(p.visible().is_empty());
         assert!(p.selected().is_none());
         assert_eq!(p.total(), 0);
@@ -259,7 +416,7 @@ mod tests {
             .map(|i| entry(&format!("id{i:02}"), None, "common"))
             .collect();
         entries.push(entry("needle", Some("needle"), "rare"));
-        let mut p = Picker::new(entries);
+        let mut p = Picker::new_for_test(entries);
 
         p.start_filter();
         for c in "rare".chars() {

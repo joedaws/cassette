@@ -246,8 +246,9 @@ Esc            leave the filter (keeping it)      q   quit without opening
 ```
 
 While the filter is open it owns the keyboard, so `q` types a `q` rather
-than quitting. Filtering happens before the 15-row cap, so a match further
-down the store still surfaces.
+than quitting — Ctrl+C still quits from anywhere. Filtering happens before
+the 15-row cap, so a match further down the store still surfaces, and the
+list scrolls with `↑ N more` / `↓ N more` when there's more than fits.
 
 `find` lists the same material as plain text — date, word count, topics, the
 session's alias where it has one, and the first line of the highest-priority

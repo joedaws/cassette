@@ -169,12 +169,16 @@ pub(crate) fn render_picker(frame: &mut Frame, picker: &crate::picker::Picker, t
     // The `a` hint only when there is something hidden to expand to:
     // offering "all" on a list that is already all of them reads as a
     // control that does nothing.
-    let hidden = !picker.show_all && picker.total() > rows.len() && picker.query.is_empty();
+    let hidden = !picker.show_all && picker.total() > rows.len();
+    let of = if picker.query.is_empty() {
+        format!("{} of {}", rows.len(), picker.total())
+    } else {
+        // Under a filter, "of <total>" would misread as "N of M matches".
+        format!("{} of {} matching", rows.len(), picker.total())
+    };
     lines.push(Line::from(Span::styled(
         format!(
-            "cassette sessions — {} of {}{}",
-            rows.len(),
-            picker.total(),
+            "cassette sessions — {of}{}",
             if hidden { "  (a: all)" } else { "" }
         ),
         bold,
@@ -195,7 +199,17 @@ pub(crate) fn render_picker(frame: &mut Frame, picker: &crate::picker::Picker, t
     // One row per session. The marker carries the highlight rather than a
     // background colour: a themed background can be indistinguishable from
     // the terminal's own, and the marker is legible on every theme.
-    for (i, e) in rows.iter().enumerate() {
+    let capacity = crate::picker::Picker::rows_capacity(area.height);
+    let (above, below) = picker.hidden_rows(capacity);
+    if above > 0 {
+        lines.push(Line::from(Span::styled(format!("  ↑ {above} more"), dim)));
+    }
+    for (i, e) in rows
+        .iter()
+        .enumerate()
+        .skip(picker.scroll)
+        .take(capacity.saturating_sub(usize::from(above > 0) + usize::from(below > 0)))
+    {
         let marker = if i == picker.cursor { "> " } else { "  " };
         let name = e.alias.as_deref().unwrap_or(&e.id);
         let mut text = format!(
@@ -214,6 +228,10 @@ pub(crate) fn render_picker(frame: &mut Frame, picker: &crate::picker::Picker, t
         lines.push(Line::from(Span::styled(text, style)));
     }
 
+    if below > 0 {
+        lines.push(Line::from(Span::styled(format!("  ↓ {below} more"), dim)));
+    }
+
     lines.push(Line::from(""));
     if picker.filtering {
         lines.push(Line::from(Span::styled(
@@ -223,6 +241,13 @@ pub(crate) fn render_picker(frame: &mut Frame, picker: &crate::picker::Picker, t
     } else if !picker.query.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("filter: {}  (/ to edit)", picker.query),
+            dim,
+        )));
+    }
+
+    if picker.unreadable > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("{} unreadable", picker.unreadable),
             dim,
         )));
     }
@@ -827,7 +852,7 @@ mod tests {
             .unwrap()
             .and_hms_opt(8, 0, 0)
             .unwrap();
-        let mut p = Picker::new(vec![
+        let mut p = Picker::new_for_test(vec![
             crate::find::NoteEntry::for_test(
                 "01M3AAA0000000000000000AAA",
                 Some("morningpages"),
@@ -906,7 +931,7 @@ mod tests {
             .map(|i| crate::find::NoteEntry::for_test(&format!("id{i}"), None, d, 1, &["t"]))
             .collect();
         assert!(
-            !draw(&Picker::new(few)).contains("a: all"),
+            !draw(&Picker::new_for_test(few)).contains("a: all"),
             "everything is already shown"
         );
 
@@ -914,8 +939,68 @@ mod tests {
             .map(|i| crate::find::NoteEntry::for_test(&format!("id{i:02}"), None, d, 1, &["t"]))
             .collect();
         assert!(
-            draw(&Picker::new(many)).contains("a: all"),
+            draw(&Picker::new_for_test(many)).contains("a: all"),
             "five are hidden, so the hint earns its place"
+        );
+    }
+
+    /// The prompt line, the help row, the word count and the damaged-file
+    /// footer were each deletable with the suite green. The last two phases
+    /// both shipped a display bug a green suite could not see.
+    #[test]
+    fn the_picker_draws_its_chrome() {
+        use crate::picker::Picker;
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 9, 23)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap();
+        let draw = |p: &Picker| -> String {
+            let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            t.draw(|f| render_picker(f, p, &Theme::default())).unwrap();
+            let buf = t.backend().buffer();
+            (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut p = Picker::new(
+            vec![crate::find::NoteEntry::for_test(
+                "01M3AAA0000000000000000AAA",
+                Some("morningpages"),
+                d,
+                137,
+                &["gratitude"],
+            )],
+            2,
+        );
+
+        let idle = draw(&p);
+        assert!(idle.contains("137"), "the word count is shown: {idle}");
+        assert!(idle.contains("j/k:move"), "the help row is drawn: {idle}");
+        assert!(
+            idle.contains("2 unreadable"),
+            "damaged files are reported ON SCREEN, not to a wiped stderr: {idle}"
+        );
+
+        p.start_filter();
+        p.push_filter('m');
+        let filtering = draw(&p);
+        assert!(
+            filtering.contains("/m"),
+            "the prompt shows what is being typed: {filtering}"
+        );
+        assert!(
+            filtering.contains("Esc:done"),
+            "and the prompt's own help: {filtering}"
+        );
+        assert!(
+            filtering.contains("matching"),
+            "the header counts matches, not the whole store: {filtering}"
         );
     }
 
@@ -924,7 +1009,7 @@ mod tests {
     #[test]
     fn the_picker_says_so_when_there_are_no_sessions() {
         use crate::picker::Picker;
-        let p = Picker::new(Vec::new());
+        let p = Picker::new_for_test(Vec::new());
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
             .draw(|f| render_picker(f, &p, &Theme::default()))
