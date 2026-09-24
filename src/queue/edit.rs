@@ -233,7 +233,7 @@ fn close_permitted(kind: Kind, locked_by: Option<&str>) -> Result<(), QueueError
 ///
 /// A blockquote is a note *about* the cassette rather than cassette prose,
 /// and it round-trips through `meta::split` without colliding with the
-/// `## Side A` / `## Side B` headings `output::parse_markdown` looks for. A
+/// `## Side A` / `## Side B` headings `queue::json::split_sides` reads. A
 /// `message` containing a newline would inject a second body line that is
 /// not a quote, so it is rejected here as a usage error rather than being
 /// silently flattened or split across lines.

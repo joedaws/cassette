@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::{
@@ -18,6 +18,7 @@ mod app;
 mod cassette;
 mod cli;
 mod config;
+mod export;
 mod find;
 mod output;
 mod picker;
@@ -78,7 +79,7 @@ fn main() -> io::Result<()> {
     }
 
     // `stats` and `find` read only the session store — the legacy notes dir
-    // (`cfg.notes_dir` / `config::default_notes_dir`) is deliberately not
+    // (the deprecated `cfg.notes_dir`) is deliberately not
     // consulted here. See the design's decision 7: existing notes stop
     // appearing in these two commands, on purpose, with no fallback and no
     // migration; the files themselves are untouched.
@@ -89,6 +90,52 @@ fn main() -> io::Result<()> {
             "{}",
             stats::render(&metas, chrono::Local::now().date_naive(), unreadable)
         );
+        return Ok(());
+    }
+
+    if let Some(session) = &args.export {
+        let store = store::Store::new(store_root(args.json));
+        // The same validation gate the queue commands pass through: an
+        // unvalidated id is joined straight onto the store root, and
+        // `scan_session` treats a missing directory as an empty session — so
+        // a typo would export silence instead of failing.
+        if let Err(e) = queue::require_session(&store, session) {
+            exit_queue_err(&e, args.json);
+        }
+        // Exit 1, not 2: these are I/O failures the caller cannot fix by
+        // trying a different invocation, and `--help` does not help with
+        // `Is a directory`. Routed through `exit_with` so `--json` gets the
+        // {error, code} envelope an agent branches on, rather than prose.
+        let scan = store.scan_session(session).unwrap_or_else(|e| {
+            exit_with(
+                1,
+                &format!("cannot read session '{session}': {e}"),
+                args.json,
+            )
+        });
+        let rendered = export::render(&scan);
+        match &args.export_out {
+            Some(path) => std::fs::write(path, &rendered).unwrap_or_else(|e| {
+                exit_with(
+                    1,
+                    &format!("cannot write '{}': {e}", path.display()),
+                    args.json,
+                )
+            }),
+            // `write_all`, not `print!`: Rust ignores SIGPIPE, so `print!`
+            // PANICS when the reader closes the pipe — and `export … | head`
+            // or `| less` is the documented way to read one. A closed pipe
+            // is the reader saying "enough", which is a clean exit, not an
+            // error worth a backtrace.
+            None => {
+                use std::io::Write;
+                if let Err(e) = io::stdout().write_all(rendered.as_bytes()) {
+                    if e.kind() != io::ErrorKind::BrokenPipe {
+                        exit_with(1, &format!("cannot write to stdout: {e}"), args.json);
+                    }
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -1787,23 +1834,78 @@ fn exit_usage(msg: &str, json: bool) -> ! {
     exit_with(2, msg, json)
 }
 
+/// Whether `root` sits under a directory a consumer sync client owns.
+///
+/// A substring match on lowercased path components, not a filesystem probe —
+/// "where cheap" is the parent spec's own qualifier. It can false-positive on
+/// a directory that merely has one of these words in its name, which is
+/// exactly why the caller warns and continues rather than refusing: a tool
+/// that will not start because of a folder name would be worse than the risk
+/// it names.
+///
+/// Network filesystems stay undetected. There is no cheap userspace way to
+/// tell whether a given mount's `flock` is cross-client safe, and guessing
+/// from the mount type would give false confidence rather than protection.
+fn looks_synced(root: &Path) -> bool {
+    const SYNC_ROOTS: [&str; 7] = [
+        "dropbox",
+        "mobile documents", // iCloud Drive's on-disk name
+        "icloud drive",
+        "onedrive",
+        "google drive",
+        "sync.com",
+        // Since macOS 12.3, OneDrive and Google Drive live under
+        // `~/Library/CloudStorage/<Provider>-<Account>` — a hyphen, which
+        // neither clause below catches. The parent component is the reliable
+        // signal there, and it belongs to no other kind of directory.
+        "cloudstorage",
+    ];
+    root.components().any(|c| {
+        let name = c.as_os_str().to_string_lossy().to_lowercase();
+        // Equality, or a `<name> ` prefix so `Dropbox (Personal)` and
+        // `OneDrive - Acme Corp` are caught. `Dropbox Backup` is caught too;
+        // that false positive is accepted, because this only ever warns.
+        SYNC_ROOTS
+            .iter()
+            .any(|s| name == *s || name.starts_with(&format!("{s} ")))
+    })
+}
+
+/// Warn once at startup when the store sits in a syncing folder.
+///
+/// Locks are local kernel state and do not sync, so two machines editing one
+/// session get zero mutual exclusion — the exact guarantee the store exists
+/// to provide. Sync clients also interfere with rename-based atomic writes.
+fn warn_if_synced(root: &Path) {
+    if looks_synced(root) {
+        eprintln!(
+            "cassette: warning — the store is under a syncing folder ({}).\n\
+             cassette: locks do not sync, so two machines editing one session \
+             get no mutual exclusion.",
+            root.display()
+        );
+    }
+}
+
 /// The store root: `$CASSETTE_DATA_DIR` when set, else the XDG default.
 ///
 /// The environment override exists so tests never touch the real store at
-/// `~/.local/share/cassette`. Phase 6 adds a `data_dir` config key beside it;
-/// the existing `notes_dir` key points at the old flat notes folder and is
-/// deliberately NOT consulted here.
+/// `~/.local/share/cassette`. There is no `data_dir` config key — earlier
+/// comments here promised one for Phase 6, which closed the redesign without
+/// adding it.
 ///
 /// Failing to determine a data dir at all is an I/O failure the caller cannot
 /// fix by retrying with different arguments (README's exit-1 rule), not a
 /// usage error — and, like every other failure under `--json`, it must still
 /// emit the `{"error","code"}` envelope rather than bare stderr prose.
 fn store_root(json: bool) -> PathBuf {
-    std::env::var_os("CASSETTE_DATA_DIR")
+    let root = std::env::var_os("CASSETTE_DATA_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(store::Store::default_root)
-        .unwrap_or_else(|| exit_with(1, "cannot determine a data dir", json))
+        .unwrap_or_else(|| exit_with(1, "cannot determine a data dir", json));
+    warn_if_synced(&root);
+    root
 }
 
 #[cfg(test)]
@@ -2278,6 +2380,47 @@ mod tests {
             "",
             "and the undo stack must survive the sync tick that follows a flush"
         );
+    }
+
+    /// A heuristic that warns and continues: it can false-positive on a
+    /// directory that merely has one of these words in its name, and a tool
+    /// that refuses to start over a folder name would be worse than the risk.
+    #[test]
+    fn a_store_under_a_sync_root_is_flagged() {
+        for p in [
+            "/home/me/Dropbox/cassette",
+            "/Users/me/Library/Mobile Documents/cassette",
+            "/home/me/OneDrive/notes/cassette",
+            "/home/me/Google Drive/cassette",
+            // The `<name> ` prefix clause. Untested until now: deleting it
+            // outright left every test green, so the half of the rule with
+            // real-world consequences was unexercised.
+            "/home/me/Dropbox (Personal)/cassette",
+            "/home/me/OneDrive - Acme Corp/cassette",
+            // Accepted false positive — this only warns, so over-flagging a
+            // folder name costs a line of stderr and nothing else.
+            "/home/me/Dropbox Backup/cassette",
+            // macOS 12.3+ puts these under CloudStorage with a HYPHEN, which
+            // neither the equality nor the prefix clause matches.
+            "/Users/me/Library/CloudStorage/OneDrive-Personal/cassette",
+            "/Users/me/Library/CloudStorage/GoogleDrive-me@gmail.com/cassette",
+        ] {
+            assert!(looks_synced(Path::new(p)), "should flag {p}");
+        }
+    }
+
+    /// An ordinary store, and a path that merely CONTAINS one of the words
+    /// inside a longer component, are both left alone — the match is on the
+    /// whole component, not a bare substring.
+    #[test]
+    fn an_ordinary_store_is_not_flagged() {
+        for p in [
+            "/home/me/.local/share/cassette",
+            "/home/me/dropboxes-i-have-known/cassette",
+            "/tmp/cassette-test",
+        ] {
+            assert!(!looks_synced(Path::new(p)), "should not flag {p}");
+        }
     }
 
     /// `busy_holder_name` is what turns a failed acquire into the name

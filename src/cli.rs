@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// The parsed CLI, in the shape `main()` consumes.
@@ -13,6 +15,10 @@ pub struct Args {
     pub list_themes: bool,
     /// `sessions`: pick a session to open from an interactive list.
     pub pick_session: bool,
+    /// `export <SESSION>`: the session to render to flat markdown.
+    pub export: Option<String>,
+    /// `export --out <PATH>`: write there instead of stdout.
+    pub export_out: Option<PathBuf>,
     pub record: bool,
     pub daily: bool,
     pub stats: bool,
@@ -209,6 +215,14 @@ enum Command {
     Themes,
     /// pick a session to open from a list of recent ones
     Sessions,
+    /// render a session to a single flat markdown file (stdout by default)
+    Export {
+        #[arg(value_name = "SESSION")]
+        session: String,
+        /// write to this path instead of stdout
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
     /// work with the shared cassette queue
     Queue {
         #[command(subcommand)]
@@ -460,6 +474,10 @@ impl Cli {
             Some(Command::Find { query }) => args.find = Some(query),
             Some(Command::Themes) => args.list_themes = true,
             Some(Command::Sessions) => args.pick_session = true,
+            Some(Command::Export { session, out }) => {
+                args.export = Some(session);
+                args.export_out = out;
+            }
             Some(Command::Queue { action }) => {
                 args.queue_cmd = Some(match action {
                     QueueAction::New {
