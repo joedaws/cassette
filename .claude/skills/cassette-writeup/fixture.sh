@@ -25,7 +25,9 @@ printf 'honestly maybe sqlite?? "a database is just a file with opinions"\n' | w
 B=$(new bot "concurrency")
 printf 'One file per session cannot be written by two writers at once without a lock on the whole session. Per-cassette files let a human and an agent write different cassettes concurrently.\n' | w bot "$B"
 
-# ...then reversed in a later cassette.
+# ...then reversed in a later cassette. The pause gives it a later
+# `updated_at` (seconds precision), which is what rule 2 orders by.
+sleep 1
 C=$(new me "reversal")
 printf 'Changed my mind: per-cassette files, one directory per session. One-file-per-session is out.\n' | w me "$C"
 
