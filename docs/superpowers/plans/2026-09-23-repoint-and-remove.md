@@ -243,39 +243,14 @@ git add -A && git commit -m "feat: create the store 0700, and warn under a sync 
 
 ---
 
-### Task 4: Man page and shell completions
+### Task 4: Man page and shell completions — DEFERRED
 
-**Files:** Create `build.rs`; modify `Cargo.toml`
+**Not done in this phase.** `build.rs` cannot reach the clap tree: `include!("src/cli.rs")`
+fails because `cli.rs` uses nine `crate::` paths in its derive. The plan's own known-risk note
+said to stop and report rather than restructure the crate mid-task, which is what happened —
+the user chose to defer man page, completions and release packaging to their own design.
 
-**Interfaces:** Produces `cassette.1` and bash/zsh/fish completions in `OUT_DIR`.
-
-Generated from the existing `cli::Cli` derive tree so they cannot drift from the real command surface — which is the entire reason to generate rather than write them.
-
-- [ ] **Step 1: Add the build dependencies**
-
-```toml
-[build-dependencies]
-clap = { version = "4", features = ["derive"] }
-clap_mangen = "0.2"
-clap_complete = "4"
-```
-
-Both are build-only and do not enter the shipped binary.
-
-- [ ] **Step 2: Write `build.rs`**
-
-The clap tree lives in `src/cli.rs`, which the build script cannot import from the binary crate. Use `include!("src/cli.rs")` — the established pattern for this, and the reason `cli.rs` must stay free of `crate::` paths. **If it is not**, stop and report: the alternative (a shared `cli` module in a lib target) is a structural change this plan does not cover, and guessing at it mid-task is how a "simple" packaging step eats an afternoon.
-
-Emit to `OUT_DIR`, print the path with `cargo:warning=` so it is discoverable, and re-run only when `src/cli.rs` changes (`cargo:rerun-if-changed=src/cli.rs`).
-
-- [ ] **Step 3: Verify the artifacts exist and commit**
-
-```bash
-cargo build
-find target -name 'cassette.1' -o -name 'cassette.bash' | head
-cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings
-git add -A && git commit -m "build: generate the man page and shell completions from the clap tree"
-```
+Phase 6 adds no dependencies as a result. See the spec section of the same name.
 
 ---
 
@@ -311,7 +286,7 @@ git add -A && git commit -m "docs: document export, the private store root, and 
 
 ## Plan Self-Review
 
-**Spec coverage.** The deletions and the `notes_dir` compatibility guard → T1; `export` → T2; `0700` and the sync warning → T3; man page and completions → T4; docs and end-to-end → T5.
+**Spec coverage.** The deletions and the `notes_dir` compatibility guard → T1; `export` → T2; the sync warning → T3 (the `0700` root turned out to be done already, in `ee29073`, and the spec was corrected to the code); man page and completions → deferred; docs and end-to-end → T5.
 
 **Ordering.** T1 first: it is the one whose failure mode is "something still had a caller", and finding that out before new code lands keeps the cause unambiguous. T2–T4 are mutually independent. T5 last.
 

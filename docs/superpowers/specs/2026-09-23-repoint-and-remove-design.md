@@ -113,18 +113,30 @@ Network filesystems stay undetected, as the parent spec's own analysis concludes
 cheap userspace way to tell whether a given mount's `flock` is cross-client safe, and a
 mount-type guess would give false confidence rather than protection.
 
-## Man page and shell completions
+## Man page and shell completions — deferred to a packaging phase
 
-`clap_mangen` and `clap_complete` as **build-dependencies**, generating into `OUT_DIR` from the
-existing `cli::Cli` derive tree — so they cannot drift from the real command surface, which is
-the whole reason to generate rather than write them.
+**Deferred 2026-09-23, at the user's direction, during implementation.**
 
-A `build.rs` emits `cassette.1` and completions for bash, zsh and fish. Packaging them into a
-release tarball is a distribution concern and belongs in `docs/distribution.md`, not here; this
-phase's job is that the artifacts exist and regenerate from the source of truth.
+The intent was `clap_mangen` and `clap_complete` as build-dependencies generating into
+`OUT_DIR` from the `cli::Cli` derive tree, so they could not drift from the real command
+surface. That needs `build.rs` to reach the clap tree, and the only way to do that without a
+lib target is `include!("src/cli.rs")` — which does not compile, because `cli.rs` uses nine
+`crate::` paths (`queue::Placement`, `queue::Side`, `store::writers::Kind` and others) directly
+in its derive.
 
-**This is the one part of the phase that adds dependencies**, and both are build-only, so they
-do not enter the shipped binary.
+Three ways out were weighed: generating at runtime from the live `Command` (zero drift, but the
+crates become runtime dependencies in the shipped binary); making `cli.rs` self-contained by
+moving those domain enums behind local arg types and converting in `into_args`, the pattern
+`WriterKindArg` already establishes (keeps the deps build-only and arguably improves the
+layering, but touches the queue and writer command surface); or adding a lib target (standard,
+but this crate has deliberately had no `lib.rs` — CLAUDE.md cites its absence as why there is
+no public escape hatch to the store).
+
+None is obviously right, and each is a structural decision about the crate rather than the
+packaging step it looks like. So the redesign's six phases close without it, and man page,
+completions and release packaging get their own design alongside `docs/distribution.md`.
+
+**Phase 6 therefore adds no dependencies at all.**
 
 ## Testing
 
@@ -144,7 +156,6 @@ do not enter the shipped binary.
   and in both cases the command still runs.
 - **Config compatibility** — a `config.toml` setting `notes_dir` still parses and does not
   exit 2. This is the one test standing between an upgrade and a user's broken config.
-- **Generated artifacts** — `build.rs` produces the man page and three completion files.
 
 ## Out of scope
 
@@ -153,7 +164,8 @@ do not enter the shipped binary.
   stated, that those 45 notes stopped being counted.
 - Removing `Config.notes_dir` outright — see above.
 - Detecting network filesystems.
-- Packaging the generated artifacts into releases (`docs/distribution.md`).
+- The man page, shell completions, and packaging them into releases — deferred to their own
+  phase, above.
 
 ## Open items carried in
 
