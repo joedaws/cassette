@@ -155,12 +155,6 @@ revisit once there is enough use to say what actually reads well.
 
 Small, none blocking, each verified to still exist as of Phase 6.
 
-- **`$USER` bootstrap registers a *human*-kind writer**, the privileged kind. An agent that
-  relies on it is silently not an agent — sticky locks do not bind it and `write_permitted`
-  waves it through. This produced a false bug report during trial Stage 1: the sticky lock
-  appeared broken when in fact the "agent" was a human. It fails *permissive*, which is the
-  wrong direction. (Related to 4b's ruling that an unknown `--writer` must be a usage error for
-  exactly this reason.)
 - **`src/store/mod.rs` still carries a module-wide `#![allow(dead_code)]`** from Phase 2,
   masking `StoredCassette.path`, `LockGuard::path` and `meta::parse_frontmatter`. Its comment
   says "remove when Phase 4 lands"; Phase 4 landed three phases ago. Deferring was deliberate —

@@ -8,17 +8,18 @@ description: Work alongside a human in a live cassette session — the commands,
 The human writes in the TUI. You write through `cassette queue` on the CLI, into the same
 session, at the same time. Neither waits for the other.
 
-## Setup, and the one trap
+## Setup
 
 ```bash
 cassette writer register --name bot --kind agent   # ONCE, per store
 cassette queue list --session <ID> --json
 ```
 
-**Pass `--writer bot` on every command.** Without it the CLI falls back to `$USER`, which
-**auto-registers as `human` kind** — the privileged one. You will look like an agent and not be
-one: sticky locks will not bind you and `write_permitted` will wave you through. This has
-already produced one false bug report. Check with `cassette writer list` if unsure.
+**Pass `--writer bot` on every command.** Without it the CLI falls back to `$USER` — the human's
+name — and your writes are *attributed to the human*, which misroutes `waiting_on`. Sticky
+locks still bind you (an identity taken from `$USER` never carries human authority), so
+forgetting is no longer a way to trample a claim, but it is still wrong. `cassette writer
+whoami` shows what you are acting as.
 
 ## What to act on
 
