@@ -5,10 +5,16 @@ use crate::store::{Store, StoredCassette};
 
 /// One session as `cassette find` shows it.
 pub struct NoteEntry {
-    /// Openable form shown in the listing: the session id, which
-    /// `cassette resume <id>` accepts as-is. Queries match this, the
-    /// session's alias, its topics and its content — see `build_haystack`.
-    pub path: String,
+    /// The session id, which `cassette resume <id>` accepts as-is. Queries
+    /// match this, the session's alias, its topics and its content — see
+    /// `build_haystack`. (Named `path` until 5d; it has held an id since 5a,
+    /// and the old name described the flat-note era.)
+    pub id: String,
+    /// The session's display label where it has one. `build_haystack` has
+    /// always matched on this, so a row could match a query for a word that
+    /// appeared nowhere on screen — it is printed now, and the picker shows
+    /// it in place of the id.
+    pub alias: Option<String>,
     pub date: NaiveDateTime,
     pub words: usize,
     pub topics: Vec<String>,
@@ -97,8 +103,13 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>, unreadable: usize) -> 
             "{}  {:>5} words  {}",
             e.date.format("%Y-%m-%d %H:%M"),
             e.words,
-            e.path
+            e.alias.as_deref().unwrap_or(&e.id)
         ));
+        // The id stays visible beside an alias: it is what `resume` takes,
+        // and the footer tells the reader to use it.
+        if e.alias.is_some() {
+            out.push_str(&format!("  ({})", e.id));
+        }
         if !e.topics.is_empty() {
             out.push_str(&format!(" — {}", e.topics.join(", ")));
         }
@@ -133,7 +144,12 @@ pub fn render(entries: &[NoteEntry], query: Option<&str>, unreadable: usize) -> 
 /// this one function on purpose: a fixture that assembles the field by hand
 /// tests a shape the real scanner never produces, and every gap in the real
 /// one survives the suite.
-fn build_haystack(id: &str, alias: Option<&str>, topics: &[String], bodies: &str) -> String {
+pub(crate) fn build_haystack(
+    id: &str,
+    alias: Option<&str>,
+    topics: &[String],
+    bodies: &str,
+) -> String {
     let mut out = String::from(id);
     if let Some(alias) = alias {
         out.push('\n');
@@ -165,7 +181,7 @@ fn build_haystack(id: &str, alias: Option<&str>, topics: &[String], bodies: &str
 /// decision 7. A session whose `created` timestamp fails to parse is
 /// skipped, the same treatment `Store::list_sessions` gives a `session.toml`
 /// that fails to parse at all.
-pub fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize) {
+pub(crate) fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize) {
     let Ok(sessions) = store.list_sessions() else {
         return (Vec::new(), 0);
     };
@@ -196,7 +212,8 @@ pub fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize) {
                 .join("\n"),
         );
         entries.push(NoteEntry {
-            path: id,
+            alias: meta.alias.clone(),
+            id,
             date,
             words,
             topics,
@@ -238,7 +255,8 @@ mod tests {
         let preview = format!("body of {path}");
         let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
         NoteEntry {
-            path: path.to_string(),
+            id: path.to_string(),
+            alias: alias.map(|a| a.to_string()),
             date: dt(date),
             words,
             haystack: build_haystack(path, alias, &topics, &preview),
@@ -249,6 +267,30 @@ mod tests {
 
     fn entry(path: &str, date: &str, words: usize) -> NoteEntry {
         entry_with(path, date, words, None, &[])
+    }
+
+    /// `find` has always MATCHED on alias through `build_haystack`; not
+    /// printing it meant a row could match a query for a word that appeared
+    /// nowhere on screen, which reads as a bug in the filter rather than a
+    /// gap in the row.
+    #[test]
+    fn a_row_prints_the_alias_it_can_be_found_by() {
+        let e = entry_with(
+            "01M3TEST0000000000000000AA",
+            "2026-09-23T08:00:00",
+            120,
+            Some("morning"),
+            &["gratitude"],
+        );
+        let out = render(&[e], Some("morning"), 0);
+        assert!(
+            out.contains("morning"),
+            "the alias the query matched must be visible: {out}"
+        );
+        assert!(
+            out.contains("01M3TEST0000000000000000AA"),
+            "and the id stays, since that is what `resume` takes: {out}"
+        );
     }
 
     #[test]
@@ -305,7 +347,7 @@ mod tests {
             "one session is one entry, not one per cassette"
         );
         let e = &entries[0];
-        assert_eq!(e.path, sid);
+        assert_eq!(e.id, sid);
         assert_eq!(e.words, 7, "words sum across the session's cassettes");
         assert_eq!(
             e.topics,
