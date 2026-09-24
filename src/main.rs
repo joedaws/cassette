@@ -1685,11 +1685,12 @@ fn run_writer_cmd(cmd: &cli::WriterCmd, writer_flag: Option<&str>, json: bool) -
         },
         cli::WriterCmd::Whoami => {
             // `whoami` only ever looks a name up (`writer::render_whoami`
-            // never resolves or creates), so where the name came from makes
-            // no difference here — `.0` drops the `WriterSource`.
-            let (who_name, _source) =
+            // never resolves or creates), but where the name came from
+            // decides its authority: a human reached through `$USER` alone
+            // acts as an agent on the queue commands, and this says so.
+            let (who_name, source) =
                 resolve_writer_name(writer_flag).unwrap_or_else(|e| exit_with(2, &e, json));
-            match writer::whoami(&store, &who_name) {
+            match writer::whoami(&store, &who_name, source) {
                 Ok(msg) => {
                     println!("{msg}");
                     std::process::exit(0)

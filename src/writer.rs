@@ -4,6 +4,7 @@
 //! else, so a caller cannot claim a kind per-invocation — that is the property
 //! the spec's permission boundary rests on.
 
+use crate::queue::WriterSource;
 use crate::store::writers::{lookup_by_name, EnsureError, Kind, Writers};
 use crate::store::Store;
 
@@ -49,17 +50,27 @@ pub fn list(store: &Store) -> Result<String, String> {
 
 /// What `name` resolves to. Reports plainly when the name is not registered
 /// yet rather than inventing a kind for it.
-pub fn render_whoami(all: &Writers, name: &str) -> String {
+/// `source` is where the name came from: a registered human reached through
+/// `$USER` alone acts as an agent on the queue commands (see
+/// `queue::Acting`), and this is where an agent is told to look, so it says so.
+pub fn render_whoami(all: &Writers, name: &str, source: WriterSource) -> String {
     match lookup_by_name(all, name) {
-        Some((id, kind)) => format!("{name}  {}  {id}", kind.as_str()),
+        Some((id, kind)) => {
+            let note = if source == WriterSource::Env && kind == Kind::Human {
+                "   (implicit via $USER: acts as agent — pass --writer for human authority)"
+            } else {
+                ""
+            };
+            format!("{name}  {}  {id}{note}", kind.as_str())
+        }
         None => format!("{name}  (not registered — 'cassette writer register' first)"),
     }
 }
 
-pub fn whoami(store: &Store, name: &str) -> Result<String, String> {
+pub fn whoami(store: &Store, name: &str, source: WriterSource) -> Result<String, String> {
     store
         .writers()
-        .map(|all| render_whoami(&all, name))
+        .map(|all| render_whoami(&all, name, source))
         .map_err(|e| e.to_string())
 }
 
@@ -105,15 +116,28 @@ mod tests {
     }
 
     #[test]
+    fn whoami_flags_an_implicit_human() {
+        let out = render_whoami(&writers(), "alice", WriterSource::Env);
+        assert!(out.contains("implicit via $USER"), "{out}");
+        assert!(out.contains("--writer"), "{out}");
+    }
+
+    #[test]
+    fn whoami_is_plain_for_an_explicit_human_and_for_any_agent() {
+        assert!(!render_whoami(&writers(), "alice", WriterSource::Flag).contains("implicit"));
+        assert!(!render_whoami(&writers(), "bot", WriterSource::Env).contains("implicit"));
+    }
+
+    #[test]
     fn whoami_reports_the_registered_kind() {
-        let out = render_whoami(&writers(), "bot");
+        let out = render_whoami(&writers(), "bot", WriterSource::Flag);
         assert!(out.contains("agent"), "{out}");
         assert!(out.contains("aaa-id"), "{out}");
     }
 
     #[test]
     fn whoami_is_plain_about_an_unregistered_name() {
-        let out = render_whoami(&writers(), "nobody");
+        let out = render_whoami(&writers(), "nobody", WriterSource::Flag);
         assert!(out.contains("not registered"), "{out}");
         assert!(
             !out.contains("human") && !out.contains("agent"),
@@ -132,7 +156,7 @@ mod tests {
         assert!(!msg.contains("  bot  "), "echoed the untrimmed name: {msg}");
 
         // ...and the trimmed name is the one that resolves.
-        let who = whoami(&store, "bot").expect("whoami");
+        let who = whoami(&store, "bot", WriterSource::Flag).expect("whoami");
         assert!(who.contains("agent"), "{who}");
     }
 
@@ -148,7 +172,7 @@ mod tests {
         assert!(listed.contains("bot"), "{listed}");
         assert!(listed.contains("agent"), "{listed}");
 
-        let who = whoami(&store, "bot").expect("whoami");
+        let who = whoami(&store, "bot", WriterSource::Flag).expect("whoami");
         assert!(who.contains("agent"), "{who}");
     }
 
@@ -168,7 +192,7 @@ mod tests {
     fn whoami_on_a_store_with_no_registry_yet_is_plain_not_invented() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
-        let who = whoami(&store, "nobody").expect("whoami");
+        let who = whoami(&store, "nobody", WriterSource::Flag).expect("whoami");
         assert!(who.contains("not registered"), "{who}");
     }
 }
