@@ -13,7 +13,7 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
 | 3 | Carried triage cleanups (bundle) | done | `specs/2026-09-24-carried-triage-design.md` | `plans/2026-09-24-carried-triage.md` |
 | 4 | Reader mode — focus without holding the lock | done | `specs/2026-09-24-reader-mode-design.md` | `plans/2026-09-24-reader-mode.md` |
 | 5 | Man page, completions, release packaging | done | `specs/2026-09-24-man-and-completions-design.md` | `plans/2026-09-24-man-and-completions.md` |
-| 6 | Document export mode 2 (agent-written document) | todo | | |
+| 6 | Document export mode 2 (agent-written document) | done | `specs/2026-09-24-session-writeup-design.md` | `plans/2026-09-24-session-writeup.md` |
 | 7 | Queue ordering policy (feed vs topic order) | todo | | |
 | — | Tune the agent's cassette length | skipped | needs usage data, not design | |
 
@@ -52,3 +52,7 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
 - **(5) `docs/distribution.md` doesn't exist**, although CLAUDE.md cites it. The plan creates it
   and moves the README's release steps there.
 - **(5) Human step:** only a real GitHub release exercises the workflow change.
+- **(6) Settled as a skill (`cassette-writeup`) that writes a file outside the store**, not a
+  cassette. It proposes the path and an outline in chat and waits for your yes before writing.
+  Disagreement is kept under `## Open questions`, unattributed. Is the outline-approval step too
+  much ceremony for you?
