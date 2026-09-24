@@ -20,6 +20,7 @@ mod cli;
 mod config;
 mod find;
 mod output;
+mod picker;
 mod queue;
 mod session;
 mod session_writer;
@@ -68,7 +69,7 @@ fn restore_terminal() {
 }
 
 fn main() -> io::Result<()> {
-    let args = cli::parse();
+    let mut args = cli::parse();
     let cfg = config::load_config().unwrap_or_else(|e| exit_with(2, &e, args.json));
 
     if args.list_themes {
@@ -327,6 +328,38 @@ fn main() -> io::Result<()> {
             ))
         })
     });
+
+    // Refused BEFORE the picker runs, and named after the flag the user
+    // actually typed. Letting it through would make the human choose a
+    // session and only then be told the combination is impossible — and the
+    // refusal would cite 'resume', which they never typed, because the
+    // picker sets it. This codebase's rule is that refusals come before
+    // anything is touched.
+    if args.pick_session && args.template.is_some() {
+        die("'sessions' opens an existing session, so it cannot be combined with '-T'");
+    }
+    if args.pick_session && args.print_stdout {
+        die("'-o' persists nothing, so there is no session for 'sessions' to open");
+    }
+
+    // After the theme is resolved, so the picker is drawn in the theme the
+    // session will open in — and so an unknown `--theme` dies before the
+    // human picks anything rather than after. It returns a session id and
+    // falls through to the ordinary TUI path rather than launching it:
+    // returning a choice keeps `Picker` a state machine tests can drive
+    // without a terminal.
+    if args.pick_session {
+        let store = store::Store::new(store_root(args.json));
+        let (entries, unreadable) = find::scan_store(&store);
+        match run_picker(picker::Picker::new(entries, unreadable), &theme)? {
+            // Handed to `resume`, which already resolves a session id and
+            // loads its cassettes. A second opening path would be a second
+            // set of rules about what an id means.
+            Some(id) => args.resume = Some(Some(id)),
+            // Quitting the picker is a normal exit, not a refusal.
+            None => return Ok(()),
+        }
+    }
 
     if args.resume.is_some() && args.template.is_some() {
         die("'resume' cannot be combined with '-T'");
@@ -770,6 +803,97 @@ fn print_themes(cfg: &config::Config) {
         }
         println!("{line}");
     }
+}
+
+/// Show the sessions picker and return the chosen session id, or `None`
+/// when the human quit without opening one.
+///
+/// Owns terminal setup and teardown for its own screen. The panic hook is
+/// installed here too, not only in the TUI's `run`: a picker that panics
+/// with raw mode enabled leaves the user's shell unusable just as surely.
+fn run_picker(mut picker: picker::Picker, theme: &theme::Theme) -> io::Result<Option<String>> {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
+
+    enable_raw_mode()?;
+
+    // Everything past `enable_raw_mode` runs inside this closure so that a
+    // `?` on any of it — entering the alternate screen, building the
+    // terminal, a draw, a read — still reaches `restore_terminal` below.
+    // Propagating straight out would print the error onto a shell left in
+    // raw mode and the alternate screen. The TUI's `run` already captures
+    // its result this way; this path was the hole.
+    let result = (|| -> io::Result<Option<String>> {
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let chosen = loop {
+            // Clamp BEFORE drawing, against the height the frame will actually
+            // have: the cursor must never point at a row the draw then omits.
+            let capacity = picker::Picker::rows_capacity(terminal.size()?.height);
+            picker.ensure_cursor_visible(capacity);
+            terminal.draw(|f| ui::render_picker(f, &picker, theme))?;
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != event::KeyEventKind::Press {
+                continue;
+            }
+            // While the filter prompt is open it owns the keyboard, so `q` types
+            // a `q` rather than quitting. Same rule `Mode::Topic` follows in the
+            // main TUI, and the leak it prevents is why that rule exists.
+            // Ctrl+C quits from anywhere, including inside the prompt. Raw mode
+            // swallows SIGINT, so without this the modal branch below would
+            // append a `c` to the query — and Ctrl+C is precisely the key a
+            // human reaches for when a modal prompt surprises them.
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                break None;
+            }
+            if picker.filtering {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => picker.end_filter(),
+                    KeyCode::Backspace => picker.pop_filter(),
+                    // Only plain characters are text. A Ctrl+<letter> that fell
+                    // through here would type its letter.
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        picker.push_filter(c)
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break None,
+                KeyCode::Char('j') | KeyCode::Down => picker.move_down(),
+                KeyCode::Char('k') | KeyCode::Up => picker.move_up(),
+                KeyCode::Char('a') => picker.toggle_all(),
+                KeyCode::Char('/') => picker.start_filter(),
+                // Enter on an empty list is a no-op, not a crash: an empty store
+                // and a filter that matches nothing are ordinary states here.
+                KeyCode::Enter => {
+                    if let Some(e) = picker.selected() {
+                        break Some(e.id.clone());
+                    }
+                }
+                _ => {}
+            }
+        };
+
+        Ok(chosen)
+    })();
+
+    restore_terminal();
+    let _ = panic::take_hook();
+    result
 }
 
 fn run(

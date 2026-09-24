@@ -11,7 +11,9 @@ use crate::store::session::SessionMeta;
 use crate::store::Store;
 
 /// How many rows `list` shows by default before hinting at `--all`.
-const DEFAULT_LIST_LIMIT: usize = 15;
+/// How many sessions a listing shows before it needs asking. Shared with
+/// the `sessions` picker so the two cannot disagree about "recent".
+pub(crate) const DEFAULT_LIST_LIMIT: usize = 15;
 
 /// Why a session command failed, in the shape `main.rs` maps to an exit
 /// code. Shaped like `queue::QueueError` minus `Busy`, which no session

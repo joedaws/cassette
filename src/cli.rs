@@ -11,6 +11,8 @@ pub struct Args {
     pub template: Option<String>,
     pub theme: Option<String>,
     pub list_themes: bool,
+    /// `sessions`: pick a session to open from an interactive list.
+    pub pick_session: bool,
     pub record: bool,
     pub daily: bool,
     pub stats: bool,
@@ -205,6 +207,8 @@ enum Command {
     },
     /// list available themes (built-in and from config.toml)
     Themes,
+    /// pick a session to open from a list of recent ones
+    Sessions,
     /// work with the shared cassette queue
     Queue {
         #[command(subcommand)]
@@ -455,6 +459,7 @@ impl Cli {
             Some(Command::Stats) => args.stats = true,
             Some(Command::Find { query }) => args.find = Some(query),
             Some(Command::Themes) => args.list_themes = true,
+            Some(Command::Sessions) => args.pick_session = true,
             Some(Command::Queue { action }) => {
                 args.queue_cmd = Some(match action {
                     QueueAction::New {
@@ -667,6 +672,7 @@ mod tests {
         assert!(parse_args_from(&argv(&["today"])).daily);
         assert!(parse_args_from(&argv(&["stats"])).stats);
         assert!(parse_args_from(&argv(&["themes"])).list_themes);
+        assert!(parse_args_from(&argv(&["sessions"])).pick_session);
     }
 
     #[test]

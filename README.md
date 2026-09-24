@@ -226,7 +226,8 @@ grep, or paste into an editor same as always.
 ### Picking a thought back up
 
 ```
-cassette find                 # browse recent sessions, newest first
+cassette sessions             # pick one from a list, Enter opens it
+cassette find                 # the same listing, as plain text
 cassette find gratitude       # …filtered by alias, topic, or content
 cassette resume               # continue the most recently created session
 cassette resume myjournal     # continue the session aliased myjournal
@@ -234,10 +235,25 @@ cassette resume 01K5GQ2R8V…   # …or by the id `find` printed
 cassette new myjournal        # start a *new* session aliased myjournal
 ```
 
-`find` lists what's in the session store — date, word count, topics, and the
-first line of the highest-priority cassette — so you can spot the session to
-resume without opening anything. Each row shows the session's id, ready to
-paste into `--session` or straight back into `resume`.
+`cassette sessions` is the one to reach for. Sessions are named by ULID, so
+there's rarely a name to type — the picker lets you arrow to the one you
+want instead of copying 26 characters:
+
+```
+j / k, ↑ / ↓   move          Enter   open the highlighted session
+/              filter        a       show all, not just the 15 most recent
+Esc            leave the filter (keeping it)      q   quit without opening
+```
+
+While the filter is open it owns the keyboard, so `q` types a `q` rather
+than quitting — Ctrl+C still quits from anywhere. Filtering happens before
+the 15-row cap, so a match further down the store still surfaces, and the
+list scrolls with `↑ N more` / `↓ N more` when there's more than fits.
+
+`find` lists the same material as plain text — date, word count, topics, the
+session's alias where it has one, and the first line of the highest-priority
+cassette — so it stays pipeable and greppable. Each row shows the session's
+id, ready to paste into `--session` or straight back into `resume`.
 
 `new <NAME>` always starts a fresh session; it does not look for an existing
 alias by that name the way the old flat-note `new` used to resume a
