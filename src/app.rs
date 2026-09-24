@@ -418,14 +418,15 @@ impl App {
 
             let side_a_len = incoming.side_a_text().chars().count();
             let side_b_len = incoming.side_b_text().chars().count();
-            // The active-side cursor is placed via `from_sides_with_cursor`
-            // for side A directly; side B (the less common case: the reader
-            // was on the scratch side when the update landed) is placed by
-            // flipping and clamping afterward, since that constructor only
-            // ever seeds side A.
-            let cursor_for_a = if existing_on_side_b {
-                0
-            } else if was_at_end {
+            // Side A is seeded via `from_sides_with_cursor`. When the reader
+            // is on side B, side A is the inactive side and lands at its end
+            // — the same place `from_sides` puts inactive side B in the
+            // mirror case, and where a writer flipping over to keep writing
+            // expects to be. Side B (the less common case: the reader was on
+            // the scratch side when the update landed) is placed by flipping
+            // and clamping afterward, since that constructor only ever seeds
+            // side A.
+            let cursor_for_a = if existing_on_side_b || was_at_end {
                 side_a_len
             } else {
                 existing_cursor
@@ -1524,6 +1525,30 @@ mod tests {
             "lands at its priority slot, not appended after the third cassette"
         );
         assert_eq!(app.cassettes[2].id, "third0000000000000000000000");
+    }
+
+    #[test]
+    fn after_a_side_b_merge_side_a_s_cursor_is_at_its_end_like_the_mirror_case() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| {
+            c.insert_str("old a");
+            c.flip();
+            c.insert_str("scratch");
+        });
+        app.clear_dirty(0);
+
+        // Differs from the stored text so the no-op short circuit does not fire.
+        let incoming = Cassette::from_sides("new side a".to_string(), "scratch".to_string(), None);
+        app.merge_external("aaa00000000000000000000000", incoming);
+
+        app.cassettes[0].flip();
+        assert_eq!(app.cassettes[0].side, Side::A);
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            "new side a".chars().count(),
+            "the inactive side lands at its end, as side B does in the mirror case"
+        );
     }
 
     #[test]
