@@ -10,7 +10,7 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
 |---|------|--------|------|------|
 | 1 | `queue topic` command | done | `specs/2026-09-24-queue-topic-design.md` | `plans/2026-09-24-queue-topic.md` |
 | 2 | `$USER` bootstrap registers a human-kind writer | done | `specs/2026-09-24-implicit-writer-authority-design.md` | `plans/2026-09-24-implicit-writer-authority.md` |
-| 3 | Carried triage cleanups (bundle) | todo | | |
+| 3 | Carried triage cleanups (bundle) | done | `specs/2026-09-24-carried-triage-design.md` | `plans/2026-09-24-carried-triage.md` |
 | 4 | Reader mode — focus without holding the lock | todo | | |
 | 5 | Man page, completions, release packaging | todo | | |
 | 6 | Document export mode 2 (agent-written document) | todo | | |
@@ -30,3 +30,8 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
   also fixes attribution but breaks `$USER`-only use. Which one do you want?
 - **(2) `$CASSETTE_WRITER` stays explicit (human authority)**, so it must not be exported
   globally in a shell an agent uses. Documented, not enforced. OK?
+- **(3) Found a real bug behind the weak test assert:** live sync keys on mtime alone, so a
+  second write inside one timestamp tick is never merged. The triage spec fixes it with an
+  (mtime, len, inode) stamp. This is more than the follow-up asked for; say if you want it split out.
+- **(3) `StoredCassette.path` is deleted** rather than kept as a "public store field". Nothing
+  reads it and the crate has no lib target. Your earlier note called this a design call.
