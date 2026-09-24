@@ -166,12 +166,16 @@ pub(crate) fn render_picker(frame: &mut Frame, picker: &crate::picker::Picker, t
     let dim = Style::new().fg(theme.unfocused_fg);
     let bold = Style::new().add_modifier(Modifier::BOLD);
 
+    // The `a` hint only when there is something hidden to expand to:
+    // offering "all" on a list that is already all of them reads as a
+    // control that does nothing.
+    let hidden = !picker.show_all && picker.total() > rows.len() && picker.query.is_empty();
     lines.push(Line::from(Span::styled(
         format!(
             "cassette sessions — {} of {}{}",
             rows.len(),
             picker.total(),
-            if picker.show_all { "" } else { "  (a: all)" }
+            if hidden { "  (a: all)" } else { "" }
         ),
         bold,
     )));
@@ -872,6 +876,46 @@ mod tests {
             !rows[other].trim_start().starts_with('>'),
             "and only that row: {:?}",
             rows[other]
+        );
+    }
+
+    /// Offering "a: all" on a list that already shows everything reads as
+    /// a control that does nothing.
+    #[test]
+    fn the_all_hint_appears_only_when_rows_are_hidden() {
+        use crate::picker::Picker;
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 9, 23)
+            .unwrap()
+            .and_hms_opt(8, 0, 0)
+            .unwrap();
+        let draw = |p: &Picker| -> String {
+            let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            t.draw(|f| render_picker(f, p, &Theme::default())).unwrap();
+            let buf = t.backend().buffer();
+            (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let few: Vec<_> = (0..3)
+            .map(|i| crate::find::NoteEntry::for_test(&format!("id{i}"), None, d, 1, &["t"]))
+            .collect();
+        assert!(
+            !draw(&Picker::new(few)).contains("a: all"),
+            "everything is already shown"
+        );
+
+        let many: Vec<_> = (0..20)
+            .map(|i| crate::find::NoteEntry::for_test(&format!("id{i:02}"), None, d, 1, &["t"]))
+            .collect();
+        assert!(
+            draw(&Picker::new(many)).contains("a: all"),
+            "five are hidden, so the hint earns its place"
         );
     }
 
