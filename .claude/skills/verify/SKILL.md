@@ -5,9 +5,13 @@ description: Drive the cassette TUI end-to-end and capture screens for verificat
 
 # Verifying cassette
 
-`cassette` is a raw-mode ratatui TUI; it needs a pty. On this machine there is
-**no tmux/screen/expect/pyte**, and `zellij attach --create-background` creates a
-session whose panes never render (dump-screen returns empty) — don't bother.
+`cassette` is a raw-mode ratatui TUI; it needs a pty. `screen`, `expect` and
+`pyte` are not installed; `zellij attach --create-background` creates a session
+whose panes never render (dump-screen returns empty) — don't bother. **`tmux`
+and `zellij` ARE installed** (this file claimed otherwise until 2026-09-23);
+tmux is useful for keeping a long-running session alive, but it is not the tool
+for scripted assertions — you still want the driver below, which gives you the
+bytes directly.
 
 What works: a Python `pty.fork()` driver. Pattern:
 
@@ -51,6 +55,22 @@ fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
 - Strip ANSI for assertions: `re.compile(rb'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][0-9A-B]|\x1b[>=]|\x1b\][^\x07]*\x07')`.
   The first drain (~1.2s) is a full screen; later drains are ratatui diffs —
   assert on substrings, not layout.
+- **Force a full repaint before asserting anything that matters.** Ratatui
+  diff-renders: unchanged cells never reach the pty, so a capture of the diff
+  stream can show text that has since been overwritten, and letters go missing
+  mid-word (`caste` for `cassette`). Resize the pty to trigger a full redraw,
+  then drain:
+
+  ```python
+  fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows + 1, cols, 0, 0))
+  time.sleep(1.0)
+  screen = drain()
+  ```
+
+  Phase 5c nearly lost a real bug to this: the diff capture showed the CORRECT
+  banner, which a tick had already replaced. The repaint showed the wrong one.
+  It cuts both ways — a diff-stream assertion also *fails* on text that is
+  genuinely on screen, so check the repaint before believing either result.
 - Ratatui positions text runs with cursor-move escapes that stand in for the
   spaces between them, so stripped output has words glued together
   (`helloworld`, `0/5`). Strip spaces from both sides before comparing:
@@ -68,6 +88,20 @@ fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
   one, which is the second reason that variable is not optional.
 - CLI error paths (`-h`, bad flags, unknown `-T` template) exit before raw mode,
   so they can be run directly without a pty.
+
+## Two ways a passing drive lies to you
+
+- **A fixture nothing can see.** A cassette with no topic and no text renders
+  as a blank row, so `assert not in screen` passes whether or not it was drawn.
+  Phase 5c's first fold test passed with the feature deleted for exactly this
+  reason. Give fixtures distinguishable topics or text, and assert that
+  something you EXPECT to be drawn is present in the same test — that is what
+  makes an absence mean anything.
+- **A fixture too small to reach the failure.** Phase 6's `export` panicked on
+  a closed pipe, on its documented primary use, and both the test suite and a
+  manual drive missed it — the session was 650 bytes, under the 64KB pipe
+  buffer. It needed 648KB to show at all. When the thing under test has a
+  buffer, a cap or a screenful in it, size the fixture past that boundary.
 
 Flows worth driving: type on side A → Ctrl+B → type on side B → check both land
 under their `## Side A`/`## Side B` headings; `t` topic prompt in normal mode;
