@@ -11,7 +11,7 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
 | 1 | `queue topic` command | done | `specs/2026-09-24-queue-topic-design.md` | `plans/2026-09-24-queue-topic.md` |
 | 2 | `$USER` bootstrap registers a human-kind writer | done | `specs/2026-09-24-implicit-writer-authority-design.md` | `plans/2026-09-24-implicit-writer-authority.md` |
 | 3 | Carried triage cleanups (bundle) | done | `specs/2026-09-24-carried-triage-design.md` | `plans/2026-09-24-carried-triage.md` |
-| 4 | Reader mode — focus without holding the lock | todo | | |
+| 4 | Reader mode — focus without holding the lock | done | `specs/2026-09-24-reader-mode-design.md` | `plans/2026-09-24-reader-mode.md` |
 | 5 | Man page, completions, release packaging | todo | | |
 | 6 | Document export mode 2 (agent-written document) | todo | | |
 | 7 | Queue ordering policy (feed vs topic order) | todo | | |
@@ -35,3 +35,12 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
   (mtime, len, inode) stamp. This is more than the follow-up asked for; say if you want it split out.
 - **(3) `StoredCassette.path` is deleted** rather than kept as a "public store field". Nothing
   reads it and the crate has no lib target. Your earlier note called this a design call.
+- **(4) The big one: toggle or lock-on-intent?** The spec recommends lock-on-intent as the end
+  state, built as a toggle (`r`) first. Phase 2 adds the idle trigger behind
+  `release_idle_secs`, **off by default** until you've lived with it. Intent means entering
+  insert mode, not the first keystroke, and idle release only happens from normal mode.
+- **(4) Side effect:** cursor motion now works on Busy and Closed cassettes too (a new
+  `view_focused`). Motions used to be silently dropped there.
+- **(4) Key choice `r`** (vim's replace-char isn't implemented here). Fallbacks: `R` or `Ctrl+R`.
+- **(4) Plan note:** a few Task 2 and 3 tests are specified as named assertions next to existing
+  fixtures rather than as full code, because those fixtures are long. Worth a look before executing.
