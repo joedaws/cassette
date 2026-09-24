@@ -78,7 +78,7 @@ fn main() -> io::Result<()> {
     }
 
     // `stats` and `find` read only the session store — the legacy notes dir
-    // (`cfg.notes_dir` / `config::default_notes_dir`) is deliberately not
+    // (the deprecated `cfg.notes_dir`) is deliberately not
     // consulted here. See the design's decision 7: existing notes stop
     // appearing in these two commands, on purpose, with no fallback and no
     // migration; the files themselves are untouched.
