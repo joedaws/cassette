@@ -1045,6 +1045,57 @@ mod tests {
     }
 
     #[test]
+    fn a_topic_set_from_the_cli_survives_the_tui_refocusing_and_flushing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("store");
+        let store = Store::new(root.clone());
+        let (mut app, session) = fixture(&store, 2);
+        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+
+        w.acquire(&mut app, 0).expect("acquire 0");
+        app.focus_idx = 0;
+        app.modify_focused(|c| c.topic = Some("old title".to_string()));
+        let zero_id = app.cassettes[0].id.clone();
+        w.acquire(&mut app, 1)
+            .expect("focus 1 — flushes 0 with 'old title'");
+        app.focus_idx = 1;
+
+        let out = std::process::Command::new(bin_path())
+            .args([
+                "queue",
+                "topic",
+                &zero_id,
+                "--session",
+                &session,
+                "new title",
+            ])
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "agent")
+            .env_remove("CASSETTE_WRITER")
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+        w.acquire(&mut app, 0).expect("focus 0 again");
+        app.focus_idx = 0;
+        assert_eq!(
+            app.cassettes[0].topic.as_deref(),
+            Some("new title"),
+            "acquire re-reads"
+        );
+        app.modify_focused(|c| c.insert_str("!"));
+        w.flush_focused(&mut app).expect("flush");
+
+        let scan = store.scan_session(&session).expect("scan");
+        let zero = scan
+            .cassettes
+            .iter()
+            .find(|c| c.meta.id == zero_id)
+            .expect("0");
+        assert_eq!(zero.meta.topic.as_deref(), Some("new title"));
+    }
+
+    #[test]
     fn regaining_focus_keeps_cursor_and_undo_when_nothing_changed_on_disk() {
         // The re-read must not cost the writer their place on every Tab: an
         // unchanged file leaves the in-memory cassette — cursor, undo stack
