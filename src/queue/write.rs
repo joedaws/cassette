@@ -58,9 +58,8 @@ fn write_permitted(
         (Kind::Agent, Some(holder)) => {
             let name = store
                 .writers()
-                .ok()
-                .and_then(|w| w.writers.get(holder).map(|w| w.name.clone()))
-                .unwrap_or_else(|| holder.to_string());
+                .map(|w| store::writers::display_name(&w, holder))
+                .unwrap_or_else(|_| holder.to_string());
             Err(QueueError::Sticky(format!(
                 "cassette is locked by '{name}' — only a human may write it{}",
                 acting.hint(who_name)
