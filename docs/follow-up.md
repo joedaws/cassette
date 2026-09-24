@@ -94,6 +94,39 @@ Recorded because they are design findings, not defects.
 
 ---
 
+## Document export — two modes, one of them unbuilt
+
+**Raised 2026-09-23, after the Stage 2 trial.**
+
+Getting a session out should have two shapes, because they answer different questions:
+
+1. **Raw markdown — `cassette export <id>`. Exists.** Every cassette verbatim in queue order,
+   closed and damaged ones included and marked. Faithful, lossless, no interpretation. This is
+   the archive, and the right thing when you want *what was written*.
+
+2. **A coherent document, written by the agent. Unbuilt.** The session's cassettes are points
+   raised, refined and sometimes abandoned across a working session; nobody wants to read them
+   as a numbered list a month later. The agent reads the session and writes the document the
+   session was *converging on* — the argument rather than its scaffolding.
+
+The second is not a format conversion, which is why it is not simply a flag on the first. A
+session's cassettes under the distillation model are already each a nugget; what is missing is
+the connective tissue and the ordering that makes them one argument rather than six notes.
+That is a judgement call, so it belongs to an agent, not to `export`'s renderer.
+
+Open questions worth settling before building it:
+
+- **Where does the output go?** A new cassette in the session (it is a thought about the
+  session, and stays with it), or a file outside the store (it is a deliverable, and lives
+  where deliverables live)? Leaning file — putting it in the session invites a later pass to
+  distil the summary into the thing it summarises.
+- **What does it do with disagreement?** A session where a question was raised and answered
+  three different ways has no single coherent line. Flattening that is lossy in a way the raw
+  export is not.
+- **Is it a CLI command at all?** It needs a model, so `cassette` cannot do it alone. Most
+  likely it is a skill the agent runs against `export`'s output, not a subcommand — which
+  would keep the binary model-free, as it is today.
+
 ## `queue topic` — set a cassette's topic from the CLI
 
 **Found 2026-09-23, during the Stage 2 trial.**
