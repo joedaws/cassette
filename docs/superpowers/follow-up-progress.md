@@ -1,5 +1,34 @@
 # Follow-up specs — overnight progress
 
+## Summary (read this first)
+
+Written unattended on branch `follow-up-specs`, 2026-09-24. **Docs only**: six specs, six
+plans, no code. The branch is not pushed and nothing touched `main`. Every spec lists its
+judgement calls under **Decisions**. The ones that are genuinely yours are collected under
+"Open questions" at the bottom.
+
+**Recommended build order** (smallest risk and most unblocking first):
+
+1. **Implicit writer authority** (item 2). A permission hole that has already caused a false
+   bug report. Small (one resolver replaces 8 copies). Lands before `queue topic` so that
+   command is born using the new resolver.
+2. **Carried triage** (item 3). Includes a real live-sync bug found overnight: mtime-only
+   change detection misses a write inside one timestamp tick.
+3. **`queue topic`** (item 1). Small, and fixes the trial's permanently `(untitled)` cassettes.
+4. **Reader mode** (item 4). The biggest UX change. Phase 1 (the `r` toggle) stands alone;
+   phase 2 (idle release) waits on your call about defaults.
+5. **Man page + completions** (item 5). Independent; includes a help-text pass that removes
+   leftover "note" wording.
+6. **Session write-up skill** (item 6). No Rust; can run any time, in parallel with the others.
+
+**Top open questions:** (2) whether `$USER` should lose human *authority* or be refused
+outright; (4) whether reading should eventually be the default (`release_idle_secs`); (3)
+whether the sync fix should be split out of the triage bundle. Details below.
+
+**Cross-plan interactions:** items 1, 2 and 3 all touch `queue/edit.rs`/`write.rs`. Each plan
+says what to do if another landed first.
+
+
 Written unattended on branch `follow-up-specs`, 2026-09-24, one item per loop iteration.
 Nothing here is built; every spec lists its judgement calls under **Decisions** for review.
 `docs/follow-up.md` entries stay until the work is actually built.
@@ -14,7 +43,7 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
 | 4 | Reader mode — focus without holding the lock | done | `specs/2026-09-24-reader-mode-design.md` | `plans/2026-09-24-reader-mode.md` |
 | 5 | Man page, completions, release packaging | done | `specs/2026-09-24-man-and-completions-design.md` | `plans/2026-09-24-man-and-completions.md` |
 | 6 | Document export mode 2 (agent-written document) | done | `specs/2026-09-24-session-writeup-design.md` | `plans/2026-09-24-session-writeup.md` |
-| 7 | Queue ordering policy (feed vs topic order) | todo | | |
+| 7 | Queue ordering policy (feed vs topic order) | recommendation only | no spec: see below | |
 | — | Tune the agent's cassette length | skipped | needs usage data, not design | |
 
 ## Open questions for the user
@@ -56,3 +85,12 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
   cassette. It proposes the path and an outline in chat and waits for your yes before writing.
   Disagreement is kept under `## Open questions`, unattributed. Is the outline-approval step too
   much ceremony for you?
+- **(7) Queue ordering: no spec, a skill change instead.** The feed ordering isn't tool
+  behavior. `queue new` already appends to the end of the queue by default; the feed comes
+  entirely from `cassette-session`'s "surface a reply with `queue move --before <first>`"
+  convention. Recommendation: change that bullet to *"Leave replies in place by default (a new
+  cassette lands at the tail). Move one to the top only when the human asked a question and is
+  waiting on the answer, i.e. a conversational session. For morning pages or topic-structured
+  sessions, never reorder."* A per-session `mode = "conversation"` in `session.toml` could make
+  this explicit later, but nothing needs it yet. Not applied, because it's your skill's voice.
+  Want it?
