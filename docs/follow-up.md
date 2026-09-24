@@ -155,19 +155,16 @@ revisit once there is enough use to say what actually reads well.
 
 Small, none blocking, each verified to still exist as of Phase 6.
 
-- **`src/store/mod.rs` still carries a module-wide `#![allow(dead_code)]`** from Phase 2,
-  masking `StoredCassette.path`, `LockGuard::path` and `meta::parse_frontmatter`. Its comment
-  says "remove when Phase 4 lands"; Phase 4 landed three phases ago. Deferring was deliberate —
-  one is a public store field, which is a design call rather than a cleanup — but Phase 6's
-  whole thesis is that such an allow hides unfinished deletions.
-- **`assert!(after >= before)` in `tests/cli.rs`** passes when the mtime did not move. Tracking
-  `(mtime, len)` instead of `mtime` would shrink the degenerate case further.
-- **After a side-B merge, `cursor_for_a` is hardcoded to `0`** while the mirror case keeps side
-  B's stored cursor. Harmless, undocumented asymmetry.
-- **`queue::write::write_permitted` keeps an inline id→name lookup** beside the shared
-  `store::writers::display_name`.
 - **`cassette sessions` scans every cassette of every session before its first frame.**
-  Pre-existing — `find` pays the same cost — but it is now on an interactive path. Worth
-  measuring before the store reaches four digits of sessions.
+  Pre-existing — `find` pays the same cost — but it is now on an interactive path. **Measured
+  2026-09-24** (release build, warm page cache, 5 cassettes × one line each per session, median
+  of 5 `cassette find` runs, the same `scan_store` the picker calls): 100 sessions 8 ms, 1 000
+  sessions 55 ms, 5 000 sessions 285 ms — linear, ~56 µs a session. A year of daily use
+  (~400 sessions) is ~22 ms, far under the ~150 ms first-frame threshold, which is not reached
+  until ~2 700 sessions. **No action now.** A cold cache and longer cassettes will cost more;
+  re-measure on a real store before acting, and the likely fix then is a cached per-session
+  summary, which is a design of its own.
 - **A newcomer arriving above a scrolled viewport shifts the visible set by one row.** Focus
-  identity is preserved, so this is cosmetic.
+  identity is preserved, so this is cosmetic. Fix when built: capture the id at `cassette_scroll` before
+  `merge_external`'s re-sort, restore the index by that id after, then `ensure_focus_visible`
+  — the by-id rule focus already follows.
