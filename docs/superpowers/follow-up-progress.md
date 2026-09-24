@@ -2,8 +2,9 @@
 
 ## Summary (read this first)
 
-Written unattended on branch `follow-up-specs`, 2026-09-24. **Docs only**: six specs, six
-plans, no code. The branch is not pushed and nothing touched `main`. Every spec lists its
+Written unattended on branch `follow-up-specs`, 2026-09-24: six specs and six plans. **Built
+the same day** at the user's direction: items 1, 2, 3, 5 and 6, plus a README pass. Item 4
+(reader mode) was deliberately not built; its spec and plan stand for later. The branch is not pushed and nothing touched `main`. Every spec lists its
 judgement calls under **Decisions**. The ones that are genuinely yours are collected under
 "Open questions" at the bottom.
 
@@ -37,12 +38,12 @@ Nothing here is built; every spec lists its judgement calls under **Decisions** 
 
 | # | Item | Status | Spec | Plan |
 |---|------|--------|------|------|
-| 1 | `queue topic` command | done | `specs/2026-09-24-queue-topic-design.md` | `plans/2026-09-24-queue-topic.md` |
-| 2 | `$USER` bootstrap registers a human-kind writer | done | `specs/2026-09-24-implicit-writer-authority-design.md` | `plans/2026-09-24-implicit-writer-authority.md` |
-| 3 | Carried triage cleanups (bundle) | done | `specs/2026-09-24-carried-triage-design.md` | `plans/2026-09-24-carried-triage.md` |
-| 4 | Reader mode — focus without holding the lock | done | `specs/2026-09-24-reader-mode-design.md` | `plans/2026-09-24-reader-mode.md` |
-| 5 | Man page, completions, release packaging | done | `specs/2026-09-24-man-and-completions-design.md` | `plans/2026-09-24-man-and-completions.md` |
-| 6 | Document export mode 2 (agent-written document) | done | `specs/2026-09-24-session-writeup-design.md` | `plans/2026-09-24-session-writeup.md` |
+| 1 | `queue topic` command | built | `specs/2026-09-24-queue-topic-design.md` | `plans/2026-09-24-queue-topic.md` |
+| 2 | `$USER` bootstrap registers a human-kind writer | built | `specs/2026-09-24-implicit-writer-authority-design.md` | `plans/2026-09-24-implicit-writer-authority.md` |
+| 3 | Carried triage cleanups (bundle) | built | `specs/2026-09-24-carried-triage-design.md` | `plans/2026-09-24-carried-triage.md` |
+| 4 | Reader mode — focus without holding the lock | specced, not built (user's call) | `specs/2026-09-24-reader-mode-design.md` | `plans/2026-09-24-reader-mode.md` |
+| 5 | Man page, completions, release packaging | built | `specs/2026-09-24-man-and-completions-design.md` | `plans/2026-09-24-man-and-completions.md` |
+| 6 | Document export mode 2 (agent-written document) | built | `specs/2026-09-24-session-writeup-design.md` | `plans/2026-09-24-session-writeup.md` |
 | 7 | Queue ordering policy (feed vs topic order) | recommendation only | no spec: see below | |
 | — | Tune the agent's cassette length | skipped | needs usage data, not design | |
 
