@@ -51,6 +51,9 @@ shared understanding each pass. `queue write` replaces by default and that is co
 - **Surface a reply** with `queue move <id> --session <ID> --before <current-first>`. Be aware
   this orders the session by recency rather than topic — right for a conversation, wrong for
   morning pages.
+- **Retitle** a cassette whose subject has drifted — including an untitled one the human
+  created — with `cassette queue topic <id> --session <ID> "<topic>"`. It does not change whose
+  turn it is.
 - **Cadence in minutes, not seconds.** Freewriting arrives in paragraphs; a fast tick catches
   half a thought, and every tick costs a model call whether or not there is work.
 - **Say nothing when there is nothing.** A stream of "nothing to do" in the terminal defeats

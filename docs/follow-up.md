@@ -127,24 +127,6 @@ Open questions worth settling before building it:
   likely it is a skill the agent runs against `export`'s output, not a subcommand — which
   would keep the binary model-free, as it is today.
 
-## `queue topic` — set a cassette's topic from the CLI
-
-**Found 2026-09-23, during the Stage 2 trial.**
-
-A topic can only be set at creation (`queue new "<topic>"`) or from the TUI (`Ctrl+T`). There
-is no CLI command to set or change one, so an agent cannot title a cassette it did not create —
-and cannot retitle one whose subject has drifted, which under the distillation model is normal:
-a cassette gets rewritten into what it is now about, and its title should follow.
-
-In this session it left two of the human's cassettes permanently untitled, showing as
-`(untitled)` in every listing, with the agent unable to fix it.
-
-Shape: `cassette queue topic <ID> --session <ID> "<topic>"`, with an empty string clearing it
-(matching the TUI's blank-input-clears rule). It is a metadata write, so it takes the
-cassette's lock like `close`/`reopen` do, and it is the one field the TUI already owns and
-flushes — `flush_held` writes `topic`, so the two paths need to agree on precedence the way
-`queue move`/`close` already do.
-
 ## Tune the agent's cassette length
 
 Set at **~15 lines** on 2026-09-23 after the user observed that 30-line responses are a wall to
