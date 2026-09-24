@@ -64,6 +64,12 @@ Recorded because they are design findings, not defects.
   the newest is always where you land, but it orders the session by recency of reply rather
   than by topic. Plausibly right for a conversational session and wrong for morning pages;
   worth a deliberate choice rather than a default.
+  **Recommendation (2026-09-24, not applied):** this is skill guidance, not tool behaviour —
+  `queue new` already lands at the tail. Change `cassette-session`'s "surface a reply" bullet
+  to: leave replies in place by default; move one to the top only when the human asked a
+  question and is waiting on it; never reorder a morning-pages or topic-structured session.
+  A per-session `mode = "conversation"` in `session.toml` could make it explicit later.
+  Awaiting the user's call.
 
 ---
 
@@ -90,3 +96,23 @@ Small, none blocking, each verified to still exist as of Phase 6.
   identity is preserved, so this is cosmetic. Fix when built: capture the id at `cassette_scroll` before
   `merge_external`'s re-sort, restore the index by that id after, then `ensure_focus_visible`
   — the by-id rule focus already follows.
+- **`close_permitted`'s sticky refusal prints the raw `locked_by` id**, where
+  `write_permitted`'s names the holder via `store::writers::display_name`. (Found 2026-09-24.)
+- **`queue topic` rejects `\n` but lets `\r` through**, which `meta::one_line` then flattens
+  silently — the silent rewrite the newline rule exists to prevent. (Found 2026-09-24.)
+- **`stats` output still counts "notes"** (`5 notes · 2183 words`) while its `--help` says
+  sessions. (Found 2026-09-24.)
+- **Other commands may panic writing to a closed pipe with large output** (`print!` on EPIPE,
+  Phase 6's `export | head` lesson). `completions`/`man` are safe via `tolerate_broken_pipe`;
+  the rest were not audited. Not reproduced.
+
+## Owed verification (2026-09-24 build)
+
+- **The release workflow's new packaging step has never run.** Publish a release (or
+  pre-release tag) and check the tarball listing against `docs/distribution.md`'s "What ships".
+- **`cassette-writeup` has had no independent pressure test** — only its author running it on
+  `fixture.sh`. `superpowers:writing-skills` calls for a baseline run by a fresh agent without
+  the skill, then one with it.
+- **The non-unix build of `ChangeStamp` has never compiled** (only the linux target is
+  installed here).
+- **The whole-branch review of the 2026-09-24 build was a self-review**, not a fresh reviewer.
