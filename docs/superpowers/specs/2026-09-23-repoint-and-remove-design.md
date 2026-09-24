@@ -75,16 +75,27 @@ rows in the TUI.
 rename means a concurrent writer can never present a torn file. Taking locks would make an
 export of a busy session fail for no benefit, which is the `queue list` precedent.
 
-## The data directory is created `0700`
+## The data directory is created `0700` — already done
 
-Freewriting content is private by nature and the default `0755` would make every session
-world-readable on a shared machine. Applied where the store root is created, Unix-only
-(`std::os::unix::fs::PermissionsExt`), behind `#[cfg(unix)]` — Windows is already out of CI by
-the Phase 3 scope decision, and there is no portable equivalent worth faking.
+**Corrected 2026-09-23, during implementation.** This section originally listed the `0700`
+store root as Phase 6 work and specified that existing directories should be left alone. Both
+were wrong, and the audit that caught it is the reason this phase checks the tree before
+deleting or building anything.
 
-**Existing directories are not re-chmodded.** Changing permissions on a directory the user
-already has is a surprise they did not ask for, and it would fight anyone who set them
-deliberately. New stores get `0700`; old ones are left alone.
+`store::ensure_private_dir` has done this since `ee29073`, and does it *better* than this spec
+proposed: the mode is baked into `mkdir(2)` rather than chmod'd afterwards, so the directory is
+never briefly world-readable, and parents keep their own permissions. Four tests cover it
+(`the_data_dir_is_private`, `session_subdirectories_are_private_too`,
+`registering_a_writer_creates_a_private_root`, `the_data_dirs_parent_keeps_its_own_permissions`).
+
+It also **does** tighten an existing directory that is looser than `0700`, which this spec had
+said it should not. On reflection the shipped behaviour is right: a store that is already
+world-readable holds private writing that stays exposed for as long as nobody notices, and
+"don't surprise the user" is a weaker argument than "don't leave their journal readable". The
+spec is corrected to the code, not the code to the spec — changing tested security behaviour to
+match an assumption written a day earlier would be the exact failure this phase guards against.
+
+Nothing to implement. What remains of this section is the sync-root warning below.
 
 ## The cloud-sync warning
 

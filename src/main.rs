@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::{
@@ -1820,12 +1820,59 @@ fn exit_usage(msg: &str, json: bool) -> ! {
 /// fix by retrying with different arguments (README's exit-1 rule), not a
 /// usage error — and, like every other failure under `--json`, it must still
 /// emit the `{"error","code"}` envelope rather than bare stderr prose.
+/// Whether `root` sits under a directory a consumer sync client owns.
+///
+/// A substring match on lowercased path components, not a filesystem probe —
+/// "where cheap" is the parent spec's own qualifier. It can false-positive on
+/// a directory that merely has one of these words in its name, which is
+/// exactly why the caller warns and continues rather than refusing: a tool
+/// that will not start because of a folder name would be worse than the risk
+/// it names.
+///
+/// Network filesystems stay undetected. There is no cheap userspace way to
+/// tell whether a given mount's `flock` is cross-client safe, and guessing
+/// from the mount type would give false confidence rather than protection.
+fn looks_synced(root: &Path) -> bool {
+    const SYNC_ROOTS: [&str; 6] = [
+        "dropbox",
+        "mobile documents", // iCloud Drive's on-disk name
+        "icloud drive",
+        "onedrive",
+        "google drive",
+        "sync.com",
+    ];
+    root.components().any(|c| {
+        let name = c.as_os_str().to_string_lossy().to_lowercase();
+        SYNC_ROOTS
+            .iter()
+            .any(|s| name == *s || name.starts_with(&format!("{s} ")))
+    })
+}
+
+/// Warn once at startup when the store sits in a syncing folder.
+///
+/// Locks are local kernel state and do not sync, so two machines editing one
+/// session get zero mutual exclusion — the exact guarantee the store exists
+/// to provide. Sync clients also interfere with rename-based atomic writes.
+fn warn_if_synced(root: &Path) {
+    if looks_synced(root) {
+        eprintln!(
+            "cassette: warning — the store is under a syncing folder ({}).\n\
+             cassette: locks do not sync, so two machines editing one session \
+             get no mutual exclusion.",
+            root.display()
+        );
+    }
+}
+
 fn store_root(json: bool) -> PathBuf {
-    std::env::var_os("CASSETTE_DATA_DIR")
+    let root = std::env::var_os("CASSETTE_DATA_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(store::Store::default_root)
-        .unwrap_or_else(|| exit_with(1, "cannot determine a data dir", json))
+        .unwrap_or_else(|| exit_with(1, "cannot determine a data dir", json));
+    warn_if_synced(&root);
+    root
 }
 
 #[cfg(test)]
@@ -2300,6 +2347,35 @@ mod tests {
             "",
             "and the undo stack must survive the sync tick that follows a flush"
         );
+    }
+
+    /// A heuristic that warns and continues: it can false-positive on a
+    /// directory that merely has one of these words in its name, and a tool
+    /// that refuses to start over a folder name would be worse than the risk.
+    #[test]
+    fn a_store_under_a_sync_root_is_flagged() {
+        for p in [
+            "/home/me/Dropbox/cassette",
+            "/Users/me/Library/Mobile Documents/cassette",
+            "/home/me/OneDrive/notes/cassette",
+            "/home/me/Google Drive/cassette",
+        ] {
+            assert!(looks_synced(Path::new(p)), "should flag {p}");
+        }
+    }
+
+    /// An ordinary store, and a path that merely CONTAINS one of the words
+    /// inside a longer component, are both left alone — the match is on the
+    /// whole component, not a bare substring.
+    #[test]
+    fn an_ordinary_store_is_not_flagged() {
+        for p in [
+            "/home/me/.local/share/cassette",
+            "/home/me/dropboxes-i-have-known/cassette",
+            "/tmp/cassette-test",
+        ] {
+            assert!(!looks_synced(Path::new(p)), "should not flag {p}");
+        }
     }
 
     /// `busy_holder_name` is what turns a failed acquire into the name
