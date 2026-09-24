@@ -44,33 +44,6 @@ through the entire trial.
 
 ---
 
-## Man page, shell completions, release packaging
-
-**Deferred out of Phase 6, 2026-09-23, at the user's direction.**
-
-`clap_mangen` + `clap_complete` generating from the `cli::Cli` derive tree, so they cannot
-drift from the real command surface. Blocked on a structural choice: `build.rs` cannot reach
-the clap tree, because `include!("src/cli.rs")` does not compile — `cli.rs` uses nine `crate::`
-paths (`queue::Placement`, `queue::Side`, `store::writers::Kind`, …) directly in its derive.
-
-Three ways out, none obviously right, each a decision about the crate rather than about
-packaging:
-
-1. **Generate at runtime** from the live `Command` (`--generate-man`, `--generate-completions
-   <shell>`). Zero drift by construction, no `build.rs` — but both crates become runtime
-   dependencies of the shipped binary.
-2. **Make `cli.rs` self-contained**, moving those domain enums behind local arg types and
-   converting in `into_args` — the pattern `WriterKindArg` already establishes. Keeps the deps
-   build-only and arguably improves the layering, but touches the queue and writer command
-   surface.
-3. **Add a lib target** so `build.rs` can import the module. The standard answer, but this
-   crate has deliberately had no `lib.rs`; CLAUDE.md cites its absence as why there is no
-   public escape hatch to the store.
-
-Whichever is chosen, packaging the artifacts into a release belongs in `docs/distribution.md`.
-
----
-
 ## What the Stage 2 trial found
 
 Recorded because they are design findings, not defects.

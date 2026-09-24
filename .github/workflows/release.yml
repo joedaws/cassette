@@ -55,7 +55,16 @@ jobs:
         run: cargo build --release
 
       - name: Package artifact
-        run: tar -czf "${{ matrix.artifact }}" -C target/release cassette
+        run: |
+          set -euo pipefail
+          BIN=target/release/cassette
+          mkdir -p dist/man/man1 dist/completions
+          cp "$BIN" dist/
+          "$BIN" man --out-dir dist/man/man1
+          "$BIN" completions bash > dist/completions/cassette.bash
+          "$BIN" completions zsh  > dist/completions/_cassette
+          "$BIN" completions fish > dist/completions/cassette.fish
+          tar -czf "${{ matrix.artifact }}" -C dist .
 
       - name: Upload to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

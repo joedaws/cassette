@@ -88,6 +88,9 @@ You'll need the [Rust toolchain](https://rustup.rs). Then:
 cargo install --path .
 ```
 
+Shell completions and man pages come from the binary itself: `cassette completions <shell>`
+and `cassette man`. See [docs/distribution.md](docs/distribution.md) for where they go.
+
 Launch with `cassette` and just start typing — you're in insert mode. When
 you're done, `Esc` then `q` saves and quits.
 
@@ -766,44 +769,10 @@ for what that means for notes written before the store existed.
 
 ## For maintainers
 
-### Releasing a new version
-
-1. Bump `version` in `Cargo.toml` (e.g. `0.7.0`) and merge all changes to `main`.
-2. On GitHub, go to **Releases → Draft a new release**.
-3. Create a new tag (e.g. `v0.7.0`) targeting `main`.
-4. Write release notes, then click **Publish release**.
-
-The [Release workflow](.github/workflows/release.yml) will automatically build the Linux binary
-and attach `cassette-linux-x86_64.tar.gz` to the release. First run may take longer due to cache
-warming; subsequent releases should be faster.
-
-### CI security: pinned Actions
-
-The release workflow pins every third-party GitHub Action to a specific commit SHA rather than a
-mutable tag like `@v2` or `@stable`. This prevents a compromised action repository from silently
-pushing malicious code under an existing tag and having it run in your CI pipeline — a class of
-attack that has affected several popular actions (tj-actions, reviewdog, and others) in 2025–2026.
-
-The pins currently in use:
-
-| Action | Tag | Pinned SHA |
-|---|---|---|
-| `dtolnay/rust-toolchain` | `stable` | `29eef336d9b2848a0b548edc03f92a220660cdb8` |
-| `softprops/action-gh-release` | `v2` | `3bb12739c298aeb8a4eeaf626c5b8d85266b0e65` |
-
-**Updating a pin:** when you want to pick up a newer version of an action, resolve the new SHA and
-update the workflow manually:
-
-```bash
-# find the SHA the tag currently points to
-gh api repos/softprops/action-gh-release/tags \
-  --jq '.[] | select(.name=="v2") | .commit.sha'
-```
-
-Then replace the SHA in `.github/workflows/release.yml` and leave a `# v2` comment so the intent
-stays readable.
+Releasing, the release tarball's contents, and the pinned CI actions are documented in
+[docs/distribution.md](docs/distribution.md).
 
 ## Ideas
 
 - **Publishing the practice** — packaging for the AUR and crates.io, a demo
-  GIF, man page and shell completions, macOS builds.
+  GIF, macOS builds.

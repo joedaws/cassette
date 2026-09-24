@@ -25,6 +25,12 @@ more agents can write different cassettes of the same session concurrently.
   permission boundary declared once at registration.
 - **`cassette sessions`** — an interactive picker over recent sessions, since
   ULIDs leave no name to type. `j/k`, `/` to filter, `a` for all, Enter opens.
+- **`cassette completions <SHELL>` and `cassette man [--out-dir DIR]`** — shell
+  completions and man pages generated from the live CLI definition, so they cannot
+  drift. The release tarball now ships them under `completions/` and `man/man1/`;
+  see `docs/distribution.md`.
+- **`cassette queue topic <ID> --session <ID> "<TOPIC>"`** — set, change or clear a
+  cassette's topic from the CLI.
 - **`cassette export <id> [--out PATH]`** — a session rendered to one flat
   markdown file. Closed and unreadable cassettes are included and marked.
 - **Live multi-writer TUI.** The editor holds the lock only for the focused
@@ -44,6 +50,15 @@ more agents can write different cassettes of the same session concurrently.
   but are no longer counted by `stats` or listed by `find`.
 - The data directory is created `0700`; an existing one looser than that has
   its group and other bits cleared.
+
+### Fixed
+- **A writer taken from `$USER` no longer carries human authority.** An agent runs in
+  the human's shell and inherits `$USER`, so an agent that forgot `--writer` acted as the
+  human: sticky locks did not bind it. Such a writer is still attributed by name but is
+  refused on sticky writes/closes and on `queue lock`/`unlock`, with a message naming
+  `--writer`. Humans pass `--writer <name>` (or set `$CASSETTE_WRITER`) for those.
+- **Live sync no longer misses a write that lands inside one mtime tick** — changes are
+  detected by mtime, length and inode.
 
 ### Removed
 - The flat-note format and its machinery: the append-and-re-sum path and its
