@@ -2485,3 +2485,82 @@ fn an_implicit_user_cannot_write_over_a_sticky_lock_but_an_explicit_one_can() {
         stderr(&unlock_implicit)
     );
 }
+
+#[test]
+fn queue_topic_sets_changes_and_clears_a_topic_without_renaming_the_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let cmd = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .env_remove("CASSETTE_WRITER")
+            .output()
+            .expect("spawn")
+    };
+    let sid = String::from_utf8_lossy(&cmd(&["session", "new"]).stdout)
+        .trim()
+        .to_string();
+    let cid = String::from_utf8_lossy(&cmd(&["queue", "new", "draft", "--session", &sid]).stdout)
+        .trim()
+        .to_string();
+    let files = || -> Vec<_> {
+        let mut v: Vec<_> = std::fs::read_dir(root.join("sessions").join(&sid).join("cassettes"))
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .filter(|n| n.to_string_lossy().ends_with(".md"))
+            .collect();
+        v.sort();
+        v
+    };
+    let names_before = files();
+
+    let set = cmd(&[
+        "queue",
+        "topic",
+        &cid,
+        "--session",
+        &sid,
+        "what it is now about",
+    ]);
+    assert_eq!(set.status.code(), Some(0), "{}", stderr(&set));
+    let shown = cmd(&["queue", "show", &cid, "--session", &sid, "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&shown.stdout).expect("json");
+    assert_eq!(v["topic"], "what it is now about");
+    assert_eq!(files(), names_before, "the slug is frozen at creation");
+
+    let dash = cmd(&["queue", "topic", &cid, "--session", &sid, "--", "-draft"]);
+    assert_eq!(dash.status.code(), Some(0), "{}", stderr(&dash));
+    let shown = cmd(&["queue", "show", &cid, "--session", &sid, "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&shown.stdout).expect("json");
+    assert_eq!(v["topic"], "-draft", "`--` lets a topic start with a dash");
+
+    let cleared = cmd(&["queue", "topic", &cid, "--session", &sid, ""]);
+    assert_eq!(cleared.status.code(), Some(0), "{}", stderr(&cleared));
+    let shown = cmd(&["queue", "show", &cid, "--session", &sid, "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&shown.stdout).expect("json");
+    assert!(v["topic"].is_null(), "{v}");
+}
+
+#[test]
+fn queue_topic_rejects_a_newline_with_exit_two() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let cmd = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn")
+    };
+    let sid = String::from_utf8_lossy(&cmd(&["session", "new"]).stdout)
+        .trim()
+        .to_string();
+    let cid = String::from_utf8_lossy(&cmd(&["queue", "new", "draft", "--session", &sid]).stdout)
+        .trim()
+        .to_string();
+    let out = cmd(&["queue", "topic", &cid, "--session", &sid, "two\nlines"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}

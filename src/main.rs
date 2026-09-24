@@ -296,6 +296,18 @@ fn main() -> io::Result<()> {
                     Err(e) => exit_queue_err(&e, args.json),
                 }
             }
+            // `topic` attributes the change and, like `close`, needs the
+            // writer's authority for the sticky-lock boundary.
+            cli::QueueCmd::Topic { id, session, topic } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => exit_usage(&msg, args.json),
+                };
+                match queue::edit::retopic(&store, session, id, topic, &who_name, writer_source) {
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
+                }
+            }
             // `move` reprioritizes an existing cassette, so — like `close`
             // and `reopen` — it needs a writer identity to attribute the
             // change to.

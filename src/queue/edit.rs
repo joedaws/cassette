@@ -222,7 +222,7 @@ fn close_permitted(
 ) -> Result<(), QueueError> {
     match (acting.authority, locked_by) {
         (Kind::Agent, Some(holder)) => Err(QueueError::Sticky(format!(
-            "cassette is locked by '{holder}' — only a human may close it{}",
+            "cassette is locked by '{holder}' — only a human may change it{}",
             acting.hint(who_name)
         ))),
         _ => Ok(()),
@@ -298,6 +298,68 @@ pub fn close(
 
     guard
         .write(&m, &body)
+        .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
+}
+
+/// Normalise `queue topic`'s argument the way the TUI's topic prompt does:
+/// trimmed, and blank means "clear". A newline is rejected rather than
+/// flattened — `meta::one_line` would otherwise rewrite it on the way to
+/// disk and the caller would never learn its title was altered.
+fn topic_value(topic: &str) -> Result<Option<String>, QueueError> {
+    if topic.contains('\n') {
+        return Err(QueueError::Usage(
+            "topic must not contain a newline".to_string(),
+        ));
+    }
+    let trimmed = topic.trim();
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+}
+
+/// `cassette queue topic <ID> --session <ID> <TOPIC>`: set, change or clear
+/// a cassette's topic.
+///
+/// `close`'s order of operations, for `close`'s reasons: validate, resolve
+/// the writer, take the lock (`Busy` for everyone), read through the guard,
+/// then `close_permitted` — a sticky claim covers the cassette's title as
+/// much as its body.
+///
+/// Deliberately leaves `last_writer` alone: it is the "whose turn ended
+/// last" hint `waiting_on` derives from, and retitling is housekeeping,
+/// not a turn. Setting the topic it already has writes nothing, so a
+/// repeated call does not bump `updated_at` and wake every reader's sync.
+/// The file name's slug is frozen at creation and is not renamed.
+pub fn retopic(
+    store: &Store,
+    session: &str,
+    id: &str,
+    topic: &str,
+    who_name: &str,
+    source: WriterSource,
+) -> Result<(), QueueError> {
+    let topic = topic_value(topic)?;
+
+    let acting = resolve_acting(store, who_name, source)?;
+    let who = Attribution::for_now(&acting.id, who_name);
+
+    let guard = store
+        .lock(session, id, &who)
+        .map_err(|e| lock_error_to_queue_error(id, e))?;
+
+    let current = guard
+        .read()
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+    close_permitted(&acting, who_name, current.meta.locked_by.as_deref())?;
+
+    if current.meta.topic == topic {
+        return Ok(());
+    }
+
+    let mut m = current.meta;
+    m.topic = topic;
+    m.updated_at = crate::store::meta::now_utc();
+
+    guard
+        .write(&m, &current.body)
         .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
 }
 
@@ -1051,6 +1113,126 @@ mod tests {
             close_message_line("done for now").expect("ok"),
             "\n> done for now\n"
         );
+    }
+
+    #[test]
+    fn topic_value_trims_and_blank_clears() {
+        assert_eq!(
+            topic_value("  morning  ").unwrap(),
+            Some("morning".to_string())
+        );
+        assert_eq!(topic_value("   ").unwrap(), None);
+        assert_eq!(topic_value("").unwrap(), None);
+        assert!(matches!(topic_value("a\nb"), Err(QueueError::Usage(_))));
+    }
+
+    #[test]
+    fn retopic_sets_the_topic_and_touches_nothing_else() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let id = "aaa00000000000000000000000";
+        store
+            .add_cassette(&sid, &meta(id, 10, Status::Closed), "## Side A\n\nhello\n")
+            .expect("add");
+        let before = store.scan_session(&sid).expect("scan").cassettes.remove(0);
+
+        retopic(&store, &sid, id, "café ☕", "tester", WriterSource::Env).expect("retopic");
+
+        let after = store.scan_session(&sid).expect("scan").cassettes.remove(0);
+        assert_eq!(after.meta.topic.as_deref(), Some("café ☕"));
+        assert_eq!(
+            after.meta.status,
+            Status::Closed,
+            "a closed cassette stays closed"
+        );
+        assert_eq!(
+            after.meta.last_writer, before.meta.last_writer,
+            "retitling is not a turn"
+        );
+        assert_eq!(after.body, before.body);
+    }
+
+    #[test]
+    fn retopic_with_a_blank_topic_clears_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let id = "aaa00000000000000000000000";
+        store
+            .add_cassette(&sid, &meta(id, 10, Status::Open), "")
+            .expect("add");
+
+        retopic(&store, &sid, id, "  ", "tester", WriterSource::Env).expect("retopic");
+
+        let c = store.scan_session(&sid).expect("scan").cassettes.remove(0);
+        assert_eq!(c.meta.topic, None);
+    }
+
+    #[test]
+    fn retopic_to_the_same_topic_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let id = "aaa00000000000000000000000";
+        // meta() stamps updated_at 2026-09-15T09:00:00Z and topic "topic-<id>".
+        store
+            .add_cassette(&sid, &meta(id, 10, Status::Open), "")
+            .expect("add");
+
+        retopic(
+            &store,
+            &sid,
+            id,
+            &format!("topic-{id}"),
+            "tester",
+            WriterSource::Env,
+        )
+        .expect("retopic");
+
+        let c = store.scan_session(&sid).expect("scan").cassettes.remove(0);
+        assert_eq!(
+            c.meta.updated_at, "2026-09-15T09:00:00Z",
+            "a no-op must not bump updated_at"
+        );
+    }
+
+    #[test]
+    fn retopic_refuses_a_busy_cassette() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let id = "aaa00000000000000000000000";
+        store
+            .add_cassette(&sid, &meta(id, 10, Status::Open), "")
+            .expect("add");
+        let _held = store
+            .lock(&sid, id, &Attribution::for_now("writer-1", "joseph"))
+            .expect("hold it");
+
+        match retopic(&store, &sid, id, "x", "tester", WriterSource::Env) {
+            Err(QueueError::Busy(_)) => {}
+            other => panic!("expected Busy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retopic_denies_an_agent_over_a_sticky_lock_but_allows_a_human() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let id = "aaa00000000000000000000000";
+        let mut m = meta(id, 10, Status::Open);
+        m.locked_by = Some("01WRITER0000000000000000AB".to_string());
+        store.add_cassette(&sid, &m, "").expect("add");
+        store.ensure_writer("bot", Kind::Agent).expect("agent");
+        store.ensure_writer("joseph", Kind::Human).expect("human");
+
+        match retopic(&store, &sid, id, "x", "bot", WriterSource::Flag) {
+            Err(QueueError::Sticky(_)) => {}
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+        retopic(&store, &sid, id, "x", "joseph", WriterSource::Flag).expect("human may");
     }
 
     #[test]

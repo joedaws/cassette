@@ -75,6 +75,11 @@ pub enum QueueCmd {
         id: String,
         session: String,
     },
+    Topic {
+        id: String,
+        session: String,
+        topic: String,
+    },
     Move {
         id: String,
         session: String,
@@ -108,6 +113,7 @@ impl QueueCmd {
             | QueueCmd::Next { session }
             | QueueCmd::Close { session, .. }
             | QueueCmd::Reopen { session, .. }
+            | QueueCmd::Topic { session, .. }
             | QueueCmd::Move { session, .. }
             | QueueCmd::Lock { session, .. }
             | QueueCmd::Unlock { session, .. } => session,
@@ -321,6 +327,17 @@ enum QueueAction {
         /// session the cassette lives in
         #[arg(long, value_name = "ID")]
         session: String,
+    },
+    /// set a cassette's topic (a blank topic clears it)
+    Topic {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// the new topic; "" clears it
+        #[arg(value_name = "TOPIC")]
+        topic: String,
     },
     /// move a cassette to a new position in the queue
     #[command(group(clap::ArgGroup::new("anchor").required(true).args(["before", "after"])))]
@@ -547,6 +564,9 @@ impl Cli {
                         message,
                     },
                     QueueAction::Reopen { id, session } => QueueCmd::Reopen { id, session },
+                    QueueAction::Topic { id, session, topic } => {
+                        QueueCmd::Topic { id, session, topic }
+                    }
                     QueueAction::Lock { id, session } => QueueCmd::Lock { id, session },
                     QueueAction::Unlock { id, session } => QueueCmd::Unlock { id, session },
                     QueueAction::Move {
