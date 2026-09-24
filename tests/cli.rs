@@ -2321,6 +2321,7 @@ fn today_refuses_a_template_once_the_day_already_has_a_session() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_cassette_written_behind_the_tuis_back_is_visible_to_the_next_reader() {
     // Not a TUI test: this pins the store-side contract live sync depends on
@@ -2352,10 +2353,12 @@ fn a_cassette_written_behind_the_tuis_back_is_visible_to_the_next_reader() {
         .map(|e| e.path())
         .find(|p| p.to_string_lossy().contains(&cid))
         .expect("the cassette file");
-    let before = std::fs::metadata(&path)
-        .expect("stat")
-        .modified()
-        .expect("mtime");
+    let stamp = |p: &std::path::Path| {
+        use std::os::unix::fs::MetadataExt as _;
+        let m = std::fs::metadata(p).expect("stat");
+        (m.ino(), m.len(), m.modified().expect("mtime"))
+    };
+    let before = stamp(&path);
 
     let mut child = Command::new(bin())
         .args(["queue", "write", &cid, "--session", &sid])
@@ -2373,13 +2376,10 @@ fn a_cassette_written_behind_the_tuis_back_is_visible_to_the_next_reader() {
         .expect("write");
     assert!(child.wait().expect("wait").success());
 
-    let after = std::fs::metadata(&path)
-        .expect("stat")
-        .modified()
-        .expect("mtime");
-    assert!(
-        after >= before,
-        "the write must move the mtime live sync watches"
+    let after = stamp(&path);
+    assert_ne!(
+        after, before,
+        "the write must change what live sync watches (inode, length, mtime)"
     );
     let body = std::fs::read_to_string(&path).expect("read");
     assert!(body.contains("agent words"), "{body}");

@@ -953,10 +953,10 @@ fn run(
     let tick_rate = Duration::from_secs(1);
     let mut last_tick = Instant::now();
     let mut last_autosave = Instant::now();
-    // Live sync (5b): mtime last seen per cassette id, so an unchanged file
-    // is never re-merged — that would reset its cursor and undo stack for no
-    // reason. The first sight of a file counts as changed.
-    let mut cassette_mtimes: HashMap<String, SystemTime> = HashMap::new();
+    // Live sync (5b): `ChangeStamp` last seen per cassette id, so an
+    // unchanged file is never re-merged — that would reset its cursor and
+    // undo stack for no reason. The first sight of a file counts as changed.
+    let mut cassette_stamps: HashMap<String, ChangeStamp> = HashMap::new();
     #[cfg(unix)]
     let signals = install_signal_handlers()?;
 
@@ -993,7 +993,7 @@ fn run(
             retry_lock(app, writer.as_deref_mut());
 
             if let Some(store) = store {
-                sync_external_writes(app, store, writer.as_deref(), &mut cassette_mtimes);
+                sync_external_writes(app, store, writer.as_deref(), &mut cassette_stamps);
             }
 
             last_tick = Instant::now();
@@ -1222,6 +1222,30 @@ fn busy_holder_name(e: &store::lock::LockError) -> Option<String> {
     }
 }
 
+/// What the stat-only pass compares to decide a cassette changed. mtime
+/// alone misses a second write inside one timestamp tick on a coarse
+/// filesystem; every store write goes through `atomic_write`'s rename, so
+/// the inode moves on every write and cannot collide. `len` is the
+/// fallback signal where there is no inode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ChangeStamp {
+    modified: SystemTime,
+    len: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+fn change_stamp(m: &std::fs::Metadata) -> Option<ChangeStamp> {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+    Some(ChangeStamp {
+        modified: m.modified().ok()?,
+        len: m.len(),
+        #[cfg(unix)]
+        ino: m.ino(),
+    })
+}
+
 /// Notice what other writers have done to this session, once per tick.
 ///
 /// Two passes, cheap-first: this is a freewriting app, and re-reading and
@@ -1230,10 +1254,11 @@ fn busy_holder_name(e: &store::lock::LockError) -> Option<String> {
 /// the 36-cassette cap for no benefit.
 ///
 /// 1. **Stat only.** `fs::read_dir` the session's `cassettes/` directory and
-///    check each entry's mtime against `mtimes`, with no file content read
-///    at all. The **held cassette's mtime is still recorded** — this
-///    process holds that lock precisely so nobody else can have changed the
-///    file, so its mtime only ever moves because of our own flush, and
+///    check each entry's `ChangeStamp` (mtime, length and, on unix, inode)
+///    against `stamps`, with no file content read at all. The **held
+///    cassette's stamp is still recorded** — this process holds that lock
+///    precisely so nobody else can have changed the file, so its stamp only
+///    ever moves because of our own flush, and
 ///    *not* recording it would make the tick after focus moves off it look
 ///    like a first-sight change — but it is excluded from `changed_ids`
 ///    unconditionally, so it is never a merge candidate: merging it back in
@@ -1258,7 +1283,7 @@ fn sync_external_writes(
     app: &mut App,
     store: &store::Store,
     writer: Option<&session_writer::SessionWriter>,
-    mtimes: &mut HashMap<String, SystemTime>,
+    stamps: &mut HashMap<String, ChangeStamp>,
 ) {
     if app.session.is_empty() {
         return;
@@ -1281,23 +1306,23 @@ fn sync_external_writes(
         let Some(id) = store::ids::id_from_file_name(file_name) else {
             continue;
         };
-        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+        let Some(stamp) = entry.metadata().ok().as_ref().and_then(change_stamp) else {
             continue;
         };
         if Some(id) == held_id {
             // Nobody else can write a cassette whose lock this process
-            // holds, so its mtime only ever moves because of our own
+            // holds, so its stamp only ever moves because of our own
             // flush/autosave. Record it anyway: skipping the record (not
             // just the merge) would make the moment focus moves off it look
             // like a first-sight change the instant the lock is released,
             // and `merge_external` would then rebuild it from identical
             // content for no reason. The merge itself is still categorically
             // skipped — this cassette is never a candidate.
-            mtimes.insert(id.to_string(), modified);
+            stamps.insert(id.to_string(), stamp);
             continue;
         }
-        let changed = mtimes.get(id).is_none_or(|prev| *prev != modified);
-        mtimes.insert(id.to_string(), modified);
+        let changed = stamps.get(id).is_none_or(|prev| *prev != stamp);
+        stamps.insert(id.to_string(), stamp);
         if changed {
             changed_ids.push(id.to_string());
         }
@@ -1918,6 +1943,30 @@ mod tests {
         KeyEvent::new(code, mods)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_same_length_rewrite_inside_one_mtime_tick_still_changes_the_stamp() {
+        // Coarse-mtime filesystems give two quick writes the same mtime. The
+        // store writes through `atomic_write` (temp file + rename), so the
+        // inode moves on every write even when the mtime cannot.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("c.md");
+        store::atomic_write(&path, "aaaa").expect("first");
+        let first_meta = std::fs::metadata(&path).expect("stat");
+        let first = change_stamp(&first_meta).expect("stamp");
+
+        store::atomic_write(&path, "bbbb").expect("second, same length");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(first_meta.modified().expect("mtime"))
+            .expect("pin mtime back");
+        let second = change_stamp(&std::fs::metadata(&path).expect("stat")).expect("stamp");
+
+        assert_ne!(first, second, "same mtime and length, new inode: a change");
+    }
+
     fn type_str(app: &mut App, s: &str) {
         for c in s.chars() {
             handle_key(app, key(KeyCode::Char(c), KeyModifiers::NONE));
@@ -2137,14 +2186,14 @@ mod tests {
         c.priority = 20;
         app.cassettes.push(c);
 
-        let mut mtimes = HashMap::new();
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        let mut stamps = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut stamps);
 
         // 30 sorts after mine, 10 before it — so a single append would put
         // them both at the tail and only ordering can get this right.
         let later = store_cassette(&store, &session, 30, "## Side A\n\nlater\n");
         let earlier = store_cassette(&store, &session, 10, "## Side A\n\nearlier\n");
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        sync_external_writes(&mut app, &store, None, &mut stamps);
 
         assert_eq!(
             app.cassettes
@@ -2175,8 +2224,8 @@ mod tests {
             app.cassettes.push(c);
         }
 
-        let mut mtimes = HashMap::new();
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        let mut stamps = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut stamps);
         assert_eq!(app.open_count(), 2);
 
         // Close `a` the way `queue close` does, then touch it forward.
@@ -2185,7 +2234,7 @@ mod tests {
         std::fs::write(&path, raw.replace("status: open", "status: closed")).expect("write");
         touch_forward(&store, &session, &a);
 
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        sync_external_writes(&mut app, &store, None, &mut stamps);
 
         assert_eq!(app.open_count(), 1, "the closed one left the working set");
         assert!(app.cassettes[1].closed, "and sorted to the tail");
@@ -2215,8 +2264,8 @@ mod tests {
         app.cassettes.push(c);
 
         // First sync only seeds the mtime map: nothing has changed yet.
-        let mut mtimes = HashMap::new();
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        let mut stamps = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut stamps);
         assert_eq!(app.cassettes[0].side_a_text(), "mine", "nothing yet");
 
         // The agent writes, through the same store API `queue write` uses.
@@ -2229,7 +2278,7 @@ mod tests {
         std::fs::write(&path, format!("{fm}\n## Side A\n\nagent words\n")).expect("write");
         touch_forward(&store, &session, &id);
 
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        sync_external_writes(&mut app, &store, None, &mut stamps);
 
         assert_eq!(
             app.cassettes[0].side_a_text().trim(),
@@ -2253,15 +2302,15 @@ mod tests {
         app.cassettes.push(c);
         app.focus_idx = 0;
 
-        let mut mtimes = HashMap::new();
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        let mut stamps = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut stamps);
         assert_eq!(app.cassettes.len(), 1, "only mine so far");
 
         // Priority 10 sorts ahead of mine (20), so it lands at index 0 —
         // which is exactly the case that could silently move focus.
         let newcomer = store_cassette(&store, &session, 10, "## Side A\n\nfrom the agent\n");
 
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        sync_external_writes(&mut app, &store, None, &mut stamps);
 
         assert_eq!(app.cassettes.len(), 2, "the newcomer must appear");
         assert_eq!(app.cassettes[0].id, newcomer, "at its queue position");
@@ -2304,8 +2353,8 @@ mod tests {
         // index 0 if the cap did not stop it.
         let newcomer_id = store_cassette(&store, &session, 1, "## Side A\n\nnewcomer\n");
 
-        let mut mtimes = HashMap::new();
-        sync_external_writes(&mut app, &store, None, &mut mtimes);
+        let mut stamps = HashMap::new();
+        sync_external_writes(&mut app, &store, None, &mut stamps);
 
         assert_eq!(
             app.cassettes.len(),
@@ -2354,11 +2403,11 @@ mod tests {
         });
         let cursor_before = app.cassettes[0].cursor_pos();
 
-        let mut mtimes = HashMap::new();
+        let mut stamps = HashMap::new();
         // A tick while 0 is still held: seeds its mtime in the map (the
         // file itself is still whatever `store_cassette` wrote — empty —
         // since nothing has flushed yet).
-        sync_external_writes(&mut app, &store, Some(&writer), &mut mtimes);
+        sync_external_writes(&mut app, &store, Some(&writer), &mut stamps);
 
         // Focus moves to 1: `acquire` flushes and drops 0's guard, writing
         // cassette 0's body to disk and moving its mtime.
@@ -2367,7 +2416,7 @@ mod tests {
 
         // The tick that follows: 0 is unheld, and its mtime has moved
         // relative to what was seeded above.
-        sync_external_writes(&mut app, &store, Some(&writer), &mut mtimes);
+        sync_external_writes(&mut app, &store, Some(&writer), &mut stamps);
 
         assert_eq!(
             app.cassettes[0].cursor_pos(),
