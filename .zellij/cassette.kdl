@@ -1,0 +1,25 @@
+// A three-tab workspace for writing alongside an agent.
+//
+//   zellij --layout .zellij/cassette.kdl
+//
+// The write tab opens `cassette sessions` rather than a fixed id — a layout
+// cannot know the session ahead of time, and the picker is exactly the thing
+// for choosing one. Enter opens it in the TUI.
+layout {
+    tab name="agent" focus=true {
+        pane {
+            name "claude"
+            command "claude"
+        }
+    }
+    tab name="write" {
+        pane {
+            name "cassette"
+            command "cassette"
+            args "sessions"
+        }
+    }
+    tab name="code" {
+        pane
+    }
+}

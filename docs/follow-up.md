@@ -94,6 +94,12 @@ Recorded because they are design findings, not defects.
 
 ---
 
+## Tune the agent's cassette length
+
+Set at **~15 lines** on 2026-09-23 after the user observed that 30-line responses are a wall to
+land on mid-flow. Lives in `.claude/skills/cassette-session`. A starting point, not a finding —
+revisit once there is enough use to say what actually reads well.
+
 ## Carried triage
 
 Small, none blocking, each verified to still exist as of Phase 6.
