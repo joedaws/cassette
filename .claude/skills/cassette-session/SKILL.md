@@ -81,7 +81,8 @@ for it: scrollback, the codebase, and a conversation that is allowed to be long.
 
 So do not try to move everything into cassettes. A cassette is where a thought gets refined;
 the chat is where you decide what to do about it. When a session ends, the summary belongs in
-the chat, not as one more cassette they would have to go find.
+the chat, not as one more cassette they would have to go find. If they want the session turned into a
+document, that is the `cassette-writeup` skill.
 
 You are reading everything they write, continuously, with no natural pause where they choose
 what to share. For a scoped working session that is the point. If it starts to look like
