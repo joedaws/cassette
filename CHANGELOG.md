@@ -45,6 +45,13 @@ more agents can write different cassettes of the same session concurrently.
   two machines editing one session get no mutual exclusion.
 
 ### Changed
+- **Ids carry their kind.** Sessions are `ses_…`, cassettes `cas_…`, writers
+  `wri_…`. A bare or wrong-kind id is rejected with a message naming both kinds
+  (`` `cas_…` is a cassette id; --session takes a session id (ses_…) ``), and a
+  cassette whose frontmatter id disagrees with its file name shows as damaged.
+  **Breaking:** stores created before this change are not read until migrated
+  by hand (README, "Upgrading from bare ULIDs"), and `--json` `id` fields carry
+  the prefix.
 - **Where your writing lives.** `stats`, `find`, `today` and `resume` all read
   the session store. Notes written before this change are untouched on disk
   but are no longer counted by `stats` or listed by `find`.

@@ -240,13 +240,13 @@ cassette find                 # the same listing, as plain text
 cassette find gratitude       # …filtered by alias, topic, or content
 cassette resume               # continue the most recently created session
 cassette resume myjournal     # continue the session aliased myjournal
-cassette resume 01K5GQ2R8V…   # …or by the id `find` printed
+cassette resume ses_01K5GQ2R…  # …or by the id `find` printed
 cassette new myjournal        # start a *new* session aliased myjournal
 ```
 
-`cassette sessions` is the one to reach for. Sessions are named by ULID, so
-there's rarely a name to type — the picker lets you arrow to the one you
-want instead of copying 26 characters:
+`cassette sessions` is the one to reach for. Sessions are named by id (`ses_` and
+a ULID), so there's rarely a name to type — the picker lets you arrow to the
+one you want instead of copying 30 characters:
 
 ```
 j / k, ↑ / ↓   move          Enter   open the highlighted session
@@ -345,13 +345,13 @@ over a body with `## Side A` and (when used) `## Side B`:
 
 ```markdown
 ---
-id: 01M2QSSJG751F2KCGP17K9GQVY
+id: cas_01M2QSSJG751F2KCGP17K9GQVY
 topic: morning pages
 priority: 10
 status: open
 locked_by:
-created_by: 01M2QSSJFSWSZ7BW9J4XT7FKD6
-last_writer: 01M2QSSJFSWSZ7BW9J4XT7FKD6
+created_by: wri_01M2QSSJFSWSZ7BW9J4XT7FKD6
+last_writer: wri_01M2QSSJFSWSZ7BW9J4XT7FKD6
 updated_at: 2026-09-17T13:44:43Z
 ---
 
@@ -441,10 +441,13 @@ still never becomes some persistent "current session" the CLI picks up
 afterwards.
 
 Every command that takes a session id (`queue …`, `session alias`) checks it
-before touching the store: it must be a well-formed 26-character ULID naming a
-session that already exists. A malformed id and an id for a session nobody
-created are both usage errors (exit 2), reported differently so you can tell a
-typo from a stale id. Only `session new` ever creates a session — no command
+before touching the store: it must be a well-formed `ses_` id naming a session
+that already exists. A malformed id, the wrong *kind* of id, and an id for a
+session nobody created are all usage errors (exit 2), each reported
+differently so you can tell a typo from a mix-up from a stale id — pass a
+cassette id to `--session` and you're told `` `cas_…` is a cassette id;
+--session takes a session id (ses_…) ``. Cassette arguments (`<ID>`,
+`--before`, `--after`) are checked the same way. Only `session new` ever creates a session — no command
 brings one into being as a side effect of being handed an unfamiliar id.
 
 The store lives under `~/.local/share/cassette/`, or wherever
@@ -469,6 +472,48 @@ else holds it you get exit code 3 and a message naming them, and the right move
 is to write a different cassette rather than wait. The lock is held by the
 kernel, so it is released even if a writer is killed outright — there is nothing
 to clean up and no stale-lock state to repair.
+
+### Ids say what they are
+
+Every id is a three-letter kind, an underscore, and a ULID: `ses_…` for a
+session, `cas_…` for a cassette, `wri_…` for a writer. The kind is checked
+wherever an id comes in — command-line arguments, cassette file names,
+frontmatter, `writers.toml` — so a mix-up is an error that names both kinds
+rather than a confusing "not found". A cassette whose frontmatter `id`
+disagrees with its file name is shown as damaged rather than trusted.
+
+### Upgrading from bare ULIDs
+
+Stores written before ids carried a kind hold bare 26-character ULIDs, and
+cassette no longer reads them: `session list`, `find`, `stats` and the picker
+say `N session directories skipped: names are not ses_ ids`, and anything
+that reads `writers.toml` stops with an error naming the first bare key.
+There is no migration command — upgrade by hand, with every `cassette`
+process stopped, from inside the store directory (`~/.local/share/cassette/`
+or `$CASSETTE_DATA_DIR`):
+
+```bash
+# 1. writers.toml: prefix each table key with wri_
+sed -i -E 's/^\[writers\.([0-9A-Z]{26})\]$/[writers.wri_\1]/' writers.toml
+
+# 2. session directories: prefix with ses_
+for d in sessions/*/; do d=${d%/}; mv "$d" "sessions/ses_${d#sessions/}"; done
+
+# 3. each cassette: the file name's id gets cas_; in its frontmatter, id gets
+#    cas_ and created_by / last_writer / locked_by get wri_
+for f in sessions/*/cassettes/*.md; do
+  sed -i -E '1,/^---$/!b; s/^id: ([0-9A-Z]{26})$/id: cas_\1/;
+             s/^(created_by|last_writer|locked_by): ([0-9A-Z]{26})$/\1: wri_\2/' "$f"
+  mv "$f" "$(echo "$f" | sed -E 's/-([0-9A-Z]{26})\.md$/-cas_\1.md/')"
+done
+
+# 4. delete the lock anchors; they are recreated on the next lock
+rm -rf .locks sessions/*/.locks
+```
+
+Take a copy of the store first. Step 3's frontmatter edits only touch the
+block between the file's opening `---` lines, so a body line that happens to
+look like `id: …` is left alone.
 
 ### Command surface
 
@@ -555,22 +600,22 @@ from them.
 Every mutating command (`queue new`, `write`, `close`, `reopen`, `topic`,
 `move`, `lock`, `unlock`, and the `session`/`writer` commands) keeps the same exit
 code and successful output it has without `--json`: `queue new` still prints
-the new cassette's bare ULID and nothing else, and every other mutating
+the new cassette's bare `cas_` id and nothing else, and every other mutating
 command prints nothing extra. **Any** command, on failure, emits a one-line
 `{"error", "code"}` envelope to stdout instead of the usual stderr prose, so
 an agent reading only stdout still gets a parseable failure:
 
 ```
-$ cassette queue list --session 01AAAAAAAAAAAAAAAAAAAAAAAA --json
-{"code":2,"error":"no session '01AAAAAAAAAAAAAAAAAAAAAAAA' — `cassette session list` shows what exists"}
+$ cassette queue list --session ses_01AAAAAAAAAAAAAAAAAAAAAAAA --json
+{"code":2,"error":"no session 'ses_01AAAAAAAAAAAAAAAAAAAAAAAA' — `cassette session list` shows what exists"}
 ```
 
 A successful `queue list --json` looks like this (one real session, one
 cassette, captured from a live run):
 
 ```
-$ cassette queue list --session 01M2QSSJG2CG8XQYG7PVH3E59H --json
-{"session":{"id":"01M2QSSJG2CG8XQYG7PVH3E59H","alias":"demo"},"cassettes":[{"id":"01M2QSSJG751F2KCGP17K9GQVY","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T13:44:43Z","side_a":"writing about the morning","side_b":""}],"unreadable":0}
+$ cassette queue list --session ses_01M2QSSJG2CG8XQYG7PVH3E59H --json
+{"session":{"id":"ses_01M2QSSJG2CG8XQYG7PVH3E59H","alias":"demo"},"cassettes":[{"id":"cas_01M2QSSJG751F2KCGP17K9GQVY","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T13:44:43Z","side_a":"writing about the morning","side_b":""}],"unreadable":0}
 ```
 
 `queue show --json` and `queue next --json` are bare cassette objects, not
@@ -578,11 +623,11 @@ wrapped in `{session, cassettes, unreadable}` (a different demo session,
 captured from a live run):
 
 ```
-$ cassette queue show 01M2RFZEC6QQXWNRS950HKSBP0 --session 01M2RFZEC00N0WPKKRBBVZTD26 --json
-{"id":"01M2RFZEC6QQXWNRS950HKSBP0","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T20:12:24Z","side_a":"writing about the morning\n","side_b":""}
+$ cassette queue show cas_01M2RFZEC6QQXWNRS950HKSBP0 --session ses_01M2RFZEC00N0WPKKRBBVZTD26 --json
+{"id":"cas_01M2RFZEC6QQXWNRS950HKSBP0","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T20:12:24Z","side_a":"writing about the morning\n","side_b":""}
 
-$ cassette queue next --session 01M2RFZEC00N0WPKKRBBVZTD26 --json
-{"id":"01M2RFZEC6QQXWNRS950HKSBP0","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T20:12:24Z","side_a":"writing about the morning\n","side_b":""}
+$ cassette queue next --session ses_01M2RFZEC00N0WPKKRBBVZTD26 --json
+{"id":"cas_01M2RFZEC6QQXWNRS950HKSBP0","topic":"morning pages","priority":10,"status":"open","words":4,"busy":false,"sticky_lock":null,"created_by":{"name":"joseph","kind":"human"},"last_writer":{"name":"agent-1","kind":"agent"},"waiting_on":"human","updated_at":"2026-09-17T20:12:24Z","side_a":"writing about the morning\n","side_b":""}
 ```
 
 `unreadable` counts cassette files the store could not parse — the same count
@@ -599,8 +644,8 @@ Once a cassette carries a sticky lock, `sticky_lock` is populated and an
 agent's write against it fails through the same envelope:
 
 ```
-$ echo "agent tries again" | cassette queue write --session 01M2QSSJG2CG8XQYG7PVH3E59H 01M2QSSJG751F2KCGP17K9GQVY --writer agent-1 --json
-{"code":4,"error":"cassette is locked by '01M2QSSJFSWSZ7BW9J4XT7FKD6' — only a human may write it"}
+$ echo "agent tries again" | cassette queue write --session ses_01M2QSSJG2CG8XQYG7PVH3E59H cas_01M2QSSJG751F2KCGP17K9GQVY --writer agent-1 --json
+{"code":4,"error":"cassette is locked by 'joseph' — only a human may write it"}
 ```
 
 ### The sticky lock
