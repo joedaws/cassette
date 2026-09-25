@@ -84,7 +84,7 @@ revisit once there is enough use to say what actually reads well.
 Small, none blocking, each verified to still exist as of Phase 6.
 
 - **`cassette sessions` scans every cassette of every session before its first frame.**
-  Pre-existing — `find` pays the same cost — but it is now on an interactive path. **Measured
+  Pre-existing — the since-removed `find` paid the same cost — but it is now on an interactive path. **Measured
   2026-09-24** (release build, warm page cache, 5 cassettes × one line each per session, median
   of 5 `cassette find` runs, the same `scan_store` the picker calls): 100 sessions 8 ms, 1 000
   sessions 55 ms, 5 000 sessions 285 ms — linear, ~56 µs a session. A year of daily use

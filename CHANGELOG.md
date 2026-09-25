@@ -52,9 +52,9 @@ more agents can write different cassettes of the same session concurrently.
   **Breaking:** stores created before this change are not read until migrated
   by hand (README, "Upgrading from bare ULIDs"), and `--json` `id` fields carry
   the prefix.
-- **Where your writing lives.** `stats`, `find`, `today` and `resume` all read
+- **Where your writing lives.** `stats`, `today` and `resume` all read
   the session store. Notes written before this change are untouched on disk
-  but are no longer counted by `stats` or listed by `find`.
+  but are no longer counted by `stats`.
 - The data directory is created `0700`; an existing one looser than that has
   its group and other bits cleared.
 
@@ -73,6 +73,10 @@ more agents can write different cassettes of the same session concurrently.
   prompt, and the `_1.md` conflict-rename dance (ULIDs do not collide).
 - The `notes_dir` config key. Unrecognised keys are ignored, so an old config
   still loads — you can delete the line or leave it.
+- **`cassette find`.** `cassette sessions` covers it: its `/` filter matches
+  the same alias, topics and content, and Enter opens the session. For a
+  plain-text list of ids, use `cassette session list`. `cassette find` now exits
+  2 as an unknown command.
 
 ## 0.10.0 - 2026-09-13
 

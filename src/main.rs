@@ -16,10 +16,10 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 mod app;
 mod cassette;
+mod catalog;
 mod cli;
 mod config;
 mod export;
-mod find;
 mod output;
 mod picker;
 mod queue;
@@ -120,10 +120,10 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    // `stats` and `find` read only the session store — the legacy notes dir
+    // `stats` reads only the session store — the legacy notes dir
     // (the deprecated `cfg.notes_dir`) is deliberately not
     // consulted here. See the design's decision 7: existing notes stop
-    // appearing in these two commands, on purpose, with no fallback and no
+    // appearing in this command, on purpose, with no fallback and no
     // migration; the files themselves are untouched.
     if args.stats {
         let store = store::Store::new(store_root(args.json));
@@ -180,17 +180,6 @@ fn main() -> io::Result<()> {
                     }
                 }
             }
-        }
-        return Ok(());
-    }
-
-    if let Some(words) = &args.find {
-        let store = store::Store::new(store_root(args.json));
-        let (entries, unreadable, skipped) = find::scan_store(&store);
-        let query = (!words.is_empty()).then(|| words.join(" "));
-        println!("{}", find::render(&entries, query.as_deref(), unreadable));
-        if let Some(line) = store::skipped_line(skipped) {
-            println!("{line}");
         }
         return Ok(());
     }
@@ -465,7 +454,7 @@ fn main() -> io::Result<()> {
     // without a terminal.
     if args.pick_session {
         let store = store::Store::new(store_root(args.json));
-        let (entries, unreadable, skipped) = find::scan_store(&store);
+        let (entries, unreadable, skipped) = catalog::scan_store(&store);
         let mut picker = picker::Picker::new(entries, unreadable);
         picker.skipped = skipped;
         match run_picker(picker, &theme)? {
@@ -769,8 +758,8 @@ fn resolve_session(
 
     if let Some(name) = &args.resume {
         let id = match name {
-            // An alias first, then the id itself. `cassette find` prints
-            // session ids, and an id it printed that `resume` then rejected
+            // An alias first, then the id itself. `session list` and the
+            // picker print session ids, and an id they printed that `resume` then rejected
             // would be a discovery loop that closes on nothing. 4b's
             // "sessions are named by ULID only, an alias never resolves"
             // governs `--session` on the queue commands, where an ambiguous
@@ -2754,8 +2743,8 @@ mod tests {
     }
 
     #[test]
-    fn resume_opens_a_session_by_the_id_find_prints() {
-        // `cassette find` lists session ids; an id it printed that `resume`
+    fn resume_opens_a_session_by_the_id_session_list_prints() {
+        // `session list` prints session ids; an id it printed that `resume`
         // then rejected would be a discovery loop that closes on nothing.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = store::Store::new(dir.path().to_path_buf());

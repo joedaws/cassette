@@ -856,14 +856,14 @@ mod tests {
             .and_hms_opt(8, 0, 0)
             .unwrap();
         let mut p = Picker::new_for_test(vec![
-            crate::find::NoteEntry::for_test(
+            crate::catalog::NoteEntry::for_test(
                 "01M3AAA0000000000000000AAA",
                 Some("morningpages"),
                 d,
                 120,
                 &["gratitude"],
             ),
-            crate::find::NoteEntry::for_test(
+            crate::catalog::NoteEntry::for_test(
                 "01M3BBB0000000000000000BBB",
                 Some("eveningreview"),
                 d,
@@ -931,7 +931,7 @@ mod tests {
         };
 
         let few: Vec<_> = (0..3)
-            .map(|i| crate::find::NoteEntry::for_test(&format!("id{i}"), None, d, 1, &["t"]))
+            .map(|i| crate::catalog::NoteEntry::for_test(&format!("id{i}"), None, d, 1, &["t"]))
             .collect();
         assert!(
             !draw(&Picker::new_for_test(few)).contains("a: all"),
@@ -939,7 +939,7 @@ mod tests {
         );
 
         let many: Vec<_> = (0..20)
-            .map(|i| crate::find::NoteEntry::for_test(&format!("id{i:02}"), None, d, 1, &["t"]))
+            .map(|i| crate::catalog::NoteEntry::for_test(&format!("id{i:02}"), None, d, 1, &["t"]))
             .collect();
         assert!(
             draw(&Picker::new_for_test(many)).contains("a: all"),
@@ -972,7 +972,7 @@ mod tests {
         };
 
         let mut p = Picker::new(
-            vec![crate::find::NoteEntry::for_test(
+            vec![crate::catalog::NoteEntry::for_test(
                 "01M3AAA0000000000000000AAA",
                 Some("morningpages"),
                 d,

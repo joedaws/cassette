@@ -22,8 +22,6 @@ pub struct Args {
     pub record: bool,
     pub daily: bool,
     pub stats: bool,
-    /// `find` with the query words that followed it; empty = list all.
-    pub find: Option<Vec<String>>,
     /// `resume` with an optional alias or session id: `Some(None)` resumes
     /// the newest session.
     pub resume: Option<Option<String>>,
@@ -238,13 +236,6 @@ enum Command {
     },
     /// streak, weekly/monthly sessions and words, totals
     Stats,
-    /// list recent sessions newest-first; TEXT filters by id, alias, topic or content
-    Find {
-        // NOT `trailing_var_arg = true`: that captures flags after the first
-        // query word, so `find foo -t 10` would yield query ["foo","-t","10"].
-        #[arg(value_name = "TEXT")]
-        query: Vec<String>,
-    },
     /// list available themes (built-in and from config.toml)
     Themes,
     /// pick a session to open from a list of recent ones
@@ -527,7 +518,6 @@ impl Cli {
             Some(Command::Today) => args.daily = true,
             Some(Command::Resume { file }) => args.resume = Some(file),
             Some(Command::Stats) => args.stats = true,
-            Some(Command::Find { query }) => args.find = Some(query),
             Some(Command::Themes) => args.list_themes = true,
             Some(Command::Sessions) => args.pick_session = true,
             Some(Command::Completions { shell }) => args.completions = Some(shell),
@@ -759,33 +749,6 @@ mod tests {
         assert!(parse_args_from(&argv(&["stats"])).stats);
         assert!(parse_args_from(&argv(&["themes"])).list_themes);
         assert!(parse_args_from(&argv(&["sessions"])).pick_session);
-    }
-
-    #[test]
-    fn find_collects_trailing_words_as_one_query() {
-        assert_eq!(
-            parse_args_from(&argv(&["find", "some", "words"])).find,
-            Some(vec!["some".to_string(), "words".to_string()])
-        );
-    }
-
-    #[test]
-    fn bare_find_lists_everything() {
-        assert_eq!(parse_args_from(&argv(&["find"])).find, Some(Vec::new()));
-    }
-
-    #[test]
-    fn find_treats_a_later_flag_as_a_flag_not_a_query_word() {
-        let a = parse_args_from(&argv(&["find", "foo", "-t", "10"]));
-        assert_eq!(a.find, Some(vec!["foo".to_string()]));
-        assert_eq!(a.timer_secs, Some(600));
-    }
-
-    #[test]
-    fn find_with_a_leading_flag_keeps_an_empty_query() {
-        let a = parse_args_from(&argv(&["find", "-t", "10"]));
-        assert_eq!(a.find, Some(Vec::new()));
-        assert_eq!(a.timer_secs, Some(600));
     }
 
     #[test]

@@ -224,10 +224,10 @@ total:       48 notes · 22410 words · since 2026-05-02
 
 The streak counts consecutive days with at least one session and doesn't
 break until a full day is missed — an unwritten *today* is still yours to
-write. **`stats` and `find` read only the session store**: a session's words
+write. **`stats` reads only the session store**: a session's words
 count from the moment it's created there, and totals started fresh when the
 TUI moved onto the store. Notes written before that move, still sitting in
-`~/.local/share/cassette/notes/`, are no longer counted by either command —
+`~/.local/share/cassette/notes/`, are no longer counted —
 they were not migrated in, on purpose — but nothing about them changed: the
 files are untouched, still on disk, and still plain markdown you can open,
 grep, or paste into an editor same as always.
@@ -235,12 +235,10 @@ grep, or paste into an editor same as always.
 ### Picking a thought back up
 
 ```
-cassette sessions             # pick one from a list, Enter opens it
-cassette find                 # the same listing, as plain text
-cassette find gratitude       # …filtered by alias, topic, or content
+cassette sessions             # pick one from a list (filter with /), Enter opens it
 cassette resume               # continue the most recently created session
 cassette resume myjournal     # continue the session aliased myjournal
-cassette resume ses_01K5GQ2R…  # …or by the id `find` printed
+cassette resume ses_01K5GQ2R…  # …or by an id `session list` printed
 cassette new myjournal        # start a *new* session aliased myjournal
 ```
 
@@ -257,12 +255,11 @@ Esc            leave the filter (keeping it)      q   quit without opening
 While the filter is open it owns the keyboard, so `q` types a `q` rather
 than quitting — Ctrl+C still quits from anywhere. Filtering happens before
 the 15-row cap, so a match further down the store still surfaces, and the
-list scrolls with `↑ N more` / `↓ N more` when there's more than fits.
+list scrolls with `↑ N more` / `↓ N more` when there's more than fits. The
+filter matches a session's id, alias, topics and the text of its cassettes.
 
-`find` lists the same material as plain text — date, word count, topics, the
-session's alias where it has one, and the first line of the highest-priority
-cassette — so it stays pipeable and greppable. Each row shows the session's
-id, ready to paste into `--session` or straight back into `resume`.
+For a plain-text, pipeable list, `cassette session list` prints each
+session's id, ready to paste into `--session` or straight back into `resume`.
 
 `new <NAME>` always starts a fresh session; it does not look for an existing
 alias by that name the way the old flat-note `new` used to resume a
@@ -485,7 +482,7 @@ disagrees with its file name is shown as damaged rather than trusted.
 ### Upgrading from bare ULIDs
 
 Stores written before ids carried a kind hold bare 26-character ULIDs, and
-cassette no longer reads them: `session list`, `find`, `stats` and the picker
+cassette no longer reads them: `session list`, `stats` and the picker
 say `N session directories skipped: names are not ses_ ids`, and anything
 that reads `writers.toml` stops with an error naming the first bare key.
 There is no migration command — upgrade by hand, with every `cassette`
@@ -732,7 +729,7 @@ $EDITOR ~/.config/cassette/config.toml
 
 Every key is optional, and keys cassette does not recognise are ignored — so
 a config written for an older version keeps working. `notes_dir` is one of
-those now: it was removed when `stats`, `find` and every session cassette
+those now: it was removed when `stats` and every session cassette
 moved under `$CASSETTE_DATA_DIR` or the XDG data default. You can delete the
 line; leaving it does no harm.
 
@@ -805,7 +802,6 @@ Commands:
   today        open today's session (aliased by date), creating it if needed
   resume       reopen a session: the newest, the newest with this alias, or this id
   stats        streak, weekly/monthly sessions and words, totals
-  find         list recent sessions newest-first; TEXT filters by id, alias, topic or content
   themes       list available themes (built-in and from config.toml)
   sessions     pick a session to open from a list of recent ones
   export       render a session to a single flat markdown file (stdout by default)

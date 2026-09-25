@@ -1,4 +1,4 @@
-use crate::find::NoteEntry;
+use crate::catalog::NoteEntry;
 use crate::session::DEFAULT_LIST_LIMIT;
 
 /// The `cassette sessions` list: which rows are showing, which one is
@@ -15,7 +15,7 @@ use crate::session::DEFAULT_LIST_LIMIT;
 pub(crate) struct Picker {
     entries: Vec<NoteEntry>,
     /// Cassette files that could not be read, shown as a footer the way
-    /// `find` does. An `eprintln!` here landed on the normal screen an
+    /// `queue list`'s `N unreadable` line is. An `eprintln!` here landed on the normal screen an
     /// instant before the alternate screen hid it, which is no report at all.
     pub unreadable: usize,
     /// Session directories `Store::list_sessions` skipped because their

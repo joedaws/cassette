@@ -73,6 +73,15 @@ fn version_flag_prints_name_and_version() {
 }
 
 #[test]
+fn find_is_no_longer_a_command() {
+    // Removed in favour of `cassette sessions`, whose `/` filter matches the
+    // same alias, topic and content `find` did. A leftover script calling
+    // it must fail loudly, not open a TUI.
+    let out = run(&["find", "gratitude"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
 fn help_flag_exits_zero_and_documents_the_surface() {
     let out = run(&["--help"]);
     assert_eq!(out.status.code(), Some(0));
@@ -80,7 +89,7 @@ fn help_flag_exits_zero_and_documents_the_surface() {
     // Assert on content that survives the move to clap-generated help,
     // never on exact formatting.
     for expected in [
-        "cassette", "new", "today", "resume", "stats", "find", "themes",
+        "cassette", "new", "today", "resume", "stats", "sessions", "themes",
     ] {
         assert!(
             help.contains(expected),
@@ -2092,10 +2101,10 @@ fn an_unknown_side_value_exits_two() {
 }
 
 #[test]
-fn stats_and_find_read_a_session_written_through_the_store() {
-    // Phase 5a: `stats` and `find` read only the session store, not the
-    // legacy notes dir. A session created and written through the same
-    // primitives the TUI now uses must show up in both commands.
+fn stats_reads_a_session_written_through_the_store() {
+    // Phase 5a: `stats` reads only the session store, not the legacy notes
+    // dir. A session created and written through the same primitives the
+    // TUI now uses must show up in it.
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");
     let sid = {
@@ -2138,31 +2147,14 @@ fn stats_and_find_read_a_session_written_through_the_store() {
         stats_out.contains("1 note") && stats_out.contains("5 words"),
         "{stats_out}"
     );
-
-    let find = Command::new(bin())
-        .args(["find"])
-        .env("CASSETTE_DATA_DIR", &root)
-        .output()
-        .expect("spawn");
-    assert_eq!(find.status.code(), Some(0), "{}", stderr(&find));
-    let find_out = String::from_utf8_lossy(&find.stdout);
-    assert!(find_out.contains(&sid), "{find_out}");
-    assert!(find_out.contains("gratitude"), "{find_out}");
-    assert!(
-        find_out.contains("five whole words right here"),
-        "{find_out}"
-    );
 }
 
-/// The discovery→reopen loop, end to end: whatever `find` prints and
-/// whatever it lets you search by must both lead back into the session.
-///
-/// `find`'s query used to be matched against the session id and the cassette
-/// bodies only, so a row that printed `— gratitude` was missed by `cassette
-/// find gratitude`, and the id every row printed was rejected by `resume`,
-/// which matched aliases alone.
+/// The discovery→reopen loop, end to end: the id `session list` prints must
+/// lead back into the session. `resume` used to match aliases alone, so every
+/// id a listing printed was rejected. (The picker's filter over alias, topic
+/// and content is covered by `catalog`'s and `picker`'s unit tests.)
 #[test]
-fn find_matches_the_alias_and_topic_it_prints_and_resume_takes_the_id() {
+fn resume_takes_the_id_session_list_prints() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");
     let sid = {
@@ -2195,19 +2187,17 @@ fn find_matches_the_alias_and_topic_it_prints_and_resume_takes_the_id() {
     );
     assert_eq!(write.status.code(), Some(0), "{}", stderr(&write));
 
-    for query in ["gratitude", "morning-pages", sid.as_str()] {
-        let out = Command::new(bin())
-            .args(["find", query])
-            .env("CASSETTE_DATA_DIR", &root)
-            .output()
-            .expect("spawn");
-        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            text.contains(&sid),
-            "'cassette find {query}' must find the session whose row shows it: {text}"
-        );
-    }
+    let listed = Command::new(bin())
+        .args(["session", "list"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    assert_eq!(listed.status.code(), Some(0), "{}", stderr(&listed));
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        text.contains(&sid),
+        "`session list` must print the id: {text}"
+    );
 
     // And the id that listing prints is openable. Driving the TUI itself
     // needs a pty (`.claude/skills/verify`), so this asserts on the one
@@ -2223,7 +2213,7 @@ fn find_matches_the_alias_and_topic_it_prints_and_resume_takes_the_id() {
         .expect("spawn");
     assert!(
         !stderr(&opened).contains("no session named"),
-        "the id `find` printed must resolve: {}",
+        "the id `session list` printed must resolve: {}",
         stderr(&opened)
     );
     assert_ne!(
@@ -2706,7 +2696,7 @@ fn an_unmigrated_store_lists_nothing_and_says_what_it_skipped() {
         "created = \"2026-09-24T09:00:00Z\"\n",
     )
     .expect("toml");
-    for args in [&["session", "list"][..], &["find"][..], &["stats"][..]] {
+    for args in [&["session", "list"][..], &["stats"][..]] {
         let out = Command::new(bin())
             .args(args)
             .env("CASSETTE_DATA_DIR", &root)

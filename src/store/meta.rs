@@ -1,7 +1,7 @@
 //! A cassette file's YAML frontmatter.
 //!
-//! Hand-rolled rather than serde_yaml: the repo already hand-parses
-//! frontmatter in `output.rs` and `find.rs`, the field set is fixed and
+//! Hand-rolled rather than serde_yaml: the repo hand-parsed frontmatter
+//! before the store existed, the field set is fixed and
 //! small, and it keeps a YAML crate out of the dependency tree.
 
 /// Whether a cassette is still in the queue or has been retired to the
