@@ -2069,8 +2069,8 @@ mod tests {
             priority,
             status: store::meta::Status::Open,
             locked_by: None,
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: store::meta::now_utc(),
         };
         store.add_cassette(session, &m, body).expect("add cassette");
@@ -2110,7 +2110,13 @@ mod tests {
         c.closed = true;
         app.cassettes.push(c);
         app.closed_expanded = true;
-        let mut w = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        let mut w = session_writer::SessionWriter::open(
+            &store,
+            &session,
+            false,
+            crate::store::ids::TEST_WRITER,
+            "w",
+        );
 
         follow_focus(&mut app, Some(&mut w));
 
@@ -2137,7 +2143,13 @@ mod tests {
         c.id = id.clone();
         c.priority = 10;
         app.cassettes.push(c);
-        let mut w = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        let mut w = session_writer::SessionWriter::open(
+            &store,
+            &session,
+            false,
+            crate::store::ids::TEST_WRITER,
+            "w",
+        );
 
         // Take the lock first, so the held-lock fast path is the one under
         // test rather than a fresh acquire.
@@ -2190,7 +2202,13 @@ mod tests {
         let raw = std::fs::read_to_string(&path).expect("read");
         std::fs::write(&path, raw.replace("status: open", "status: closed")).expect("write");
 
-        let mut w = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        let mut w = session_writer::SessionWriter::open(
+            &store,
+            &session,
+            false,
+            crate::store::ids::TEST_WRITER,
+            "w",
+        );
         try_acquire(&mut app, &mut w, 0);
 
         assert_eq!(
@@ -2232,7 +2250,13 @@ mod tests {
         c.id = id;
         c.closed = true;
         app.cassettes.push(c);
-        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        let mut writer = session_writer::SessionWriter::open(
+            &store,
+            &session,
+            false,
+            crate::store::ids::TEST_WRITER,
+            "w",
+        );
         app.read_only = app::ReadOnly::Closed;
 
         retry_lock(&mut app, Some(&mut writer));
@@ -2468,7 +2492,13 @@ mod tests {
             c.id = id;
             app.cassettes.push(c);
         }
-        let mut writer = session_writer::SessionWriter::open(&store, &session, true, "w", "w");
+        let mut writer = session_writer::SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+        );
         writer.acquire(&mut app, 0).expect("acquire 0");
         app.focus_idx = 0;
         app.modify_focused(|c| {
@@ -2557,7 +2587,7 @@ mod tests {
         let busy_named = store::lock::LockError::Busy {
             id: "c1".to_string(),
             holder: Some(store::lock::Attribution {
-                writer: "01WRITERID0000000000000000".to_string(),
+                writer: "wri_01K5GQ00000000000000000002".to_string(),
                 name: "refactor-agent".to_string(),
                 pid: 4242,
                 since: "2026-09-18T00:00:00Z".to_string(),
@@ -2596,7 +2626,13 @@ mod tests {
         let mut c = cassette::Cassette::new();
         c.id = id;
         app.cassettes.push(c);
-        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        let mut writer = session_writer::SessionWriter::open(
+            &store,
+            &session,
+            false,
+            crate::store::ids::TEST_WRITER,
+            "w",
+        );
         writer.acquire(&mut app, 0).expect("acquire");
         assert!(!app.read_only.is_read_only());
 
@@ -2627,7 +2663,13 @@ mod tests {
         let mut c = cassette::Cassette::new();
         c.id = id;
         app.cassettes.push(c);
-        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        let mut writer = session_writer::SessionWriter::open(
+            &store,
+            &session,
+            false,
+            crate::store::ids::TEST_WRITER,
+            "w",
+        );
         app.read_only = app::ReadOnly::Busy {
             holder: Some("stale-holder".to_string()),
         };
@@ -2673,7 +2715,13 @@ mod tests {
         // reaches it without a lock at all: an id no cassette in the session
         // has, which `Store::lock` reports as `NoSuchCassette`.
         app.cassettes[0].id = "01JNOSUCHCASSETTE000000000".to_string();
-        let mut writer = session_writer::SessionWriter::open(&store, &session, false, "w", "w");
+        let mut writer = session_writer::SessionWriter::open(
+            &store,
+            &session,
+            false,
+            crate::store::ids::TEST_WRITER,
+            "w",
+        );
         try_acquire(&mut app, &mut writer, 0);
 
         assert!(

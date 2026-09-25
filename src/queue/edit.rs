@@ -850,8 +850,8 @@ mod tests {
             priority,
             status,
             locked_by: None,
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-15T09:00:00Z".to_string(),
         }
     }
@@ -1002,7 +1002,7 @@ mod tests {
             )
             .expect("add");
 
-        let who = Attribution::for_now("w", "tester");
+        let who = Attribution::for_now(crate::store::ids::TEST_WRITER, "tester");
         renumber_all(&store, &sid, &who).expect("renumber");
 
         let scan = store.scan_session(&sid).expect("scan");
@@ -1054,7 +1054,7 @@ mod tests {
             .lock(&sid, "cas_bbb00000000000000000000000", &holder)
             .expect("hold it");
 
-        let who = Attribution::for_now("w", "tester");
+        let who = Attribution::for_now(crate::store::ids::TEST_WRITER, "tester");
         match renumber_all(&store, &sid, &who) {
             Err(QueueError::Busy(m)) => assert!(
                 m.contains("cas_bbb00000000000000000000000"),
@@ -1069,7 +1069,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let who = Attribution::for_now("w", "tester");
+        let who = Attribution::for_now(crate::store::ids::TEST_WRITER, "tester");
         renumber_all(&store, &sid, &who).expect("renumber");
     }
 
@@ -1223,7 +1223,7 @@ mod tests {
         let sid = new_session(&store);
         let id = "cas_aaa00000000000000000000000";
         let mut m = meta(id, 10, Status::Open);
-        m.locked_by = Some("01WRITER0000000000000000AB".to_string());
+        m.locked_by = Some("wri_01K5GQ00000000000000000002".to_string());
         store.add_cassette(&sid, &m, "").expect("add");
         store.ensure_writer("bot", Kind::Agent).expect("agent");
         store.ensure_writer("joseph", Kind::Human).expect("human");
@@ -1305,7 +1305,7 @@ mod tests {
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
         let mut m = meta("cas_aaa00000000000000000000000", 10, Status::Open);
-        m.locked_by = Some("01WRITER0000000000000000AB".to_string());
+        m.locked_by = Some("wri_01K5GQ00000000000000000002".to_string());
         store.add_cassette(&sid, &m, "").expect("add");
 
         store
@@ -1426,7 +1426,7 @@ mod tests {
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
         let mut m = meta("cas_aaa00000000000000000000000", 10, Status::Closed);
-        m.locked_by = Some("01WRITER0000000000000000AB".to_string());
+        m.locked_by = Some("wri_01K5GQ00000000000000000002".to_string());
         store.add_cassette(&sid, &m, "").expect("add");
         store
             .ensure_writer("bot", Kind::Agent)
@@ -1771,7 +1771,7 @@ mod tests {
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
         let mut m = meta("cas_aaa00000000000000000000000", 10, Status::Open);
-        m.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
+        m.locked_by = Some("wri_01K5GQ00000000000000000002".to_string());
         store.add_cassette(&sid, &m, "").expect("add");
         store
             .ensure_writer("joseph", Kind::Human)

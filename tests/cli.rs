@@ -308,7 +308,7 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
         cassettes.join(format!("gratitude-{ID}.md")),
         format!(
             "---\nid: {ID}\ntopic: gratitude\npriority: 10\nstatus: open\nlocked_by:\n\
-             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             created_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
              ## Side A\n\noriginal\n"
         ),
     )
@@ -479,7 +479,7 @@ fn write_fixture_cassette(root: &std::path::Path, session: &str, id: &str, topic
         cassettes.join(format!("{topic}-{id}.md")),
         format!(
             "---\nid: {id}\ntopic: {topic}\npriority: 10\nstatus: open\nlocked_by:\n\
-             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             created_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
              ## Side A\n\nhello from {topic}\n"
         ),
     )
@@ -561,7 +561,7 @@ fn queue_list_status_filter_excludes_closed_by_default() {
     std::fs::write(
         cassettes.join("closed-cas_01K5GR7T2M9WPD0000000000CD.md"),
         "---\nid: cas_01K5GR7T2M9WPD0000000000CD\ntopic: closed\npriority: 10\nstatus: closed\n\
-         locked_by:\ncreated_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+         locked_by:\ncreated_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
          ## Side A\n\nold\n",
     )
     .expect("cassette");
@@ -1309,7 +1309,7 @@ fn queue_close_exits_four_for_an_agent_over_a_sticky_lock_but_a_human_may_close_
         cassettes.join(format!("gratitude-{ID}.md")),
         format!(
             "---\nid: {ID}\ntopic: gratitude\npriority: 10\nstatus: open\n\
-             locked_by: 01WRITER0000000000000000AB\ncreated_by: w\nlast_writer: w\n\
+             locked_by: wri_01K5GQ00000000000000000002\ncreated_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\n\
              updated_at: 2026-09-14T09:25:57Z\n---\n\n## Side A\n\nhello\n"
         ),
     )
@@ -1378,7 +1378,7 @@ fn queue_reopen_exits_six_once_the_open_cap_is_reached() {
         cassettes.join(format!("closed-{ID}.md")),
         format!(
             "---\nid: {ID}\ntopic: closed\npriority: 9999\nstatus: closed\nlocked_by:\n\
-             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             created_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
              ## Side A\n\nhello\n"
         ),
     )
@@ -2426,7 +2426,7 @@ fn an_implicit_user_cannot_write_over_a_sticky_lock_but_an_explicit_one_can() {
         cassettes.join(format!("gratitude-{ID}.md")),
         format!(
             "---\nid: {ID}\ntopic: gratitude\npriority: 10\nstatus: open\n\
-             locked_by: 01WRITER0000000000000000AB\ncreated_by: w\nlast_writer: w\n\
+             locked_by: wri_01K5GQ00000000000000000002\ncreated_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\n\
              updated_at: 2026-09-14T09:25:57Z\n---\n\n## Side A\n\nhello\n"
         ),
     )

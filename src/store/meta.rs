@@ -144,6 +144,18 @@ fn parse_block(block: &str) -> Option<CassetteMeta> {
         }
     }
 
+    // Every writer reference must say it is one. A missing or bare value is
+    // frontmatter this store did not write, and would otherwise resolve to
+    // nobody — or, for `locked_by`, to a claim no writer can clear by name.
+    let is_writer =
+        |v: &str| crate::store::ids::check(crate::store::ids::IdKind::Writer, v).is_ok();
+    if !is_writer(&created_by)
+        || !is_writer(&last_writer)
+        || locked_by.as_deref().is_some_and(|v| !is_writer(v))
+    {
+        return None;
+    }
+
     Some(CassetteMeta {
         id: id?,
         topic,
@@ -187,8 +199,8 @@ mod tests {
             priority: 20,
             status: Status::Open,
             locked_by: None,
-            created_by: "01K5H2WRITERID000000000000".to_string(),
-            last_writer: "01K5H2WRITERID000000000000".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-13T14:02:11Z".to_string(),
         }
     }
@@ -225,11 +237,11 @@ mod tests {
     #[test]
     fn a_held_lock_round_trips() {
         let mut m = meta();
-        m.locked_by = Some("01K5H3AGENTID00000000000000".to_string());
+        m.locked_by = Some("wri_01K5GQ00000000000000000002".to_string());
         let parsed = split(&build_frontmatter(&m)).0.unwrap();
         assert_eq!(
             parsed.locked_by.as_deref(),
-            Some("01K5H3AGENTID00000000000000")
+            Some("wri_01K5GQ00000000000000000002")
         );
     }
 
@@ -309,9 +321,37 @@ mod tests {
     }
 
     #[test]
+    fn writer_fields_must_be_writer_ids() {
+        let good = |locked_by: &str, created_by: &str, last_writer: &str| {
+            format!(
+                "---\nid: cas_01K5GR7T2M9WPD0000000000AB\ntopic: x\npriority: 10\nstatus: open\n\
+                 locked_by: {locked_by}\ncreated_by: {created_by}\nlast_writer: {last_writer}\n\
+                 updated_at: 2026-09-24T09:00:00Z\n---\n\n"
+            )
+        };
+        let w = "wri_01K5GQ00000000000000000001";
+        assert!(
+            split(&good("", w, w)).0.is_some(),
+            "the valid baseline parses"
+        );
+        assert!(
+            split(&good(w, w, w)).0.is_some(),
+            "a writer-held sticky lock parses"
+        );
+        for text in [
+            good("", "w", w),
+            good("", w, "01K5GQ00000000000000000001"),
+            good("cas_01K5GQ00000000000000000001", w, w),
+            good("", "", w),
+        ] {
+            assert!(split(&text).0.is_none(), "must not parse:\n{text}");
+        }
+    }
+
+    #[test]
     fn frontmatter_ending_the_file_still_parses() {
         // No body at all: the closing fence is the last line.
-        let content = "---\nid: cas_01K5GR7T2M9WPD0000000000AB\npriority: 20\n---";
+        let content = "---\nid: cas_01K5GR7T2M9WPD0000000000AB\npriority: 20\ncreated_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\n---";
         let (meta, body) = split(content);
         assert_eq!(meta.expect("parses").id, "cas_01K5GR7T2M9WPD0000000000AB");
         assert_eq!(body, "");

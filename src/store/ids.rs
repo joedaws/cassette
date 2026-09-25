@@ -180,6 +180,11 @@ pub fn id_from_file_name(name: &str) -> Option<&str> {
     check(IdKind::Cassette, id).is_ok().then_some(id)
 }
 
+/// A well-formed writer id for tests that need one but do not register a
+/// writer — frontmatter must carry `wri_` ids to parse.
+#[cfg(test)]
+pub(crate) const TEST_WRITER: &str = "wri_01K5GQ00000000000000000001";
+
 #[cfg(test)]
 mod tests {
     use super::*;

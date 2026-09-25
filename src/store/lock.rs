@@ -481,7 +481,7 @@ mod tests {
 
     fn attribution() -> Attribution {
         Attribution {
-            writer: "01K5H2WRITERID000000000000".to_string(),
+            writer: "wri_01K5GQ00000000000000000001".to_string(),
             name: "joseph".to_string(),
             pid: 4242,
             since: "2026-09-14T14:02:11Z".to_string(),
@@ -498,7 +498,7 @@ mod tests {
     fn rendered_form_matches_the_spec() {
         assert_eq!(
             attribution().render(),
-            "writer=01K5H2WRITERID000000000000 name=joseph pid=4242 since=2026-09-14T14:02:11Z"
+            "writer=wri_01K5GQ00000000000000000001 name=joseph pid=4242 since=2026-09-14T14:02:11Z"
         );
     }
 
@@ -588,8 +588,8 @@ mod tests {
             priority: 10,
             status: Status::Open,
             locked_by: None,
-            created_by: "writer-1".to_string(),
-            last_writer: "writer-1".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: meta::now_utc(),
         }
     }

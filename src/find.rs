@@ -366,8 +366,8 @@ mod tests {
                 priority,
                 status: Status::Open,
                 locked_by: None,
-                created_by: "w".to_string(),
-                last_writer: "w".to_string(),
+                created_by: crate::store::ids::TEST_WRITER.to_string(),
+                last_writer: crate::store::ids::TEST_WRITER.to_string(),
                 updated_at: crate::store::meta::now_utc(),
             };
             store
@@ -417,8 +417,8 @@ mod tests {
             priority: 10,
             status: Status::Open,
             locked_by: None,
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: crate::store::meta::now_utc(),
         };
         store
@@ -453,8 +453,8 @@ mod tests {
             priority: 10,
             status: Status::Open,
             locked_by: None,
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: crate::store::meta::now_utc(),
         };
         store

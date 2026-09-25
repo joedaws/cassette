@@ -467,8 +467,8 @@ mod tests {
                 priority: (i as i64 + 1) * 10,
                 status: Status::Open,
                 locked_by: None,
-                created_by: "w".to_string(),
-                last_writer: "w".to_string(),
+                created_by: crate::store::ids::TEST_WRITER.to_string(),
+                last_writer: crate::store::ids::TEST_WRITER.to_string(),
                 updated_at: crate::store::meta::now_utc(),
             };
             store.add_cassette(&session, &m, "").expect("add");
@@ -485,7 +485,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
         assert!(
             store.list_sessions().expect("list").is_empty(),
@@ -499,7 +500,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, false, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, false, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
         assert_eq!(store.list_sessions().expect("list").len(), 1);
     }
@@ -509,7 +511,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("words that must survive quit"));
 
@@ -540,7 +543,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("text"));
         w.flush_focused(&mut app).expect("flush");
@@ -549,7 +553,8 @@ mod tests {
         assert_eq!(scan.cassettes[0].meta.priority, 10);
         assert_eq!(scan.cassettes[0].meta.status, Status::Open);
         assert_eq!(
-            scan.cassettes[0].meta.created_by, "w",
+            scan.cassettes[0].meta.created_by,
+            crate::store::ids::TEST_WRITER,
             "creation is not re-attributed"
         );
     }
@@ -565,7 +570,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 2);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.acquire(&mut app, 0).expect("acquire 0");
 
         app.focus_idx = 0;
@@ -692,7 +698,8 @@ mod tests {
         let root = dir.path().join("store");
         let store = Store::new(root.clone());
         let (mut app, session) = fixture(&store, 2);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.acquire(&mut app, 0)
             .expect("acquire 0: the TUI focuses cassette 0");
         let held_id = app.cassettes[0].id.clone();
@@ -794,7 +801,8 @@ mod tests {
             .expect("spawn queue lock");
         assert_eq!(lock.status.code(), Some(0), "{lock:?}");
 
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.acquire(&mut app, 0).expect("acquire 0");
 
         assert_eq!(
@@ -898,7 +906,8 @@ mod tests {
         let err = String::from_utf8_lossy(&loser_out.stderr);
         assert!(err.contains("is open by"), "{err}");
 
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         crate::try_acquire(&mut app, &mut w, 0);
         assert!(
             app.read_only.is_read_only(),
@@ -980,7 +989,8 @@ mod tests {
         let root = dir.path().join("store");
         let store = Store::new(root.clone());
         let (mut app, session) = fixture(&store, 2);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
 
         // The human writes on cassette 0 …
         w.acquire(&mut app, 0).expect("acquire 0");
@@ -1050,7 +1060,8 @@ mod tests {
         let root = dir.path().join("store");
         let store = Store::new(root.clone());
         let (mut app, session) = fixture(&store, 2);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
 
         w.acquire(&mut app, 0).expect("acquire 0");
         app.focus_idx = 0;
@@ -1103,7 +1114,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 2);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.acquire(&mut app, 0).expect("acquire 0");
         app.focus_idx = 0;
         app.modify_focused(|c| {
@@ -1137,7 +1149,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.acquire(&mut app, 0).expect("acquire");
         w.acquire(&mut app, 0)
             .expect("re-acquiring the held cassette must not fail");
@@ -1152,7 +1165,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 2);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
 
         w.acquire(&mut app, 1).expect("hold cassette 1");
         let held = app.cassettes[1].id.clone();
@@ -1177,7 +1191,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let w = SessionWriter::open(&store, &session, true, "w", "w");
+        let w = SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         app.add_cassette();
         assert!(app.cassettes[1].id.is_empty(), "pure code mints no ids");
 
@@ -1199,7 +1213,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("something"));
         w.finish(&mut app).expect("finish");
@@ -1216,8 +1231,8 @@ mod tests {
             priority: 900,
             status: Status::Open,
             locked_by: None,
-            created_by: "agent".to_string(),
-            last_writer: "agent".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: crate::store::meta::now_utc(),
         };
         store.add_cassette(session, &m, body).expect("add");
@@ -1237,7 +1252,8 @@ mod tests {
         let agent_id =
             add_behind_the_tuis_back(&store, &session, "## Side A\n\nwords the agent wrote\n");
 
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
 
         assert_eq!(
@@ -1264,7 +1280,8 @@ mod tests {
         let (mut app, session) = fixture(&store, 1);
         add_behind_the_tuis_back(&store, &session, "");
 
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
 
         assert_eq!(store.list_sessions().expect("list").len(), 1);
@@ -1285,7 +1302,8 @@ mod tests {
             )
             .expect("another holder takes the lock");
 
-        let mut w = SessionWriter::open(&store, &session, true, "w", "w");
+        let mut w =
+            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
 
         assert_eq!(store.list_sessions().expect("list").len(), 1);

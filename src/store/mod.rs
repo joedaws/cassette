@@ -713,8 +713,8 @@ mod tests {
             priority,
             status: Status::Open,
             locked_by: None,
-            created_by: "writer-1".to_string(),
-            last_writer: "writer-1".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: meta::now_utc(),
         }
     }

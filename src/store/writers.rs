@@ -160,7 +160,24 @@ pub(crate) fn read(root: &Path) -> io::Result<Writers> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Writers::default()),
         Err(e) => return Err(e),
     };
-    toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    let all: Writers =
+        toml::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    // Fail loudly rather than skip: a dropped entry would leave every
+    // cassette crediting it resolving to a raw id, and make the sticky-lock
+    // and authority checks treat a real writer as unknown.
+    if let Some(bad) = all
+        .writers
+        .keys()
+        .find(|k| crate::store::ids::check(crate::store::ids::IdKind::Writer, k).is_err())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "writers.toml: '{bad}' is not a writer id (expected wri_ followed by a 26-character ULID)"
+            ),
+        ));
+    }
+    Ok(all)
 }
 
 pub(crate) fn write(root: &Path, w: &Writers) -> io::Result<()> {
@@ -306,11 +323,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_registry_key_that_is_not_a_writer_id_fails_loudly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("writers.toml"),
+            "[writers.01K5GQ00000000000000000001]\nname = \"joseph\"\nkind = \"human\"\ncreated = \"2026-09-24T09:00:00Z\"\n",
+        )
+        .expect("write");
+        let err = read(dir.path()).expect_err("bare key");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("01K5GQ00000000000000000001"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn writers_toml_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut w = Writers::default();
         w.writers.insert(
-            "01K5H2WRITERID000000000000".to_string(),
+            "wri_01K5GQ00000000000000000001".to_string(),
             Writer {
                 name: "joseph".to_string(),
                 kind: Kind::Human,

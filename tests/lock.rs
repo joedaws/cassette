@@ -38,7 +38,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         cassettes.join(format!("gratitude-{ID}.md")),
         format!(
             "---\nid: {ID}\ntopic: gratitude\npriority: 10\nstatus: open\nlocked_by:\n\
-             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             created_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
              ## Side A\n\noriginal\n"
         ),
     )
@@ -47,7 +47,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         cassettes.join(format!("priorities-{SECOND_ID}.md")),
         format!(
             "---\nid: {SECOND_ID}\ntopic: priorities\npriority: 20\nstatus: open\nlocked_by:\n\
-             created_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
+             created_by: wri_01K5GQ00000000000000000001\nlast_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
              ## Side A\n\nsecond\n"
         ),
     )

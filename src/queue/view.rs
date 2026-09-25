@@ -387,8 +387,8 @@ mod tests {
             priority,
             status,
             locked_by: None,
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-15T09:00:00Z".to_string(),
         }
     }
@@ -671,7 +671,7 @@ mod tests {
         // ignored locked_by would return it — this test fails loudly rather
         // than passing by luck of ordering.
         let mut claimed = meta("cas_aaa00000000000000000000000", 10, Status::Open);
-        claimed.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
+        claimed.locked_by = Some("wri_01K5GQ00000000000000000002".to_string());
         store.add_cassette(&sid, &claimed, "").expect("add");
         store
             .add_cassette(
@@ -696,7 +696,7 @@ mod tests {
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
         let mut only = meta("cas_aaa00000000000000000000000", 10, Status::Open);
-        only.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
+        only.locked_by = Some("wri_01K5GQ00000000000000000002".to_string());
         store.add_cassette(&sid, &only, "").expect("add");
 
         match next(&store, &sid) {

@@ -81,8 +81,8 @@ mod tests {
             priority,
             status,
             locked_by: None,
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: meta::now_utc(),
         };
         store.add_cassette(session, &m, body).expect("add cassette");

@@ -299,9 +299,9 @@ mod tests {
             topic: Some("claimed".to_string()),
             priority: 10,
             status: Status::Open,
-            locked_by: Some("01OTHERWRITER00000000000AB".to_string()),
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            locked_by: Some("wri_01K5GQ00000000000000000002".to_string()),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-16T09:00:00Z".to_string(),
         };
         store.add_cassette(&sid, &m, "original\n").expect("add");
@@ -387,8 +387,8 @@ mod tests {
             priority: 10,
             status: Status::Open,
             locked_by: Some(holder_id.clone()),
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-16T09:00:00Z".to_string(),
         };
         store.add_cassette(&sid, &m, "original\n").expect("add");
@@ -436,7 +436,7 @@ mod tests {
             WriterSource::Flag,
         ) {
             Err(QueueError::Sticky(msg)) => {
-                assert!(msg.contains("01OTHERWRITER00000000000AB"), "{msg}");
+                assert!(msg.contains("wri_01K5GQ00000000000000000002"), "{msg}");
             }
             other => panic!("expected Sticky, got {other:?}"),
         }
@@ -461,8 +461,8 @@ mod tests {
             priority: 10,
             status: Status::Open,
             locked_by: None,
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-17T09:00:00Z".to_string(),
         };
         store
@@ -507,8 +507,8 @@ mod tests {
             priority: 10,
             status: Status::Open,
             locked_by: None,
-            created_by: "w".to_string(),
-            last_writer: "w".to_string(),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-17T09:00:00Z".to_string(),
         };
         store
