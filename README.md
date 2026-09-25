@@ -845,5 +845,5 @@ Releasing, the release tarball's contents, and the pinned CI actions are documen
 
 ## Ideas
 
-- **Publishing the practice** — packaging for the AUR and crates.io, a demo
-  GIF, macOS builds.
+- **Publishing the practice** — packaging for the AUR and crates.io, macOS
+  builds.
