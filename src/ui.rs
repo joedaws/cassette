@@ -251,6 +251,9 @@ pub(crate) fn render_picker(frame: &mut Frame, picker: &crate::picker::Picker, t
             dim,
         )));
     }
+    if let Some(line) = crate::store::skipped_line(picker.skipped) {
+        lines.push(Line::from(Span::styled(line, dim)));
+    }
 
     let help = if picker.filtering {
         "type:filter  Enter:apply  Esc:done"
@@ -986,6 +989,14 @@ mod tests {
             idle.contains("2 unreadable"),
             "damaged files are reported ON SCREEN, not to a wiped stderr: {idle}"
         );
+        assert!(!idle.contains("skipped"), "no skipped line at zero: {idle}");
+        p.skipped = 1;
+        let with_skipped = draw(&p);
+        assert!(
+            with_skipped.contains("1 session directory skipped: names are not ses_ ids"),
+            "skipped directories are reported on screen too: {with_skipped}"
+        );
+        p.skipped = 0;
 
         p.start_filter();
         p.push_filter('m');

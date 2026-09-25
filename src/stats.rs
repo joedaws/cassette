@@ -42,10 +42,11 @@ fn session_word_count(cassettes: &[StoredCassette]) -> usize {
 /// decision 7. A session whose `created` timestamp fails to parse is
 /// skipped, the same treatment `Store::list_sessions` gives a `session.toml`
 /// that fails to parse at all.
-pub fn scan_store(store: &Store) -> (Vec<NoteMeta>, usize) {
-    let Ok(sessions) = store.list_sessions() else {
-        return (Vec::new(), 0);
+pub fn scan_store(store: &Store) -> (Vec<NoteMeta>, usize, usize) {
+    let Ok(listing) = store.list_sessions() else {
+        return (Vec::new(), 0, 0);
     };
+    let sessions = listing.sessions;
     let mut metas = Vec::new();
     let mut unreadable = 0usize;
     for (id, meta) in sessions {
@@ -64,7 +65,7 @@ pub fn scan_store(store: &Store) -> (Vec<NoteMeta>, usize) {
             words: session_word_count(&scan.cassettes),
         });
     }
-    (metas, unreadable)
+    (metas, unreadable, listing.skipped)
 }
 
 /// Consecutive days with at least one note, counting back from today —
@@ -203,7 +204,7 @@ mod tests {
             store.add_cassette(&sid, &m, body).expect("add");
         }
 
-        let (metas, unreadable) = scan_store(&store);
+        let (metas, unreadable, _) = scan_store(&store);
         assert_eq!(
             metas.len(),
             1,
@@ -251,7 +252,7 @@ mod tests {
         )
         .expect("write damaged file");
 
-        let (metas, unreadable) = scan_store(&store);
+        let (metas, unreadable, _) = scan_store(&store);
         assert_eq!(metas.len(), 1);
         assert_eq!(
             metas[0].words, 3,

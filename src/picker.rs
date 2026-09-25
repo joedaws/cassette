@@ -18,6 +18,9 @@ pub(crate) struct Picker {
     /// `find` does. An `eprintln!` here landed on the normal screen an
     /// instant before the alternate screen hid it, which is no report at all.
     pub unreadable: usize,
+    /// Session directories `Store::list_sessions` skipped because their
+    /// names are not `ses_` ids, shown in the same footer.
+    pub skipped: usize,
     /// Index into `visible()`, not into `entries`.
     pub cursor: usize,
     /// First visible row drawn, so a cursor past the bottom of the screen
@@ -39,6 +42,7 @@ impl Picker {
         Self {
             entries,
             unreadable,
+            skipped: 0,
             cursor: 0,
             scroll: 0,
             show_all: false,

@@ -2694,3 +2694,30 @@ fn a_session_id_where_a_cassette_id_belongs_is_a_usage_error_naming_both() {
         stderr(&out)
     );
 }
+
+#[test]
+fn an_unmigrated_store_lists_nothing_and_says_what_it_skipped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let old = root.join("sessions").join("01K5GQ2R8VXM3T0000000000AB");
+    std::fs::create_dir_all(old.join("cassettes")).expect("mkdir");
+    std::fs::write(
+        old.join("session.toml"),
+        "created = \"2026-09-24T09:00:00Z\"\n",
+    )
+    .expect("toml");
+    for args in [&["session", "list"][..], &["find"][..], &["stats"][..]] {
+        let out = Command::new(bin())
+            .args(args)
+            .env("CASSETTE_DATA_DIR", &root)
+            .output()
+            .expect("spawn");
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stdout)
+                .contains("1 session directory skipped: names are not ses_ ids"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}

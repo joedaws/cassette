@@ -127,11 +127,14 @@ fn main() -> io::Result<()> {
     // migration; the files themselves are untouched.
     if args.stats {
         let store = store::Store::new(store_root(args.json));
-        let (metas, unreadable) = stats::scan_store(&store);
+        let (metas, unreadable, skipped) = stats::scan_store(&store);
         println!(
             "{}",
             stats::render(&metas, chrono::Local::now().date_naive(), unreadable)
         );
+        if let Some(line) = store::skipped_line(skipped) {
+            println!("{line}");
+        }
         return Ok(());
     }
 
@@ -183,9 +186,12 @@ fn main() -> io::Result<()> {
 
     if let Some(words) = &args.find {
         let store = store::Store::new(store_root(args.json));
-        let (entries, unreadable) = find::scan_store(&store);
+        let (entries, unreadable, skipped) = find::scan_store(&store);
         let query = (!words.is_empty()).then(|| words.join(" "));
         println!("{}", find::render(&entries, query.as_deref(), unreadable));
+        if let Some(line) = store::skipped_line(skipped) {
+            println!("{line}");
+        }
         return Ok(());
     }
 
@@ -459,8 +465,10 @@ fn main() -> io::Result<()> {
     // without a terminal.
     if args.pick_session {
         let store = store::Store::new(store_root(args.json));
-        let (entries, unreadable) = find::scan_store(&store);
-        match run_picker(picker::Picker::new(entries, unreadable), &theme)? {
+        let (entries, unreadable, skipped) = find::scan_store(&store);
+        let mut picker = picker::Picker::new(entries, unreadable);
+        picker.skipped = skipped;
+        match run_picker(picker, &theme)? {
             // Handed to `resume`, which already resolves a session id and
             // loads its cassettes. A second opening path would be a second
             // set of rules about what an id means.
@@ -749,6 +757,7 @@ fn resolve_session(
         store
             .list_sessions()
             .unwrap_or_else(|e| die_with(1, &format!("cannot list sessions: {e}")))
+            .sessions
             .into_iter()
             .find(|(_, m)| m.alias.as_deref() == Some(alias))
             .map(|(id, _)| id)
@@ -786,6 +795,7 @@ fn resolve_session(
             None => store
                 .list_sessions()
                 .unwrap_or_else(|e| die_with(1, &format!("cannot list sessions: {e}")))
+                .sessions
                 .into_iter()
                 .next()
                 .map(|(id, _)| id)

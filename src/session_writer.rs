@@ -489,7 +489,7 @@ mod tests {
             SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
         assert!(
-            store.list_sessions().expect("list").is_empty(),
+            store.list_sessions().expect("list").sessions.is_empty(),
             "an empty session created in this run must not litter `session list`"
         );
     }
@@ -503,7 +503,7 @@ mod tests {
         let mut w =
             SessionWriter::open(&store, &session, false, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
-        assert_eq!(store.list_sessions().expect("list").len(), 1);
+        assert_eq!(store.list_sessions().expect("list").sessions.len(), 1);
     }
 
     #[test]
@@ -1218,7 +1218,7 @@ mod tests {
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("something"));
         w.finish(&mut app).expect("finish");
-        assert_eq!(store.list_sessions().expect("list").len(), 1);
+        assert_eq!(store.list_sessions().expect("list").sessions.len(), 1);
     }
 
     /// A cassette added to the store behind the TUI's back, as a concurrent
@@ -1257,7 +1257,7 @@ mod tests {
         w.finish(&mut app).expect("finish");
 
         assert_eq!(
-            store.list_sessions().expect("list").len(),
+            store.list_sessions().expect("list").sessions.len(),
             1,
             "a session another writer has written into is not this run's to delete"
         );
@@ -1284,7 +1284,7 @@ mod tests {
             SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
 
-        assert_eq!(store.list_sessions().expect("list").len(), 1);
+        assert_eq!(store.list_sessions().expect("list").sessions.len(), 1);
     }
 
     #[test]
@@ -1306,7 +1306,7 @@ mod tests {
             SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
         w.finish(&mut app).expect("finish");
 
-        assert_eq!(store.list_sessions().expect("list").len(), 1);
+        assert_eq!(store.list_sessions().expect("list").sessions.len(), 1);
         drop(held);
     }
 }

@@ -216,10 +216,11 @@ pub(crate) fn build_haystack(
 /// decision 7. A session whose `created` timestamp fails to parse is
 /// skipped, the same treatment `Store::list_sessions` gives a `session.toml`
 /// that fails to parse at all.
-pub(crate) fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize) {
-    let Ok(sessions) = store.list_sessions() else {
-        return (Vec::new(), 0);
+pub(crate) fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize, usize) {
+    let Ok(listing) = store.list_sessions() else {
+        return (Vec::new(), 0, 0);
     };
+    let sessions = listing.sessions;
     let mut entries = Vec::new();
     let mut unreadable = 0usize;
     for (id, meta) in sessions {
@@ -256,7 +257,7 @@ pub(crate) fn scan_store(store: &Store) -> (Vec<NoteEntry>, usize) {
             haystack,
         });
     }
-    (entries, unreadable)
+    (entries, unreadable, listing.skipped)
 }
 
 #[cfg(test)]
@@ -375,7 +376,7 @@ mod tests {
                 .expect("add");
         }
 
-        let (entries, unreadable) = scan_store(&store);
+        let (entries, unreadable, _) = scan_store(&store);
         assert_eq!(
             entries.len(),
             1,
@@ -425,7 +426,7 @@ mod tests {
             .add_cassette(&sid, &m, "## Side A\n\nsomething else entirely\n")
             .expect("add");
 
-        let (entries, _) = scan_store(&store);
+        let (entries, _, _) = scan_store(&store);
         for q in ["gratitude", "morning-pages", &sid.to_lowercase()] {
             assert!(
                 render(&entries, Some(q), 0).contains(&sid),
@@ -468,7 +469,7 @@ mod tests {
         )
         .expect("write damaged file");
 
-        let (entries, unreadable) = scan_store(&store);
+        let (entries, unreadable, _) = scan_store(&store);
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].words, 3,

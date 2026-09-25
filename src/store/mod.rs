@@ -227,6 +227,28 @@ impl std::fmt::Display for RequireSessionError {
     }
 }
 
+/// `Store::list_sessions`' result: the sessions it could read, and how
+/// many directories under `sessions/` it skipped because their names are
+/// not `ses_` ids.
+#[derive(Debug)]
+pub struct SessionListing {
+    pub sessions: Vec<(String, session::SessionMeta)>,
+    pub skipped: usize,
+}
+
+/// The trailing line every listing prints when `list_sessions` skipped
+/// directories whose names are not session ids — work on disk must not
+/// vanish from every view silently, the same rule as `N unreadable`.
+pub(crate) fn skipped_line(n: usize) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some("1 session directory skipped: names are not ses_ ids".to_string()),
+        n => Some(format!(
+            "{n} session directories skipped: names are not ses_ ids"
+        )),
+    }
+}
+
 /// The store rooted at a data dir. Holds no state beyond the path: every
 /// method reads or writes the filesystem directly, which is what makes
 /// concurrent writers possible.
@@ -655,14 +677,20 @@ impl Store {
     /// directory whose `session.toml` is missing or unparseable is skipped:
     /// `session list` is a listing, not a repair tool, and one damaged
     /// session must not hide the rest.
-    pub fn list_sessions(&self) -> io::Result<Vec<(String, session::SessionMeta)>> {
+    pub fn list_sessions(&self) -> io::Result<SessionListing> {
         let dir = self.sessions_dir();
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(SessionListing {
+                    sessions: Vec::new(),
+                    skipped: 0,
+                })
+            }
             Err(e) => return Err(e),
         };
         let mut found = Vec::new();
+        let mut skipped = 0;
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if !path.is_dir() {
@@ -672,6 +700,7 @@ impl Store {
                 continue;
             };
             if ids::check(ids::IdKind::Session, id).is_err() {
+                skipped += 1;
                 continue;
             }
             let Ok(meta) = session::read(&path.join("session.toml")) else {
@@ -681,7 +710,10 @@ impl Store {
         }
         found
             .sort_by(|(id_a, a), (id_b, b)| b.created.cmp(&a.created).then_with(|| id_b.cmp(id_a)));
-        Ok(found)
+        Ok(SessionListing {
+            sessions: found,
+            skipped,
+        })
     }
 
     /// Set a session's display alias. The alias never resolves — it is shown
@@ -828,6 +860,41 @@ mod tests {
     }
 
     #[test]
+    fn directories_that_are_not_session_ids_are_skipped_and_counted() {
+        let (_d, s) = store();
+        let real = s.create_session(&session_meta()).expect("session");
+        for name in [
+            "01K5GQ2R8VXM3T0000000000AB",
+            "cas_01K5GQ2R8VXM3T0000000000AB",
+        ] {
+            let dir = s.sessions_dir().join(name);
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            std::fs::write(
+                dir.join("session.toml"),
+                "created = \"2026-09-24T09:00:00Z\"\n",
+            )
+            .expect("toml");
+        }
+        let listing = s.list_sessions().expect("list");
+        assert_eq!(listing.sessions.len(), 1);
+        assert_eq!(listing.sessions[0].0, real);
+        assert_eq!(listing.skipped, 2);
+    }
+
+    #[test]
+    fn the_skipped_line_is_singular_plural_and_absent_at_zero() {
+        assert_eq!(skipped_line(0), None);
+        assert_eq!(
+            skipped_line(1).as_deref(),
+            Some("1 session directory skipped: names are not ses_ ids")
+        );
+        assert_eq!(
+            skipped_line(2).as_deref(),
+            Some("2 session directories skipped: names are not ses_ ids")
+        );
+    }
+
+    #[test]
     fn create_session_builds_the_directory_layout() {
         let (_dir, s) = store();
         let id = s.create_session(&session_meta()).expect("create");
@@ -869,7 +936,7 @@ mod tests {
                 ..session_meta()
             })
             .expect("create");
-        let rows = s.list_sessions().expect("list");
+        let rows = s.list_sessions().expect("list").sessions;
         let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, vec![newer.as_str(), older.as_str()]);
     }
@@ -877,7 +944,7 @@ mod tests {
     #[test]
     fn listing_sessions_with_none_yet_is_empty_not_an_error() {
         let (_dir, s) = store();
-        assert!(s.list_sessions().expect("list").is_empty());
+        assert!(s.list_sessions().expect("list").sessions.is_empty());
     }
 
     #[test]
@@ -886,7 +953,7 @@ mod tests {
         let good = s.create_session(&session_meta()).expect("create");
         std::fs::create_dir_all(s.session_dir("broken")).expect("mkdir");
         std::fs::write(s.session_dir("broken").join("session.toml"), "not toml").expect("write");
-        let rows = s.list_sessions().expect("list");
+        let rows = s.list_sessions().expect("list").sessions;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, good);
     }

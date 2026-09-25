@@ -76,9 +76,14 @@ pub fn render_list(rows: &[(String, SessionMeta)], limit: Option<usize>) -> Stri
 
 /// `all` shows every session; otherwise the `DEFAULT_LIST_LIMIT` most recent.
 pub fn list(store: &Store, all: bool) -> Result<String, String> {
-    let rows = store.list_sessions().map_err(|e| e.to_string())?;
+    let listing = store.list_sessions().map_err(|e| e.to_string())?;
     let limit = if all { None } else { Some(DEFAULT_LIST_LIMIT) };
-    Ok(render_list(&rows, limit))
+    let mut out = render_list(&listing.sessions, limit);
+    if let Some(line) = crate::store::skipped_line(listing.skipped) {
+        out.push('\n');
+        out.push_str(&line);
+    }
+    Ok(out)
 }
 
 /// Set `id`'s display alias. An unknown session id is a usage error (exit
