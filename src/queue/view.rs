@@ -440,9 +440,9 @@ mod tests {
                 word_goal: None,
             })
             .expect("create session");
-        let mut open = meta("aaa00000000000000000000000", 10, Status::Open);
+        let mut open = meta("cas_aaa00000000000000000000000", 10, Status::Open);
         open.topic = Some("open-one".to_string());
-        let mut closed = meta("bbb00000000000000000000000", 20, Status::Closed);
+        let mut closed = meta("cas_bbb00000000000000000000000", 20, Status::Closed);
         closed.topic = Some("closed-one".to_string());
         store.add_cassette(&sid, &open, "").expect("add");
         store.add_cassette(&sid, &closed, "").expect("add");
@@ -468,10 +468,10 @@ mod tests {
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
 
-        let mut good = meta("aaa00000000000000000000000", 10, Status::Open);
+        let mut good = meta("cas_aaa00000000000000000000000", 10, Status::Open);
         good.topic = Some("older-one".to_string());
         good.updated_at = "2026-09-15T09:00:00Z".to_string();
-        let mut broken = meta("bbb00000000000000000000000", 20, Status::Open);
+        let mut broken = meta("cas_bbb00000000000000000000000", 20, Status::Open);
         broken.topic = Some("garbled".to_string());
         broken.updated_at = "not a timestamp".to_string();
         store.add_cassette(&sid, &good, "").expect("add");
@@ -519,13 +519,13 @@ mod tests {
                 word_goal: None,
             })
             .expect("create session");
-        let m = meta("01K5GR7T2M9WPD0000000000AB", 10, Status::Open);
+        let m = meta("cas_01K5GR7T2M9WPD0000000000AB", 10, Status::Open);
         store
             .add_cassette(&sid, &m, "## Side A\n\nhello\n")
             .expect("add");
 
         let out = show(&store, &sid, &m.id).expect("show");
-        assert!(out.contains("id: 01K5GR7T2M9WPD0000000000AB"), "{out}");
+        assert!(out.contains("id: cas_01K5GR7T2M9WPD0000000000AB"), "{out}");
         assert!(out.contains("hello"), "{out}");
     }
 
@@ -550,7 +550,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let id = "01K5GR7T2M9WPD0000000000CD";
+        let id = "cas_01K5GR7T2M9WPD0000000000CD";
         let path = store.cassettes_dir(&sid).join(format!("broken-{id}.md"));
         std::fs::write(&path, "no frontmatter here\n").expect("write");
 
@@ -582,7 +582,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Closed),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Closed),
                 "",
             )
             .expect("add");
@@ -612,14 +612,14 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("bbb00000000000000000000000", 20, Status::Open),
+                &meta("cas_bbb00000000000000000000000", 20, Status::Open),
                 "",
             )
             .expect("add");
@@ -628,12 +628,12 @@ mod tests {
         // it and report the other open one instead of reporting Busy.
         let holder = crate::store::lock::Attribution::for_now("writer-1", "joseph");
         let _held = store
-            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .lock(&sid, "cas_aaa00000000000000000000000", &holder)
             .expect("hold it");
 
         assert_eq!(
             next(&store, &sid).expect("next"),
-            "bbb00000000000000000000000"
+            "cas_bbb00000000000000000000000"
         );
     }
 
@@ -645,14 +645,14 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
 
         let holder = crate::store::lock::Attribution::for_now("writer-1", "joseph");
         let _held = store
-            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .lock(&sid, "cas_aaa00000000000000000000000", &holder)
             .expect("hold it");
 
         match next(&store, &sid) {
@@ -670,20 +670,20 @@ mod tests {
         // The HIGHER-priority cassette is the claimed one, so a `next` that
         // ignored locked_by would return it — this test fails loudly rather
         // than passing by luck of ordering.
-        let mut claimed = meta("aaa00000000000000000000000", 10, Status::Open);
+        let mut claimed = meta("cas_aaa00000000000000000000000", 10, Status::Open);
         claimed.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
         store.add_cassette(&sid, &claimed, "").expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("bbb00000000000000000000000", 20, Status::Open),
+                &meta("cas_bbb00000000000000000000000", 20, Status::Open),
                 "",
             )
             .expect("add");
 
         assert_eq!(
             next(&store, &sid).expect("a free cassette exists"),
-            "bbb00000000000000000000000"
+            "cas_bbb00000000000000000000000"
         );
     }
 
@@ -695,7 +695,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let mut only = meta("aaa00000000000000000000000", 10, Status::Open);
+        let mut only = meta("cas_aaa00000000000000000000000", 10, Status::Open);
         only.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
         store.add_cassette(&sid, &only, "").expect("add");
 

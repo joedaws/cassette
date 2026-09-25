@@ -616,6 +616,18 @@ impl Store {
                 });
                 continue;
             };
+            // The file name and the frontmatter must name the same cassette.
+            // Drift between them — a hand-edited or hand-migrated file — would
+            // otherwise make one file two identities: listed under one id,
+            // locked and written under the other.
+            if stem.as_deref() != Some(meta.id.as_str()) {
+                damaged.push(DamagedCassette {
+                    path,
+                    id: stem,
+                    reason: DamageReason::BadFrontmatter,
+                });
+                continue;
+            }
             found.push(StoredCassette {
                 meta,
                 body: body.to_string(),
@@ -772,6 +784,47 @@ mod tests {
             scan.cassettes.is_empty(),
             "and it is not served as a cassette"
         );
+    }
+
+    #[test]
+    fn a_cassette_whose_frontmatter_id_disagrees_with_its_file_name_is_damaged() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        std::fs::write(
+            s.cassettes_dir(&sid).join("x-cas_01K5GR7T2M9WPD0000000000AB.md"),
+            "---\nid: cas_01K5GR7T2M9WPD0000000000ZZ\ntopic: x\npriority: 10\nstatus: open\n\
+             locked_by:\ncreated_by: wri_01K5GQ00000000000000000001\n\
+             last_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-24T09:00:00Z\n---\n\n",
+        )
+        .expect("write");
+        let scan = s.scan_session(&sid).expect("scan");
+        assert!(
+            scan.cassettes.is_empty(),
+            "one file must not become a second identity"
+        );
+        assert_eq!(scan.damaged.len(), 1);
+        assert_eq!(scan.damaged[0].reason, DamageReason::BadFrontmatter);
+        assert_eq!(
+            scan.damaged[0].id.as_deref(),
+            Some("cas_01K5GR7T2M9WPD0000000000AB")
+        );
+    }
+
+    #[test]
+    fn a_bare_ulid_frontmatter_id_is_damaged() {
+        let (_d, s) = store();
+        let sid = s.create_session(&session_meta()).expect("session");
+        std::fs::write(
+            s.cassettes_dir(&sid).join("x-cas_01K5GR7T2M9WPD0000000000AB.md"),
+            "---\nid: 01K5GR7T2M9WPD0000000000AB\ntopic: x\npriority: 10\nstatus: open\n\
+             locked_by:\ncreated_by: wri_01K5GQ00000000000000000001\n\
+             last_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-24T09:00:00Z\n---\n\n",
+        )
+        .expect("write");
+        let scan = s.scan_session(&sid).expect("scan");
+        assert!(scan.cassettes.is_empty());
+        assert_eq!(scan.damaged.len(), 1);
+        assert_eq!(scan.damaged[0].reason, DamageReason::BadFrontmatter);
     }
 
     #[test]
@@ -955,13 +1008,13 @@ mod tests {
     fn add_cassette_names_the_file_by_slug_and_id() {
         let (_dir, s) = store();
         let sid = s.create_session(&session_meta()).expect("create");
-        let m = cassette_meta("01K5GR7T2M9WPD0000000000AB", 10);
+        let m = cassette_meta("cas_01K5GR7T2M9WPD0000000000AB", 10);
         let path = s
             .add_cassette(&sid, &m, "## Side A\n\nhello\n")
             .expect("add");
         assert_eq!(
             path.file_name().unwrap().to_string_lossy(),
-            "gratitude-01K5GR7T2M9WPD0000000000AB.md"
+            "gratitude-cas_01K5GR7T2M9WPD0000000000AB.md"
         );
     }
 
@@ -969,7 +1022,7 @@ mod tests {
     fn a_cassette_round_trips_through_the_store() {
         let (_dir, s) = store();
         let sid = s.create_session(&session_meta()).expect("create");
-        let m = cassette_meta("01K5GR7T2M9WPD0000000000AB", 10);
+        let m = cassette_meta("cas_01K5GR7T2M9WPD0000000000AB", 10);
         let body = "## Side A\n\nhello\n\n## Side B\n\nscratch\n";
         s.add_cassette(&sid, &m, body).expect("add");
 
@@ -986,13 +1039,21 @@ mod tests {
     fn scan_returns_cassettes_in_queue_order() {
         let (_dir, s) = store();
         let sid = s.create_session(&session_meta()).expect("create");
-        let mut closed = cassette_meta("aaa00000000000000000000000", 5);
+        let mut closed = cassette_meta("cas_aaa00000000000000000000000", 5);
         closed.status = Status::Closed;
-        s.add_cassette(&sid, &cassette_meta("ccc00000000000000000000000", 30), "")
-            .expect("add");
+        s.add_cassette(
+            &sid,
+            &cassette_meta("cas_ccc00000000000000000000000", 30),
+            "",
+        )
+        .expect("add");
         s.add_cassette(&sid, &closed, "").expect("add");
-        s.add_cassette(&sid, &cassette_meta("bbb00000000000000000000000", 10), "")
-            .expect("add");
+        s.add_cassette(
+            &sid,
+            &cassette_meta("cas_bbb00000000000000000000000", 10),
+            "",
+        )
+        .expect("add");
 
         let ids: Vec<String> = s
             .scan_session(&sid)
@@ -1004,9 +1065,9 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "bbb00000000000000000000000",
-                "ccc00000000000000000000000",
-                "aaa00000000000000000000000"
+                "cas_bbb00000000000000000000000",
+                "cas_ccc00000000000000000000000",
+                "cas_aaa00000000000000000000000"
             ],
             "open by priority, closed last — even with the best priority"
         );
@@ -1016,8 +1077,12 @@ mod tests {
     fn scan_ignores_non_cassette_files() {
         let (_dir, s) = store();
         let sid = s.create_session(&session_meta()).expect("create");
-        s.add_cassette(&sid, &cassette_meta("aaa00000000000000000000000", 10), "")
-            .expect("add");
+        s.add_cassette(
+            &sid,
+            &cassette_meta("cas_aaa00000000000000000000000", 10),
+            "",
+        )
+        .expect("add");
         // An editor swap file and a file with no frontmatter must not appear.
         std::fs::write(s.cassettes_dir(&sid).join("notes.txt"), "stray").expect("write");
         std::fs::write(s.cassettes_dir(&sid).join("broken.md"), "no frontmatter\n").expect("write");
@@ -1053,7 +1118,7 @@ mod tests {
         // the normal route.
         let (_dir, s) = store();
         let sid = s.create_session(&session_meta()).expect("create");
-        let m = cassette_meta("01K5GR7T2M9WPD0000000000AB", 10);
+        let m = cassette_meta("cas_01K5GR7T2M9WPD0000000000AB", 10);
         s.add_cassette(&sid, &m, "body\n").expect("add");
         assert!(
             s.locks_dir(&sid).join(&m.id).is_file(),
@@ -1067,7 +1132,7 @@ mod tests {
         // because an flock is held on the inode another writer resolved.
         let (_dir, s) = store();
         let sid = s.create_session(&session_meta()).expect("create");
-        let mut m = cassette_meta("01K5GR7T2M9WPD0000000000AB", 10);
+        let mut m = cassette_meta("cas_01K5GR7T2M9WPD0000000000AB", 10);
         let path = s.add_cassette(&sid, &m, "old\n").expect("add");
 
         m.topic = Some("completely different".to_string());
@@ -1091,7 +1156,7 @@ mod tests {
                 .file_name()
                 .unwrap()
                 .to_string_lossy(),
-            "gratitude-01K5GR7T2M9WPD0000000000AB.md",
+            "gratitude-cas_01K5GR7T2M9WPD0000000000AB.md",
             "the slug stays as minted"
         );
     }
@@ -1242,7 +1307,7 @@ mod tests {
     fn holds_is_true_only_while_this_process_guards_the_cassette() {
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
-        const ID: &str = "aaa00000000000000000000000";
+        const ID: &str = "cas_aaa00000000000000000000000";
         s.add_cassette(&sid, &cassette_meta(ID, 10), "")
             .expect("add");
 
@@ -1252,7 +1317,7 @@ mod tests {
             let _guard = s.lock(&sid, ID, &who).expect("acquire");
             assert!(s.holds(&sid, ID), "we are holding it now");
             assert!(
-                !s.holds(&sid, "bbb00000000000000000000000"),
+                !s.holds(&sid, "cas_bbb00000000000000000000000"),
                 "a different id"
             );
         }

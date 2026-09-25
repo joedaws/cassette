@@ -313,6 +313,19 @@ impl LockGuard {
                 format!("'{}' has no cassette frontmatter", self.path.display()),
             )
         })?;
+        // The same rule `Store::scan_session` applies: a file whose
+        // frontmatter names a different cassette than its file name is not
+        // one to write through, whichever of the two is right.
+        if meta.id != self.id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "'{}' frontmatter id {} does not match its file name",
+                    self.path.display(),
+                    meta.id
+                ),
+            ));
+        }
         Ok(StoredCassette {
             meta,
             body: body.to_string(),
@@ -581,7 +594,7 @@ mod tests {
         }
     }
 
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
 
     #[test]
     fn a_lock_can_be_taken_and_written_through() {
@@ -749,7 +762,8 @@ mod tests {
         let sid = s.create_session(&session_meta()).expect("session");
         let who = Attribution::for_now("writer-1", "joseph");
         assert!(
-            s.lock(&sid, "nosuchcassette0000000000AB", &who).is_err(),
+            s.lock(&sid, "cas_000000000000000000000000NS", &who)
+                .is_err(),
             "locking a cassette that does not exist must fail"
         );
     }
@@ -761,10 +775,10 @@ mod tests {
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
         let who = Attribution::for_now("writer-1", "joseph");
-        match s.lock(&sid, "nosuchcassette0000000000AB", &who) {
+        match s.lock(&sid, "cas_000000000000000000000000NS", &who) {
             Err(LockError::NoSuchCassette { session, id }) => {
                 assert_eq!(session, sid);
-                assert_eq!(id, "nosuchcassette0000000000AB");
+                assert_eq!(id, "cas_000000000000000000000000NS");
             }
             other => panic!("expected NoSuchCassette, got {other:?}"),
         }
@@ -774,14 +788,20 @@ mod tests {
     fn lock_many_takes_them_all() {
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
-        for id in ["aaa00000000000000000000000", "bbb00000000000000000000000"] {
+        for id in [
+            "cas_aaa00000000000000000000000",
+            "cas_bbb00000000000000000000000",
+        ] {
             s.add_cassette(&sid, &cassette_meta(id), "").expect("add");
         }
         let who = Attribution::for_now("writer-1", "joseph");
         let guards = s
             .lock_many(
                 &sid,
-                &["bbb00000000000000000000000", "aaa00000000000000000000000"],
+                &[
+                    "cas_bbb00000000000000000000000",
+                    "cas_aaa00000000000000000000000",
+                ],
                 &who,
             )
             .expect("acquire");
@@ -795,20 +815,29 @@ mod tests {
         // order, which is priority-first with the id only as a tiebreak.
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
-        for id in ["aaa00000000000000000000000", "bbb00000000000000000000000"] {
+        for id in [
+            "cas_aaa00000000000000000000000",
+            "cas_bbb00000000000000000000000",
+        ] {
             s.add_cassette(&sid, &cassette_meta(id), "").expect("add");
         }
         let who = Attribution::for_now("writer-1", "joseph");
         let guards = s
             .lock_many(
                 &sid,
-                &["bbb00000000000000000000000", "aaa00000000000000000000000"],
+                &[
+                    "cas_bbb00000000000000000000000",
+                    "cas_aaa00000000000000000000000",
+                ],
                 &who,
             )
             .expect("acquire");
         assert_eq!(
             guards.iter().map(|g| g.id()).collect::<Vec<_>>(),
-            vec!["aaa00000000000000000000000", "bbb00000000000000000000000"],
+            vec![
+                "cas_aaa00000000000000000000000",
+                "cas_bbb00000000000000000000000"
+            ],
             "requested b,a — must be taken a,b"
         );
     }
@@ -819,29 +848,35 @@ mod tests {
         // the winner needs, which is the livelock the ordering rule prevents.
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
-        for id in ["aaa00000000000000000000000", "bbb00000000000000000000000"] {
+        for id in [
+            "cas_aaa00000000000000000000000",
+            "cas_bbb00000000000000000000000",
+        ] {
             s.add_cassette(&sid, &cassette_meta(id), "").expect("add");
         }
         let who = Attribution::for_now("writer-1", "joseph");
         let held = s
-            .lock(&sid, "bbb00000000000000000000000", &who)
+            .lock(&sid, "cas_bbb00000000000000000000000", &who)
             .expect("hold b");
 
         let other = Attribution::for_now("writer-2", "agent");
         let r = s.lock_many(
             &sid,
-            &["aaa00000000000000000000000", "bbb00000000000000000000000"],
+            &[
+                "cas_aaa00000000000000000000000",
+                "cas_bbb00000000000000000000000",
+            ],
             &other,
         );
         match r {
             Err(LockError::Busy { id, .. }) => assert_eq!(
-                id, "bbb00000000000000000000000",
+                id, "cas_bbb00000000000000000000000",
                 "must name the cassette that actually blocked, not the first requested"
             ),
             other => panic!("expected Busy, got {other:?}"),
         }
         // a must be free again — if lock_many kept it, this would be Busy.
-        s.lock(&sid, "aaa00000000000000000000000", &other)
+        s.lock(&sid, "cas_aaa00000000000000000000000", &other)
             .expect("a must have been released");
         drop(held);
     }
@@ -850,12 +885,15 @@ mod tests {
     fn lock_many_rejects_a_duplicate_id() {
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
-        s.add_cassette(&sid, &cassette_meta("aaa00000000000000000000000"), "")
+        s.add_cassette(&sid, &cassette_meta("cas_aaa00000000000000000000000"), "")
             .expect("add");
         let who = Attribution::for_now("writer-1", "joseph");
         let r = s.lock_many(
             &sid,
-            &["aaa00000000000000000000000", "aaa00000000000000000000000"],
+            &[
+                "cas_aaa00000000000000000000000",
+                "cas_aaa00000000000000000000000",
+            ],
             &who,
         );
         match r {
@@ -865,7 +903,7 @@ mod tests {
             other => panic!("a duplicate id must be rejected, got {other:?}"),
         }
         // And it must reject before taking anything, so the id is still free.
-        s.lock(&sid, "aaa00000000000000000000000", &who)
+        s.lock(&sid, "cas_aaa00000000000000000000000", &who)
             .expect("nothing should have been acquired");
     }
 
@@ -879,24 +917,30 @@ mod tests {
         // proof that writer never acquired it.
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
-        for id in ["aaa00000000000000000000000", "bbb00000000000000000000000"] {
+        for id in [
+            "cas_aaa00000000000000000000000",
+            "cas_bbb00000000000000000000000",
+        ] {
             s.add_cassette(&sid, &cassette_meta(id), "").expect("add");
         }
         let holder = Attribution::for_now("writer-1", "joseph");
         let _held = s
-            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .lock(&sid, "cas_aaa00000000000000000000000", &holder)
             .expect("hold the LOWEST id");
 
         // Request b first. Ascending order must try a, fail, and never reach b.
         let other = Attribution::for_now("writer-2", "agent");
         let r = s.lock_many(
             &sid,
-            &["bbb00000000000000000000000", "aaa00000000000000000000000"],
+            &[
+                "cas_bbb00000000000000000000000",
+                "cas_aaa00000000000000000000000",
+            ],
             &other,
         );
         match r {
             Err(LockError::Busy { id, .. }) => assert_eq!(
-                id, "aaa00000000000000000000000",
+                id, "cas_aaa00000000000000000000000",
                 "acquisition is ascending-id, so the blocked id is the LOWEST — not \
                  'bbb…', which was requested first but never reached"
             ),
@@ -904,7 +948,7 @@ mod tests {
         }
 
         let b_anchor =
-            std::fs::read_to_string(s.locks_dir(&sid).join("bbb00000000000000000000000"))
+            std::fs::read_to_string(s.locks_dir(&sid).join("cas_bbb00000000000000000000000"))
                 .expect("read b's anchor");
         assert!(
             !b_anchor.contains("writer-2"),
@@ -916,7 +960,7 @@ mod tests {
     #[test]
     fn probe_reports_free_without_creating_or_stamping_the_anchor() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let anchor = dir.path().join("01K5GR7T2M9WPD0000000000AB");
+        let anchor = dir.path().join("cas_01K5GR7T2M9WPD0000000000AB");
 
         // A cassette nobody has ever locked has no anchor file. That is free,
         // and probing must not bring the file into existence.
@@ -931,7 +975,7 @@ mod tests {
     fn probe_reports_busy_while_the_lock_is_held() {
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
-        const ID: &str = "aaa00000000000000000000000";
+        const ID: &str = "cas_aaa00000000000000000000000";
         s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
 
         let holder = Attribution::for_now("writer-1", "joseph");
@@ -947,7 +991,7 @@ mod tests {
     fn probe_does_not_stamp_the_anchor_it_finds_free() {
         let (_d, s) = store();
         let sid = s.create_session(&session_meta()).expect("session");
-        const ID: &str = "aaa00000000000000000000000";
+        const ID: &str = "cas_aaa00000000000000000000000";
         s.add_cassette(&sid, &cassette_meta(ID), "").expect("add");
 
         // Acquire and release once, so the anchor exists and carries a real

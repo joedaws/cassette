@@ -1160,7 +1160,7 @@ mod tests {
 
         // Something inserts at the front; index 1 is now a different cassette.
         let mut newcomer = Cassette::new();
-        newcomer.id = "aaa00000000000000000000000".to_string();
+        newcomer.id = "cas_aaa00000000000000000000000".to_string();
         app.cassettes.insert(0, newcomer);
 
         assert_eq!(

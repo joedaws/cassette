@@ -1329,7 +1329,7 @@ mod tests {
         // original cassette object — undo stack included — untouched. The
         // cursor position is asserted directly.
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
         app.modify_focused(|c| {
             c.snapshot(); // what entering insert mode does
             c.insert_str("hello world");
@@ -1342,7 +1342,7 @@ mod tests {
         // of the cassette it just released focus on, not an external
         // writer's edit.
         let incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].cursor_pos(),
@@ -1364,11 +1364,11 @@ mod tests {
         // `incoming.locked_by` unless the branch copies it across — a sticky
         // lock must survive the same merge that follows an agent's words.
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
 
         let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
         incoming.locked_by = Some("joseph".to_string());
-        app.merge_external("aaa00000000000000000000000", incoming);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
 
         assert_eq!(app.cassettes[0].locked_by.as_deref(), Some("joseph"));
     }
@@ -1381,7 +1381,7 @@ mod tests {
         // from a self-inflicted mtime move) must not swallow that change
         // along with the rebuild the text genuinely didn't need.
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
         app.modify_focused(|c| {
             c.snapshot();
             c.insert_str("hello world");
@@ -1392,7 +1392,7 @@ mod tests {
 
         let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
         incoming.locked_by = Some("joseph".to_string());
-        app.merge_external("aaa00000000000000000000000", incoming);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].locked_by.as_deref(),
@@ -1415,7 +1415,7 @@ mod tests {
     #[test]
     fn merging_follows_the_new_text_when_the_cursor_was_at_the_end() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
         app.modify_focused(|c| c.insert_str("first"));
         app.clear_dirty(0);
         assert_eq!(
@@ -1425,7 +1425,7 @@ mod tests {
         );
 
         let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
 
         assert_eq!(app.cassettes[0].side_a_text(), "first and more");
         assert_eq!(
@@ -1438,14 +1438,14 @@ mod tests {
     #[test]
     fn merging_leaves_a_scrolled_back_cursor_where_it_was() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
         app.modify_focused(|c| c.insert_str("first"));
         app.modify_focused(|c| c.move_text_start());
         app.clear_dirty(0);
         assert_eq!(app.cassettes[0].cursor_pos(), 0);
 
         let incoming = Cassette::from_sides("first and more".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].cursor_pos(),
@@ -1459,13 +1459,13 @@ mod tests {
         // The updated cassette isn't at index 0: merging must find it by id,
         // never assume the caller already knows its position.
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "zzz00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_zzz00000000000000000000000".to_string();
         app.add_cassette();
-        app.cassettes[1].id = "aaa00000000000000000000000".to_string();
+        app.cassettes[1].id = "cas_aaa00000000000000000000000".to_string();
         app.clear_dirty(1);
 
         let incoming = Cassette::from_sides("updated".to_string(), String::new(), None);
-        app.merge_external("aaa00000000000000000000000", incoming);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes.len(),
@@ -1478,7 +1478,7 @@ mod tests {
         let updated = app
             .cassettes
             .iter()
-            .find(|c| c.id == "aaa00000000000000000000000")
+            .find(|c| c.id == "cas_aaa00000000000000000000000")
             .expect("the merged cassette is still present");
         assert_eq!(updated.side_a_text(), "updated");
     }
@@ -1488,15 +1488,15 @@ mod tests {
         // An agent's `queue new` arrives. The human is typing in what is
         // currently index 0; after the insert they must still be typing in it.
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "bbb00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_bbb00000000000000000000000".to_string();
         app.focus_idx = 0;
         let focused_id = app.cassettes[0].id.clone();
 
         let mut newcomer = Cassette::new();
-        newcomer.id = "aaa00000000000000000000000".to_string();
+        newcomer.id = "cas_aaa00000000000000000000000".to_string();
         // Priority puts the newcomer ahead of the focused cassette: index 0
         // shifts to index 1, so this also exercises invariant 1.
-        app.merge_external("aaa00000000000000000000000", newcomer);
+        app.merge_external("cas_aaa00000000000000000000000", newcomer);
 
         assert_eq!(app.cassettes.len(), 2);
         assert_eq!(
@@ -1530,7 +1530,7 @@ mod tests {
     #[test]
     fn after_a_side_b_merge_side_a_s_cursor_is_at_its_end_like_the_mirror_case() {
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
         app.modify_focused(|c| {
             c.insert_str("old a");
             c.flip();
@@ -1540,7 +1540,7 @@ mod tests {
 
         // Differs from the stored text so the no-op short circuit does not fire.
         let incoming = Cassette::from_sides("new side a".to_string(), "scratch".to_string(), None);
-        app.merge_external("aaa00000000000000000000000", incoming);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
 
         app.cassettes[0].flip();
         assert_eq!(app.cassettes[0].side, Side::A);
@@ -1557,7 +1557,7 @@ mod tests {
         // the update landed. Traced correct by hand in Task 3's review but
         // never pinned by a test until now.
         let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
-        app.cassettes[0].id = "aaa00000000000000000000000".to_string();
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
         app.modify_focused(|c| {
             c.flip();
             c.insert_str("scratch");
@@ -1575,7 +1575,7 @@ mod tests {
             "scratch and more".to_string(),
             None,
         );
-        app.merge_external("aaa00000000000000000000000", incoming);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
 
         assert_eq!(
             app.cassettes[0].side,

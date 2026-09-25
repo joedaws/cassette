@@ -211,7 +211,7 @@ fn a_writer_name_is_required_when_user_is_unset() {
         .args([
             "queue",
             "write",
-            "01K5GR7T2M9WPD0000000000AB",
+            "cas_01K5GR7T2M9WPD0000000000AB",
             "--session",
             &sid,
         ])
@@ -295,7 +295,7 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");
     const SESSION: &str = "ses_01K5GQ2R8V3XQZ0000000000AB";
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     let cassettes = root.join("sessions").join(SESSION).join("cassettes");
     std::fs::create_dir_all(&cassettes).expect("mkdir");
     std::fs::create_dir_all(root.join("sessions").join(SESSION).join(".locks")).expect("mkdir");
@@ -348,7 +348,7 @@ fn queue_write_without_session_exits_two() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");
     let out = Command::new(bin())
-        .args(["queue", "write", "01K5GR7T2M9WPD0000000000AB"])
+        .args(["queue", "write", "cas_01K5GR7T2M9WPD0000000000AB"])
         .env("CASSETTE_DATA_DIR", &root)
         .stdin(std::process::Stdio::null())
         .output()
@@ -461,7 +461,7 @@ fn session_new_then_list_then_alias() {
 fn session_alias_on_an_unknown_id_exits_two() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = Command::new(bin())
-        .args(["session", "alias", "01K5GQ2R8V3XQZ0000000000AB", "x"])
+        .args(["session", "alias", "ses_01K5GQ2R8V3XQZ0000000000AB", "x"])
         .env("CASSETTE_DATA_DIR", dir.path().join("store"))
         .output()
         .expect("spawn");
@@ -499,7 +499,7 @@ fn queue_list_and_show_round_trip_through_a_real_session() {
     assert_eq!(new.status.code(), Some(0), "{}", stderr(&new));
     let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
 
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     write_fixture_cassette(&root, &sid, ID, "gratitude");
 
     let list = Command::new(bin())
@@ -559,8 +559,8 @@ fn queue_list_status_filter_excludes_closed_by_default() {
     let cassettes = root.join("sessions").join(&sid).join("cassettes");
     std::fs::create_dir_all(&cassettes).expect("mkdir");
     std::fs::write(
-        cassettes.join("closed-01K5GR7T2M9WPD0000000000CD.md"),
-        "---\nid: 01K5GR7T2M9WPD0000000000CD\ntopic: closed\npriority: 10\nstatus: closed\n\
+        cassettes.join("closed-cas_01K5GR7T2M9WPD0000000000CD.md"),
+        "---\nid: cas_01K5GR7T2M9WPD0000000000CD\ntopic: closed\npriority: 10\nstatus: closed\n\
          locked_by:\ncreated_by: w\nlast_writer: w\nupdated_at: 2026-09-14T09:25:57Z\n---\n\n\
          ## Side A\n\nold\n",
     )
@@ -715,7 +715,7 @@ fn queue_list_json_counts_unreadable_cassettes_like_the_prose_listing_does() {
         .output()
         .expect("spawn");
     let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     write_fixture_cassette(&root, &sid, ID, "gratitude");
 
     // A second file in the same cassettes dir with no parseable frontmatter
@@ -762,7 +762,7 @@ fn queue_show_json_emits_the_same_cassette_as_show() {
         .output()
         .expect("spawn");
     let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     write_fixture_cassette(&root, &sid, ID, "gratitude");
 
     let out = Command::new(bin())
@@ -797,7 +797,7 @@ fn queue_next_json_emits_a_single_cassette_view_not_a_listing() {
         .output()
         .expect("spawn");
     let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     write_fixture_cassette(&root, &sid, ID, "gratitude");
 
     let out = Command::new(bin())
@@ -872,7 +872,7 @@ fn every_queue_command_rejects_an_unknown_session_with_exit_two() {
     // exited 5 — telling an agent loop to idle when the truth was a typo.
     // One case per `QueueCmd` variant, so a ninth command has a row to add.
     const GHOST: &str = "ses_01M2N4PCZZQC4J9B0DVAK40GJM";
-    const CID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const CID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     let commands: [&[&str]; 8] = [
         &["queue", "list", "--session", GHOST],
         &["queue", "next", "--session", GHOST],
@@ -953,7 +953,7 @@ fn queue_next_prints_the_id_of_an_open_unlocked_cassette() {
         .expect("spawn");
     let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
 
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     write_fixture_cassette(&root, &sid, ID, "gratitude");
 
     let out = Command::new(bin())
@@ -982,7 +982,7 @@ fn queue_next_exits_three_when_every_open_cassette_is_locked() {
         .expect("spawn");
     let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
 
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     write_fixture_cassette(&root, &sid, ID, "gratitude");
 
     let anchor_path = root.join("sessions").join(&sid).join(".locks").join(ID);
@@ -1264,7 +1264,7 @@ fn queue_close_exits_three_when_the_cassette_is_locked() {
         .expect("spawn");
     let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
 
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     write_fixture_cassette(&root, &sid, ID, "gratitude");
 
     let anchor_path = root.join("sessions").join(&sid).join(".locks").join(ID);
@@ -1302,7 +1302,7 @@ fn queue_close_exits_four_for_an_agent_over_a_sticky_lock_but_a_human_may_close_
         .expect("spawn");
     let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
 
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     let cassettes = root.join("sessions").join(&sid).join("cassettes");
     std::fs::create_dir_all(&cassettes).expect("mkdir");
     std::fs::write(
@@ -1372,7 +1372,7 @@ fn queue_reopen_exits_six_once_the_open_cap_is_reached() {
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     }
 
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     let cassettes = root.join("sessions").join(&sid).join("cassettes");
     std::fs::write(
         cassettes.join(format!("closed-{ID}.md")),
@@ -1732,7 +1732,7 @@ fn json_covers_a_missing_writer_identity_before_any_queue_error_exists() {
         .args([
             "queue",
             "write",
-            "01K5GR7T2M9WPD0000000000AB",
+            "cas_01K5GR7T2M9WPD0000000000AB",
             "--session",
             &sid,
             "--json",
@@ -1772,7 +1772,7 @@ fn session_alias_on_an_unknown_id_emits_the_json_envelope() {
         .args([
             "session",
             "alias",
-            "01K5GQ2R8V3XQZ0000000000AB",
+            "ses_01K5GQ2R8V3XQZ0000000000AB",
             "x",
             "--json",
         ])
@@ -1793,7 +1793,7 @@ fn session_alias_on_an_unknown_id_emits_the_json_envelope() {
         v["error"]
             .as_str()
             .expect("error string")
-            .contains("01K5GQ2R8V3XQZ0000000000AB"),
+            .contains("ses_01K5GQ2R8V3XQZ0000000000AB"),
         "{v}"
     );
 }
@@ -1802,7 +1802,7 @@ fn session_alias_on_an_unknown_id_emits_the_json_envelope() {
 fn session_alias_on_an_unknown_id_without_json_still_prints_prose() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = Command::new(bin())
-        .args(["session", "alias", "01K5GQ2R8V3XQZ0000000000AB", "x"])
+        .args(["session", "alias", "ses_01K5GQ2R8V3XQZ0000000000AB", "x"])
         .env("CASSETTE_DATA_DIR", dir.path().join("store"))
         .output()
         .expect("spawn");
@@ -2066,9 +2066,9 @@ fn queue_write_append_and_replace_are_mutually_exclusive() {
     let out = run(&[
         "queue",
         "write",
-        "nosuchcassette0000000000AB",
+        "cas_000000000000000000000000NS",
         "--session",
-        "01K5GQ2R8V3XQZ0000000000AB",
+        "ses_01K5GQ2R8V3XQZ0000000000AB",
         "--append",
         "--replace",
     ]);
@@ -2082,9 +2082,9 @@ fn an_unknown_side_value_exits_two() {
     let out = run(&[
         "queue",
         "write",
-        "nosuchcassette0000000000AB",
+        "cas_000000000000000000000000NS",
         "--session",
-        "01K5GQ2R8V3XQZ0000000000AB",
+        "ses_01K5GQ2R8V3XQZ0000000000AB",
         "--side",
         "z",
     ]);
@@ -2234,7 +2234,7 @@ fn find_matches_the_alias_and_topic_it_prints_and_resume_takes_the_id() {
     );
 
     let unknown = Command::new(bin())
-        .args(["resume", "01K5GQ2R8V3XQZ0000000000AB"])
+        .args(["resume", "ses_01K5GQ2R8V3XQZ0000000000AB"])
         .env("CASSETTE_DATA_DIR", &root)
         .env("USER", "joseph")
         .output()
@@ -2419,7 +2419,7 @@ fn an_implicit_user_cannot_write_over_a_sticky_lock_but_an_explicit_one_can() {
     let sid = String::from_utf8_lossy(&run_as(&["session", "new"], &[], b"").stdout)
         .trim()
         .to_string();
-    const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
     let cassettes = root.join("sessions").join(&sid).join("cassettes");
     std::fs::create_dir_all(&cassettes).expect("mkdir");
     std::fs::write(
@@ -2644,5 +2644,53 @@ fn resume_with_a_cassette_id_is_simply_no_such_session() {
         .output()
         .expect("spawn");
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-    assert!(stderr(&out).contains("no session named"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no session named"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_session_id_where_a_cassette_id_belongs_is_a_usage_error_naming_both() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let cmd = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("CASSETTE_DATA_DIR", &root)
+            .env("USER", "tester")
+            .output()
+            .expect("spawn")
+    };
+    let sid = String::from_utf8_lossy(&cmd(&["session", "new"]).stdout)
+        .trim()
+        .to_string();
+    let cid = String::from_utf8_lossy(&cmd(&["queue", "new", "x", "--session", &sid]).stdout)
+        .trim()
+        .to_string();
+
+    let out = cmd(&["queue", "show", &sid, "--session", &sid]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("is a session id; <ID> takes a cassette id (cas_…)"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = cmd(&["queue", "move", &cid, "--session", &sid, "--before", &sid]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--before takes a cassette id"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = cmd(&["queue", "list", "--session", &cid]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("is a cassette id; --session takes a session id (ses_…)"),
+        "{}",
+        stderr(&out)
+    );
 }

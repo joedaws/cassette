@@ -169,12 +169,15 @@ pub fn file_name(topic: Option<&str>, id: &str) -> String {
 }
 
 /// Recover a cassette id from its file name — the segment after the LAST
-/// dash, since slugs contain dashes of their own. `None` when the name is not
-/// a `<slug>-<id>.md` pair.
+/// dash, since slugs contain dashes of their own — and only when that
+/// segment is a well-formed `cas_` id. `None` otherwise: a name that does
+/// not end in a cassette id names no cassette. `_` never appears in a slug
+/// (`slug` maps every non-alphanumeric run to `-`), so the id's own
+/// separator cannot confuse the split.
 pub fn id_from_file_name(name: &str) -> Option<&str> {
     let stem = name.strip_suffix(".md")?;
     let (_, id) = stem.rsplit_once('-')?;
-    (!id.is_empty()).then_some(id)
+    check(IdKind::Cassette, id).is_ok().then_some(id)
 }
 
 #[cfg(test)]
@@ -329,9 +332,26 @@ mod tests {
     }
 
     #[test]
+    fn a_file_name_yields_its_id_only_when_it_is_a_cassette_id() {
+        let id = "cas_01K5GR7T2M9WPD0000000000AB";
+        assert_eq!(
+            id_from_file_name(&format!("morning-pages-{id}.md")),
+            Some(id)
+        );
+        assert_eq!(
+            id_from_file_name("morning-pages-01K5GR7T2M9WPD0000000000AB.md"),
+            None
+        );
+        assert_eq!(
+            id_from_file_name("x-ses_01K5GR7T2M9WPD0000000000AB.md"),
+            None
+        );
+    }
+
+    #[test]
     fn id_recovery_handles_dashed_slugs_and_rejects_junk() {
         // The slug itself contains dashes, so recovery must take the LAST one.
-        let id = "01K5GR7T2M9WPD0000000000AB";
+        let id = "cas_01K5GR7T2M9WPD0000000000AB";
         let name = format!("loose-thoughts-{id}.md");
         assert_eq!(id_from_file_name(&name), Some(id));
         assert_eq!(id_from_file_name("no-extension"), None);

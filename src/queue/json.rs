@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn a_cassette_serializes_to_the_contract_shape() {
         let v = CassetteView {
-            id: "01K5GR7T2M9WPD0000000000AB".into(),
+            id: "cas_01K5GR7T2M9WPD0000000000AB".into(),
             topic: Some("refactor notes".into()),
             priority: 10,
             status: "open",
@@ -224,7 +224,7 @@ mod tests {
             side_b: String::new(),
         };
         let j: serde_json::Value = serde_json::to_value(&v).expect("serialize");
-        assert_eq!(j["id"], "01K5GR7T2M9WPD0000000000AB");
+        assert_eq!(j["id"], "cas_01K5GR7T2M9WPD0000000000AB");
         assert_eq!(j["status"], "open");
         assert_eq!(j["sticky_lock"], serde_json::Value::Null);
         assert_eq!(j["created_by"]["kind"], "human");

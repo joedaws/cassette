@@ -202,6 +202,14 @@ fn main() -> io::Result<()> {
         if let Err(e) = queue::require_session(&store, cmd.session()) {
             exit_queue_err(&e, args.json);
         }
+        // Cassette ids are checked by kind the same way, before any lock is
+        // taken, so a session id pasted into `<ID>` says what it is rather
+        // than "no cassette".
+        for (id, slot) in cmd.cassette_ids() {
+            if let Err(e) = store::ids::check(store::ids::IdKind::Cassette, id) {
+                exit_queue_err(&queue::QueueError::Usage(e.message(id, slot)), args.json);
+            }
+        }
         match cmd {
             // The only command that creates a cassette, so — like `write` —
             // it needs a writer identity to attribute the creation to.

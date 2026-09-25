@@ -100,6 +100,30 @@ pub enum QueueCmd {
 }
 
 impl QueueCmd {
+    /// Every cassette id this command was given, with the slot it came
+    /// from, so `main()` can check each one's kind before dispatch — the
+    /// same exhaustive-match enforcement `session()` uses: a new command
+    /// does not compile until it says whether it takes cassette ids.
+    pub fn cassette_ids(&self) -> Vec<(&str, &'static str)> {
+        match self {
+            QueueCmd::New { .. } | QueueCmd::List { .. } | QueueCmd::Next { .. } => vec![],
+            QueueCmd::Write { id, .. }
+            | QueueCmd::Show { id, .. }
+            | QueueCmd::Close { id, .. }
+            | QueueCmd::Reopen { id, .. }
+            | QueueCmd::Topic { id, .. }
+            | QueueCmd::Lock { id, .. }
+            | QueueCmd::Unlock { id, .. } => vec![(id.as_str(), "<ID>")],
+            QueueCmd::Move { id, anchor, .. } => {
+                let (a, slot) = match anchor {
+                    crate::queue::edit::MoveAnchor::Before(a) => (a.as_str(), "--before"),
+                    crate::queue::edit::MoveAnchor::After(a) => (a.as_str(), "--after"),
+                };
+                vec![(id.as_str(), "<ID>"), (a, slot)]
+            }
+        }
+    }
+
     /// The `--session` this command was given. Every variant carries one —
     /// there is no active session to fall back to — and `main()` validates
     /// it through this accessor once, before dispatching, so no command can

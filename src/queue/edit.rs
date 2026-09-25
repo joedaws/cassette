@@ -875,7 +875,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
@@ -930,7 +930,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
@@ -957,7 +957,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Closed),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Closed),
                 "",
             )
             .expect("add");
@@ -990,14 +990,14 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("zzz00000000000000000000000", 10, Status::Open),
+                &meta("cas_zzz00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 20, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 20, Status::Open),
                 "",
             )
             .expect("add");
@@ -1009,12 +1009,12 @@ mod tests {
         let zzz = scan
             .cassettes
             .iter()
-            .find(|c| c.meta.id == "zzz00000000000000000000000")
+            .find(|c| c.meta.id == "cas_zzz00000000000000000000000")
             .expect("zzz");
         let aaa = scan
             .cassettes
             .iter()
-            .find(|c| c.meta.id == "aaa00000000000000000000000")
+            .find(|c| c.meta.id == "cas_aaa00000000000000000000000")
             .expect("aaa");
         assert_eq!(zzz.meta.priority, 10, "queue-first cassette gets p10");
         assert_eq!(aaa.meta.priority, 20, "queue-second cassette gets p20");
@@ -1037,27 +1037,27 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("bbb00000000000000000000000", 20, Status::Open),
+                &meta("cas_bbb00000000000000000000000", 20, Status::Open),
                 "",
             )
             .expect("add");
 
         let holder = Attribution::for_now("writer-1", "joseph");
         let _held = store
-            .lock(&sid, "bbb00000000000000000000000", &holder)
+            .lock(&sid, "cas_bbb00000000000000000000000", &holder)
             .expect("hold it");
 
         let who = Attribution::for_now("w", "tester");
         match renumber_all(&store, &sid, &who) {
             Err(QueueError::Busy(m)) => assert!(
-                m.contains("bbb00000000000000000000000"),
+                m.contains("cas_bbb00000000000000000000000"),
                 "must name the cassette that blocked: {m}"
             ),
             other => panic!("expected Busy (exit 3), got {other:?}"),
@@ -1131,7 +1131,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let id = "aaa00000000000000000000000";
+        let id = "cas_aaa00000000000000000000000";
         store
             .add_cassette(&sid, &meta(id, 10, Status::Closed), "## Side A\n\nhello\n")
             .expect("add");
@@ -1158,7 +1158,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let id = "aaa00000000000000000000000";
+        let id = "cas_aaa00000000000000000000000";
         store
             .add_cassette(&sid, &meta(id, 10, Status::Open), "")
             .expect("add");
@@ -1174,7 +1174,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let id = "aaa00000000000000000000000";
+        let id = "cas_aaa00000000000000000000000";
         // meta() stamps updated_at 2026-09-15T09:00:00Z and topic "topic-<id>".
         store
             .add_cassette(&sid, &meta(id, 10, Status::Open), "")
@@ -1202,7 +1202,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let id = "aaa00000000000000000000000";
+        let id = "cas_aaa00000000000000000000000";
         store
             .add_cassette(&sid, &meta(id, 10, Status::Open), "")
             .expect("add");
@@ -1221,7 +1221,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let id = "aaa00000000000000000000000";
+        let id = "cas_aaa00000000000000000000000";
         let mut m = meta(id, 10, Status::Open);
         m.locked_by = Some("01WRITER0000000000000000AB".to_string());
         store.add_cassette(&sid, &m, "").expect("add");
@@ -1243,7 +1243,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "## Side A\n\nhello\n",
             )
             .expect("add");
@@ -1251,7 +1251,7 @@ mod tests {
         close(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             Some("done for now"),
             "tester",
             WriterSource::Env,
@@ -1262,7 +1262,7 @@ mod tests {
         let c = scan
             .cassettes
             .iter()
-            .find(|c| c.meta.id == "aaa00000000000000000000000")
+            .find(|c| c.meta.id == "cas_aaa00000000000000000000000")
             .expect("found");
         assert_eq!(c.meta.status, Status::Closed);
         assert!(c.body.ends_with("\n> done for now\n"), "{}", c.body);
@@ -1276,20 +1276,20 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
 
         let holder = Attribution::for_now("writer-1", "joseph");
         let _held = store
-            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .lock(&sid, "cas_aaa00000000000000000000000", &holder)
             .expect("hold it");
 
         match close(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             None,
             "tester",
             WriterSource::Env,
@@ -1304,7 +1304,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let mut m = meta("aaa00000000000000000000000", 10, Status::Open);
+        let mut m = meta("cas_aaa00000000000000000000000", 10, Status::Open);
         m.locked_by = Some("01WRITER0000000000000000AB".to_string());
         store.add_cassette(&sid, &m, "").expect("add");
 
@@ -1318,7 +1318,7 @@ mod tests {
         match close(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             None,
             "bot",
             WriterSource::Flag,
@@ -1330,7 +1330,7 @@ mod tests {
         close(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             None,
             "joseph",
             WriterSource::Flag,
@@ -1341,7 +1341,7 @@ mod tests {
         assert_eq!(
             scan.cassettes
                 .iter()
-                .find(|c| c.meta.id == "aaa00000000000000000000000")
+                .find(|c| c.meta.id == "cas_aaa00000000000000000000000")
                 .expect("found")
                 .meta
                 .status,
@@ -1357,7 +1357,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Closed),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Closed),
                 "",
             )
             .expect("add");
@@ -1365,7 +1365,7 @@ mod tests {
         reopen(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "tester",
             WriterSource::Env,
             36,
@@ -1376,7 +1376,7 @@ mod tests {
         assert_eq!(
             scan.cassettes
                 .iter()
-                .find(|c| c.meta.id == "aaa00000000000000000000000")
+                .find(|c| c.meta.id == "cas_aaa00000000000000000000000")
                 .expect("found")
                 .meta
                 .status,
@@ -1392,14 +1392,14 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("bbb00000000000000000000000", 20, Status::Closed),
+                &meta("cas_bbb00000000000000000000000", 20, Status::Closed),
                 "",
             )
             .expect("add");
@@ -1407,7 +1407,7 @@ mod tests {
         match reopen(
             &store,
             &sid,
-            "bbb00000000000000000000000",
+            "cas_bbb00000000000000000000000",
             "tester",
             WriterSource::Env,
             1,
@@ -1425,7 +1425,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let mut m = meta("aaa00000000000000000000000", 10, Status::Closed);
+        let mut m = meta("cas_aaa00000000000000000000000", 10, Status::Closed);
         m.locked_by = Some("01WRITER0000000000000000AB".to_string());
         store.add_cassette(&sid, &m, "").expect("add");
         store
@@ -1435,7 +1435,7 @@ mod tests {
         reopen(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "bot",
             WriterSource::Flag,
             36,
@@ -1495,7 +1495,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
@@ -1503,8 +1503,8 @@ mod tests {
         match move_cassette(
             &store,
             &sid,
-            "aaa00000000000000000000000",
-            MoveAnchor::Before("aaa00000000000000000000000".to_string()),
+            "cas_aaa00000000000000000000000",
+            MoveAnchor::Before("cas_aaa00000000000000000000000".to_string()),
             "tester",
             WriterSource::Env,
         ) {
@@ -1521,21 +1521,21 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("bbb00000000000000000000000", 20, Status::Open),
+                &meta("cas_bbb00000000000000000000000", 20, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("ccc00000000000000000000000", 30, Status::Open),
+                &meta("cas_ccc00000000000000000000000", 30, Status::Open),
                 "",
             )
             .expect("add");
@@ -1543,8 +1543,8 @@ mod tests {
         move_cassette(
             &store,
             &sid,
-            "ccc00000000000000000000000",
-            MoveAnchor::Before("aaa00000000000000000000000".to_string()),
+            "cas_ccc00000000000000000000000",
+            MoveAnchor::Before("cas_aaa00000000000000000000000".to_string()),
             "tester",
             WriterSource::Env,
         )
@@ -1555,9 +1555,9 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                "ccc00000000000000000000000",
-                "aaa00000000000000000000000",
-                "bbb00000000000000000000000",
+                "cas_ccc00000000000000000000000",
+                "cas_aaa00000000000000000000000",
+                "cas_bbb00000000000000000000000",
             ],
             "the moved cassette now sorts first: {order:?}"
         );
@@ -1572,21 +1572,21 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("bbb00000000000000000000000", 11, Status::Open),
+                &meta("cas_bbb00000000000000000000000", 11, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("ccc00000000000000000000000", 30, Status::Open),
+                &meta("cas_ccc00000000000000000000000", 30, Status::Open),
                 "",
             )
             .expect("add");
@@ -1595,8 +1595,8 @@ mod tests {
         move_cassette(
             &store,
             &sid,
-            "ccc00000000000000000000000",
-            MoveAnchor::Before("bbb00000000000000000000000".to_string()),
+            "cas_ccc00000000000000000000000",
+            MoveAnchor::Before("cas_bbb00000000000000000000000".to_string()),
             "tester",
             WriterSource::Env,
         )
@@ -1607,9 +1607,9 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                "aaa00000000000000000000000",
-                "ccc00000000000000000000000",
-                "bbb00000000000000000000000",
+                "cas_aaa00000000000000000000000",
+                "cas_ccc00000000000000000000000",
+                "cas_bbb00000000000000000000000",
             ],
             "ccc now sorts directly before bbb: {order:?}"
         );
@@ -1623,7 +1623,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
@@ -1631,12 +1631,14 @@ mod tests {
         match move_cassette(
             &store,
             &sid,
-            "aaa00000000000000000000000",
-            MoveAnchor::Before("zzz00000000000000000000000".to_string()),
+            "cas_aaa00000000000000000000000",
+            MoveAnchor::Before("cas_zzz00000000000000000000000".to_string()),
             "tester",
             WriterSource::Env,
         ) {
-            Err(QueueError::Usage(m)) => assert!(m.contains("zzz00000000000000000000000"), "{m}"),
+            Err(QueueError::Usage(m)) => {
+                assert!(m.contains("cas_zzz00000000000000000000000"), "{m}")
+            }
             other => panic!("expected Usage, got {other:?}"),
         }
     }
@@ -1649,14 +1651,14 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("bbb00000000000000000000000", 20, Status::Closed),
+                &meta("cas_bbb00000000000000000000000", 20, Status::Closed),
                 "",
             )
             .expect("add");
@@ -1664,8 +1666,8 @@ mod tests {
         match move_cassette(
             &store,
             &sid,
-            "aaa00000000000000000000000",
-            MoveAnchor::Before("bbb00000000000000000000000".to_string()),
+            "cas_aaa00000000000000000000000",
+            MoveAnchor::Before("cas_bbb00000000000000000000000".to_string()),
             "tester",
             WriterSource::Env,
         ) {
@@ -1682,7 +1684,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
@@ -1695,7 +1697,7 @@ mod tests {
         match lock(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "bot",
             WriterSource::Flag,
         ) {
@@ -1705,7 +1707,7 @@ mod tests {
         match unlock(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "bot",
             WriterSource::Flag,
         ) {
@@ -1722,7 +1724,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "body\n",
             )
             .expect("add");
@@ -1733,7 +1735,7 @@ mod tests {
         lock(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "joseph",
             WriterSource::Flag,
         )
@@ -1746,7 +1748,7 @@ mod tests {
         lock(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "joseph",
             WriterSource::Flag,
         )
@@ -1768,7 +1770,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let sid = new_session(&store);
-        let mut m = meta("aaa00000000000000000000000", 10, Status::Open);
+        let mut m = meta("cas_aaa00000000000000000000000", 10, Status::Open);
         m.locked_by = Some("01OTHERWRITER00000000000AB".to_string());
         store.add_cassette(&sid, &m, "").expect("add");
         store
@@ -1778,7 +1780,7 @@ mod tests {
         match lock(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "joseph",
             WriterSource::Flag,
         ) {
@@ -1791,7 +1793,7 @@ mod tests {
         unlock(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "joseph",
             WriterSource::Flag,
         )
@@ -1810,7 +1812,7 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "body\n",
             )
             .expect("add");
@@ -1826,7 +1828,7 @@ mod tests {
         unlock(
             &store,
             &sid,
-            "aaa00000000000000000000000",
+            "cas_aaa00000000000000000000000",
             "joseph",
             WriterSource::Flag,
         )
@@ -1847,28 +1849,28 @@ mod tests {
         store
             .add_cassette(
                 &sid,
-                &meta("aaa00000000000000000000000", 10, Status::Open),
+                &meta("cas_aaa00000000000000000000000", 10, Status::Open),
                 "",
             )
             .expect("add");
         store
             .add_cassette(
                 &sid,
-                &meta("bbb00000000000000000000000", 20, Status::Open),
+                &meta("cas_bbb00000000000000000000000", 20, Status::Open),
                 "",
             )
             .expect("add");
 
         let holder = Attribution::for_now("writer-1", "joseph");
         let _held = store
-            .lock(&sid, "aaa00000000000000000000000", &holder)
+            .lock(&sid, "cas_aaa00000000000000000000000", &holder)
             .expect("hold it");
 
         match move_cassette(
             &store,
             &sid,
-            "aaa00000000000000000000000",
-            MoveAnchor::Before("bbb00000000000000000000000".to_string()),
+            "cas_aaa00000000000000000000000",
+            MoveAnchor::Before("cas_bbb00000000000000000000000".to_string()),
             "tester",
             WriterSource::Env,
         ) {

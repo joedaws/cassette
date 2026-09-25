@@ -126,7 +126,13 @@ fn parse_block(block: &str) -> Option<CassetteMeta> {
         };
         let value = value.trim();
         match key.trim() {
-            "id" => id = (!value.is_empty()).then(|| value.to_string()),
+            // A cassette's own id must say it is one: a bare ULID or another
+            // kind's id is frontmatter this store did not write.
+            "id" => {
+                id = crate::store::ids::check(crate::store::ids::IdKind::Cassette, value)
+                    .is_ok()
+                    .then(|| value.to_string())
+            }
             "topic" => topic = (!value.is_empty()).then(|| value.to_string()),
             "priority" => priority = value.parse().unwrap_or(0),
             "status" => status = Status::parse(value),
@@ -176,7 +182,7 @@ mod tests {
 
     fn meta() -> CassetteMeta {
         CassetteMeta {
-            id: "01K5GR7T2M9WPD0000000000AB".to_string(),
+            id: "cas_01K5GR7T2M9WPD0000000000AB".to_string(),
             topic: Some("gratitude".to_string()),
             priority: 20,
             status: Status::Open,
@@ -200,7 +206,7 @@ mod tests {
         assert!(text.starts_with("---\n"), "{text}");
         assert!(text.ends_with("---\n"), "{text}");
         assert!(
-            text.contains("\nid: 01K5GR7T2M9WPD0000000000AB\n"),
+            text.contains("\nid: cas_01K5GR7T2M9WPD0000000000AB\n"),
             "{text}"
         );
         assert!(text.contains("\npriority: 20\n"), "{text}");
@@ -305,9 +311,9 @@ mod tests {
     #[test]
     fn frontmatter_ending_the_file_still_parses() {
         // No body at all: the closing fence is the last line.
-        let content = "---\nid: abc\npriority: 20\n---";
+        let content = "---\nid: cas_01K5GR7T2M9WPD0000000000AB\npriority: 20\n---";
         let (meta, body) = split(content);
-        assert_eq!(meta.expect("parses").id, "abc");
+        assert_eq!(meta.expect("parses").id, "cas_01K5GR7T2M9WPD0000000000AB");
         assert_eq!(body, "");
     }
 

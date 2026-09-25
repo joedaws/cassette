@@ -13,12 +13,12 @@ fn bin() -> &'static str {
 }
 
 const SESSION: &str = "ses_01K5GQ2R8V3XQZ0000000000AB";
-const ID: &str = "01K5GR7T2M9WPD0000000000AB";
+const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
 /// A second open cassette, lower priority (higher number, so it sorts after
 /// `ID` in queue order — see `store::priority::queue_order`) — used by the
 /// `queue next` skip test below, which needs somewhere for `next` to fall
 /// through to once `ID` is held.
-const SECOND_ID: &str = "01K5GR7T2M9WPD0000000000CD";
+const SECOND_ID: &str = "cas_01K5GR7T2M9WPD0000000000CD";
 
 /// Build the store layout directly. Deliberately not through the CLI: the
 /// commands that would do it arrive in Phase 4, and a hand-built fixture keeps

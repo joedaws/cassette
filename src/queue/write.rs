@@ -293,7 +293,7 @@ mod tests {
                 word_goal: None,
             })
             .expect("create session");
-        let id = "aaa00000000000000000000000".to_string();
+        let id = "cas_aaa00000000000000000000000".to_string();
         let m = CassetteMeta {
             id: id.clone(),
             topic: Some("claimed".to_string()),
@@ -380,7 +380,7 @@ mod tests {
         let holder_id = store
             .ensure_writer("beyonce", Kind::Human)
             .expect("register the holder");
-        let id = "aaa00000000000000000000000".to_string();
+        let id = "cas_aaa00000000000000000000000".to_string();
         let m = CassetteMeta {
             id: id.clone(),
             topic: Some("claimed".to_string()),
@@ -454,7 +454,7 @@ mod tests {
                 word_goal: None,
             })
             .expect("create session");
-        let id = "aaa00000000000000000000000";
+        let id = "cas_aaa00000000000000000000000";
         let m = CassetteMeta {
             id: id.to_string(),
             topic: Some("sides".to_string()),
@@ -500,7 +500,7 @@ mod tests {
                 word_goal: None,
             })
             .expect("create session");
-        let id = "aaa00000000000000000000000";
+        let id = "cas_aaa00000000000000000000000";
         let m = CassetteMeta {
             id: id.to_string(),
             topic: Some("sides".to_string()),
