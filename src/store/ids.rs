@@ -1,45 +1,120 @@
-//! Cassette and session identity: ULIDs, and the slug half of a file name.
+//! Identity: typed ids (`ses_`/`cas_`/`wri_` + a ULID), and the slug half of
+//! a cassette's file name.
 
-/// Longest slug allowed in a file name; the ULID and `.md` follow it.
+/// Longest slug allowed in a file name; the id and `.md` follow it.
 pub const SLUG_MAX: usize = 32;
 
 /// Used when a topic yields no usable slug characters.
 const SLUG_FALLBACK: &str = "cassette";
 
-/// Length of a ULID in characters.
-pub const ID_LEN: usize = 26;
+/// Length of the ULID part of an id, after the `<prefix>_`.
+const ULID_LEN: usize = 26;
 
-/// A fresh ULID: 26 Crockford base32 characters, roughly sortable by
-/// creation time. Roughly is enough — the id is only ever a tiebreak, never
-/// an ordering guarantee (see the spec's "Identity and file naming").
-pub fn new_id() -> String {
-    ulid::Ulid::generate().to_string()
+/// The three kinds of identity the store mints. Each id carries its kind as
+/// a prefix — `ses_`, `cas_`, `wri_` — so a person or an agent can tell a
+/// session id from a cassette id from a writer id at a glance, and every
+/// entry point can say *which* kind it was handed instead of "not found".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKind {
+    Session,
+    Cassette,
+    Writer,
 }
 
-/// Whether `s` is a well-formed ULID: exactly [`ID_LEN`] characters, each
-/// from Crockford base32 — the ten digits plus the letters, minus `I`, `L`,
-/// `O` and `U`, which Crockford strikes out to keep `1`/`I`/`l`, `0`/`O` and
-/// `U` from being confused by a human reading an id aloud.
-///
-/// This is the **only** guard between a `--session` argument and a path
-/// join: `Store::session_dir` joins the id straight onto the store root, so
-/// an unvalidated `../../escaped` writes a cassette outside the store
-/// entirely. Shape is checked here, beside `new_id`, because that is where
-/// the crate's knowledge of what an id *is* lives; whether the session so
-/// named exists is `Store::require_session`'s half of the question.
-///
-/// Case-insensitive, matching Crockford's own alphabet: `new_id` mints
-/// uppercase, and a lowercased id is well-formed but simply names no
-/// session on a case-sensitive filesystem — which the existence check then
-/// reports as the missing session it is, rather than as a malformed id.
-pub fn is_valid_id(s: &str) -> bool {
-    // Byte-wise, not char-wise: every legal character is ASCII, so a
-    // 26-byte string of legal bytes is exactly a 26-character id, and a
-    // multi-byte character fails `is_crockford_byte` on its first byte.
-    s.len() == ID_LEN && s.bytes().all(is_crockford_byte)
+impl IdKind {
+    const ALL: [IdKind; 3] = [IdKind::Session, IdKind::Cassette, IdKind::Writer];
+
+    pub fn prefix(self) -> &'static str {
+        match self {
+            IdKind::Session => "ses",
+            IdKind::Cassette => "cas",
+            IdKind::Writer => "wri",
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
+        match self {
+            IdKind::Session => "session",
+            IdKind::Cassette => "cassette",
+            IdKind::Writer => "writer",
+        }
+    }
 }
 
-/// One Crockford base32 character. See [`is_valid_id`].
+/// A fresh id of `kind`: `<prefix>_<ULID>`, roughly sortable by creation
+/// time within a kind. Roughly is enough — the id is only ever a tiebreak,
+/// never an ordering guarantee (see the spec's "Identity and file naming").
+pub fn new(kind: IdKind) -> String {
+    format!("{}_{}", kind.prefix(), ulid::Ulid::generate())
+}
+
+/// Why a string is not an id of the expected kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdError {
+    /// Well-formed, but a different kind.
+    WrongKind { expected: IdKind, found: IdKind },
+    /// Not `<known prefix>_<ULID>` at all — a bare ULID included.
+    Malformed { expected: IdKind },
+}
+
+impl IdError {
+    /// The one wording every entry point uses. `slot` names where the id
+    /// was given (`--session`, `<ID>`, `--before`).
+    pub fn message(&self, input: &str, slot: &str) -> String {
+        match *self {
+            IdError::WrongKind { expected, found } => format!(
+                "`{input}` is a {} id; {slot} takes a {} id ({}_…)",
+                found.noun(),
+                expected.noun(),
+                expected.prefix()
+            ),
+            IdError::Malformed { expected } => format!(
+                "malformed {} id '{input}': expected {}_ followed by a {ULID_LEN}-character ULID",
+                expected.noun(),
+                expected.prefix()
+            ),
+        }
+    }
+}
+
+/// The kind of a well-formed id: a known lowercase prefix, `_`, then exactly
+/// 26 Crockford base32 characters — the ten digits plus the letters, minus
+/// `I`, `L`, `O` and `U`, which Crockford strikes out to keep `1`/`I`/`l`,
+/// `0`/`O` and `U` from being confused by a human reading an id aloud.
+/// `None` for anything else, a bare ULID included.
+///
+/// This is the guard between an outside string and a path join
+/// (`Store::session_dir` joins a session id straight onto the store root):
+/// nothing that passes it can contain `/` or `..`. Whether the thing so
+/// named exists is the caller's half of the question.
+///
+/// The ULID part is case-insensitive, matching Crockford's own alphabet:
+/// `new` mints uppercase, and a lowercased id is well-formed but simply
+/// names nothing on a case-sensitive filesystem — which the existence check
+/// then reports as missing, rather than as malformed. The prefix is
+/// lowercase only.
+pub fn kind_of(s: &str) -> Option<IdKind> {
+    let (prefix, ulid) = s.split_once('_')?;
+    let kind = IdKind::ALL.into_iter().find(|k| k.prefix() == prefix)?;
+    // Byte-wise, not char-wise: every legal character is ASCII, so 26 legal
+    // bytes are exactly 26 characters, and a multi-byte character fails
+    // `is_crockford_byte` on its first byte.
+    (ulid.len() == ULID_LEN && ulid.bytes().all(is_crockford_byte)).then_some(kind)
+}
+
+/// `Ok(())` when `s` is a well-formed id of `kind`.
+pub fn check(kind: IdKind, s: &str) -> Result<(), IdError> {
+    match kind_of(s) {
+        Some(found) if found == kind => Ok(()),
+        Some(found) => Err(IdError::WrongKind {
+            expected: kind,
+            found,
+        }),
+        None => Err(IdError::Malformed { expected: kind }),
+    }
+}
+
+/// One Crockford base32 character. See [`kind_of`].
 fn is_crockford_byte(b: u8) -> bool {
     match b {
         b'0'..=b'9' => true,
@@ -107,52 +182,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_are_twenty_six_char_ulids_and_unique() {
-        let a = new_id();
-        let b = new_id();
-        assert_eq!(a.len(), 26, "ULIDs are 26 Crockford base32 chars: {a}");
-        assert!(
-            a.chars().all(|c| c.is_ascii_alphanumeric()),
-            "no separators in a ULID: {a}"
-        );
-        assert_ne!(a, b, "two mints must differ");
+    fn new_ids_carry_their_kind_and_check_as_it() {
+        for kind in [IdKind::Session, IdKind::Cassette, IdKind::Writer] {
+            let id = new(kind);
+            assert_eq!(id.len(), 30, "{id}");
+            assert!(id.starts_with(&format!("{}_", kind.prefix())), "{id}");
+            assert!(check(kind, &id).is_ok(), "{id}");
+            assert_eq!(kind_of(&id), Some(kind));
+        }
+        assert_ne!(new(IdKind::Session), new(IdKind::Session));
     }
 
     #[test]
-    fn a_minted_id_is_well_formed() {
-        assert!(is_valid_id(&new_id()));
+    fn a_wrong_kind_is_reported_as_such() {
+        let c = new(IdKind::Cassette);
+        match check(IdKind::Session, &c) {
+            Err(IdError::WrongKind {
+                expected: IdKind::Session,
+                found: IdKind::Cassette,
+            }) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_and_misshapen_ids_are_malformed() {
+        let ulid = "01K5GQ2R8VXM3T0000000000AB";
+        for bad in [
+            ulid.to_string(),                          // bare ULID
+            format!("ses-{ulid}"),                     // dash separator
+            format!("SES_{ulid}"),                     // prefix is lowercase only
+            format!("xyz_{ulid}"),                     // unknown prefix
+            format!("ses_{}", &ulid[..25]),            // 25-char ULID
+            format!("ses_{ulid}A"),                    // 27-char ULID
+            format!("ses_{}", ulid.replace('K', "I")), // I is not Crockford
+            format!("ses_é{}", &ulid[..24]),           // multi-byte never passes on length
+            String::new(),
+        ] {
+            assert!(
+                matches!(check(IdKind::Session, &bad), Err(IdError::Malformed { .. })),
+                "{bad:?}"
+            );
+            assert_eq!(kind_of(&bad), None, "{bad:?}");
+        }
+        assert!(check(IdKind::Session, &format!("ses_{}", ulid.to_lowercase())).is_ok());
     }
 
     #[test]
     fn traversal_and_path_separators_are_not_ids() {
-        // The whole point of the check: `--session` is joined onto the store
-        // root, so anything that could climb out of it or name a nested path
-        // must be rejected on shape alone, before any I/O.
-        for bad in ["..", "../../escaped", "a/b", "/etc", "..\\x", "."] {
-            assert!(!is_valid_id(bad), "must be rejected: {bad:?}");
+        // `--session` is joined onto the store root, so anything that could
+        // climb out of it or name a nested path must fail on shape alone.
+        for bad in [
+            "..",
+            "../../escaped",
+            "a/b",
+            "/etc",
+            "..\\x",
+            ".",
+            "ses_../../x",
+        ] {
+            assert_eq!(kind_of(bad), None, "must be rejected: {bad:?}");
         }
     }
 
     #[test]
-    fn ids_are_exactly_twenty_six_characters() {
-        assert!(!is_valid_id(""), "empty");
-        assert!(!is_valid_id(&"A".repeat(ID_LEN - 1)), "25 chars");
-        assert!(!is_valid_id(&"A".repeat(ID_LEN + 1)), "27 chars");
-        assert!(is_valid_id(&"A".repeat(ID_LEN)), "26 chars");
-    }
-
-    #[test]
-    fn crockford_excludes_i_l_o_and_u_in_either_case() {
-        for excluded in ['I', 'L', 'O', 'U', 'i', 'l', 'o', 'u'] {
-            let id = format!("{excluded}{}", "A".repeat(ID_LEN - 1));
-            assert!(!is_valid_id(&id), "not Crockford base32: {id}");
-        }
-        // Lowercase is otherwise fine — Crockford's alphabet is
-        // case-insensitive; naming no session is the existence check's
-        // business, not this one's.
-        assert!(is_valid_id(&"a".repeat(ID_LEN)));
-        // And a multi-byte character never sneaks through on byte length.
-        assert!(!is_valid_id(&format!("é{}", "A".repeat(ID_LEN - 2))));
+    fn messages_name_both_kinds_and_the_slot() {
+        let c = "cas_01K5GQ2R8VXM3T0000000000AB";
+        let m = check(IdKind::Session, c)
+            .unwrap_err()
+            .message(c, "--session");
+        assert_eq!(
+            m,
+            "`cas_01K5GQ2R8VXM3T0000000000AB` is a cassette id; --session takes a session id (ses_…)"
+        );
+        let bare = "01K5GQ2R8VXM3T0000000000AB";
+        let m = check(IdKind::Session, bare)
+            .unwrap_err()
+            .message(bare, "--session");
+        assert_eq!(
+            m,
+            "malformed session id '01K5GQ2R8VXM3T0000000000AB': expected ses_ followed by a 26-character ULID"
+        );
     }
 
     #[test]
@@ -213,7 +323,7 @@ mod tests {
 
     #[test]
     fn id_round_trips_through_the_file_name() {
-        let id = new_id();
+        let id = new(IdKind::Cassette);
         let name = file_name(Some("loose thoughts"), &id);
         assert_eq!(id_from_file_name(&name), Some(id.as_str()));
     }

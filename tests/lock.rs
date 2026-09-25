@@ -12,7 +12,7 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_cassette")
 }
 
-const SESSION: &str = "01K5GQ2R8V3XQZ0000000000AB";
+const SESSION: &str = "ses_01K5GQ2R8V3XQZ0000000000AB";
 const ID: &str = "01K5GR7T2M9WPD0000000000AB";
 /// A second open cassette, lower priority (higher number, so it sorts after
 /// `ID` in queue order — see `store::priority::queue_order`) — used by the

@@ -765,7 +765,8 @@ fn resolve_session(
             // typed deliberately.
             Some(alias) => by_alias(alias)
                 .or_else(|| {
-                    store::ids::is_valid_id(alias)
+                    store::ids::check(store::ids::IdKind::Session, alias)
+                        .is_ok()
                         .then(|| store.session_meta(alias).ok().map(|_| alias.clone()))
                         .flatten()
                 })
@@ -2053,7 +2054,7 @@ mod tests {
     /// Add a real store cassette (frontmatter + body) and return its id, for
     /// tests that need `sync_external_writes` to see actual files on disk.
     fn store_cassette(store: &store::Store, session: &str, priority: i64, body: &str) -> String {
-        let id = store::ids::new_id();
+        let id = store::ids::new(store::ids::IdKind::Cassette);
         let m = store::meta::CassetteMeta {
             id: id.clone(),
             topic: None,

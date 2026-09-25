@@ -179,7 +179,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let id = new_session(&store, Some("morning")).expect("new");
-        assert_eq!(id.len(), 26, "sessions are named by ULID");
+        assert_eq!(id.len(), 30, "sessions are named by ses_ id");
+        assert!(id.starts_with("ses_"), "{id}");
 
         let out = list(&store, false).expect("list");
         assert!(out.contains(&id), "{out}");

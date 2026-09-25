@@ -119,7 +119,7 @@ pub fn new(
     };
 
     let meta = CassetteMeta {
-        id: ids::new_id(),
+        id: ids::new(ids::IdKind::Cassette),
         topic: Some(topic.to_string()),
         priority,
         status: Status::Open,

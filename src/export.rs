@@ -76,7 +76,7 @@ mod tests {
         body: &str,
     ) {
         let m = CassetteMeta {
-            id: ids::new_id(),
+            id: ids::new(ids::IdKind::Cassette),
             topic: topic.map(|t| t.to_string()),
             priority,
             status,

@@ -66,7 +66,7 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     // The temp name carries a ULID so two writers never collide on it.
-    let tmp = dir.join(format!(".tmp-{}", ids::new_id()));
+    let tmp = dir.join(format!(".tmp-{}", ulid::Ulid::generate()));
     // Never leave a stray temp file behind on failure — including a partial
     // one from the initial write itself (e.g. disk-full), not just a failed
     // rename.
@@ -272,7 +272,7 @@ impl Store {
     /// and return the id.
     pub fn create_session(&self, m: &SessionMeta) -> io::Result<String> {
         self.ensure_root()?;
-        let id = ids::new_id();
+        let id = ids::new(ids::IdKind::Session);
         ensure_private_dir(&self.cassettes_dir(&id))?;
         ensure_private_dir(&self.locks_dir(&id))?;
         session::write(&self.session_dir(&id).join("session.toml"), m)?;
@@ -327,7 +327,7 @@ impl Store {
     /// exists, on the two axes a `--session` argument can be wrong on.
     ///
     /// **Shape.** The id is joined straight onto the store root by
-    /// `session_dir`, so `ids::is_valid_id` is what stands between a
+    /// `session_dir`, so `ids::check` is what stands between a
     /// `--session ../../escaped` and a cassette written outside the store.
     /// The spec's "sessions are named by ULID only" is asserted in half a
     /// dozen doc comments; this is where it is enforced.
@@ -348,11 +348,8 @@ impl Store {
     /// its argument and retry forever, where exit 1 tells it to escalate
     /// instead. See `RequireSessionError`.
     pub fn require_session(&self, session: &str) -> Result<(), RequireSessionError> {
-        if !ids::is_valid_id(session) {
-            return Err(RequireSessionError::Usage(format!(
-                "malformed session id '{session}': expected a {}-character ULID",
-                ids::ID_LEN
-            )));
+        if let Err(e) = ids::check(ids::IdKind::Session, session) {
+            return Err(RequireSessionError::Usage(e.message(session, "--session")));
         }
         match self.session_meta(session) {
             Ok(_) => Ok(()),
@@ -599,9 +596,10 @@ impl Store {
                 continue;
             }
             let stem = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .filter(|s| ids::is_valid_id(s));
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(ids::id_from_file_name)
+                .map(str::to_string);
             let Ok(content) = std::fs::read_to_string(&path) else {
                 damaged.push(DamagedCassette {
                     path,
@@ -661,6 +659,9 @@ impl Store {
             let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
+            if ids::check(ids::IdKind::Session, id).is_err() {
+                continue;
+            }
             let Ok(meta) = session::read(&path.join("session.toml")) else {
                 continue;
             };
@@ -751,7 +752,7 @@ mod tests {
         std::fs::write(
             store
                 .cassettes_dir(&session)
-                .join("01M38000000000000000000BAD.md"),
+                .join("morning-cas_01M38000000000000000000BAD.md"),
             "no frontmatter here at all\n",
         )
         .expect("write");
@@ -762,11 +763,11 @@ mod tests {
         assert_eq!(scan.damaged.len(), 1, "the count is derived from the list");
         assert_eq!(
             scan.damaged[0].id.as_deref(),
-            Some("01M38000000000000000000BAD"),
+            Some("cas_01M38000000000000000000BAD"),
             "recovered from the filename, since the frontmatter is what failed"
         );
         assert_eq!(scan.damaged[0].reason, DamageReason::BadFrontmatter);
-        assert_eq!(scan.damaged[0].label(), "01M38000000000000000000BAD");
+        assert_eq!(scan.damaged[0].label(), "cas_01M38000000000000000000BAD");
         assert!(
             scan.cassettes.is_empty(),
             "and it is not served as a cassette"
@@ -777,7 +778,8 @@ mod tests {
     fn create_session_builds_the_directory_layout() {
         let (_dir, s) = store();
         let id = s.create_session(&session_meta()).expect("create");
-        assert_eq!(id.len(), 26);
+        assert_eq!(id.len(), 30);
+        assert!(id.starts_with("ses_"), "{id}");
         assert!(s.session_dir(&id).is_dir());
         assert!(s.cassettes_dir(&id).is_dir());
         assert!(
@@ -869,7 +871,7 @@ mod tests {
         // The phantom-session case: shape alone cannot be the whole check,
         // or a typo'd but well-formed id creates an unreachable session.
         let (_dir, s) = store();
-        let ghost = ids::new_id();
+        let ghost = ids::new(ids::IdKind::Session);
         let err = s.require_session(&ghost).expect_err("must be rejected");
         match err {
             RequireSessionError::Usage(msg) => {
@@ -888,7 +890,7 @@ mod tests {
         // `session list` skips it, so accepting it would hand cassettes to a
         // place nothing can ever list.
         let (_dir, s) = store();
-        let ghost = ids::new_id();
+        let ghost = ids::new(ids::IdKind::Session);
         std::fs::create_dir_all(s.cassettes_dir(&ghost)).expect("mkdir");
         let err = s.require_session(&ghost).expect_err("must be rejected");
         match err {

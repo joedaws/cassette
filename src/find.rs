@@ -361,7 +361,7 @@ mod tests {
             ("second cassette body", 20, "priorities"),
         ] {
             let m = CassetteMeta {
-                id: crate::store::ids::new_id(),
+                id: crate::store::ids::new(crate::store::ids::IdKind::Cassette),
                 topic: Some(topic.to_string()),
                 priority,
                 status: Status::Open,
@@ -412,7 +412,7 @@ mod tests {
             })
             .expect("create session");
         let m = CassetteMeta {
-            id: crate::store::ids::new_id(),
+            id: crate::store::ids::new(crate::store::ids::IdKind::Cassette),
             topic: Some("gratitude".to_string()),
             priority: 10,
             status: Status::Open,
@@ -448,7 +448,7 @@ mod tests {
             })
             .expect("create session");
         let m = CassetteMeta {
-            id: crate::store::ids::new_id(),
+            id: crate::store::ids::new(crate::store::ids::IdKind::Cassette),
             topic: Some("gratitude".to_string()),
             priority: 10,
             status: Status::Open,

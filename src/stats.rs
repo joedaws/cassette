@@ -191,7 +191,7 @@ mod tests {
             .enumerate()
         {
             let m = CassetteMeta {
-                id: crate::store::ids::new_id(),
+                id: crate::store::ids::new(crate::store::ids::IdKind::Cassette),
                 topic: Some(format!("topic {i}")),
                 priority: (i as i64 + 1) * 10,
                 status: Status::Open,
@@ -231,7 +231,7 @@ mod tests {
             })
             .expect("create session");
         let m = CassetteMeta {
-            id: crate::store::ids::new_id(),
+            id: crate::store::ids::new(crate::store::ids::IdKind::Cassette),
             topic: Some("gratitude".to_string()),
             priority: 10,
             status: Status::Open,

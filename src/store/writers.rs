@@ -228,7 +228,7 @@ pub(crate) fn ensure(root: &Path, name: &str, kind: Kind) -> Result<String, Ensu
         }
         return Ok(id);
     }
-    let id = ids::new_id();
+    let id = ids::new(ids::IdKind::Writer);
     all.writers.insert(
         id.clone(),
         Writer {
@@ -268,7 +268,7 @@ pub(crate) fn resolve(root: &Path, name: &str) -> Result<(String, Kind), Resolve
     if let Some((id, kind)) = lookup_by_name(&all, name) {
         return Ok((id, kind));
     }
-    let id = ids::new_id();
+    let id = ids::new(ids::IdKind::Writer);
     all.writers.insert(
         id.clone(),
         Writer {

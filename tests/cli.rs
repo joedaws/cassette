@@ -294,7 +294,7 @@ fn queue_write_with_an_unknown_writer_flag_exits_two_without_creating_one() {
     // creates a session yet.
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");
-    const SESSION: &str = "01K5GQ2R8V3XQZ0000000000AB";
+    const SESSION: &str = "ses_01K5GQ2R8V3XQZ0000000000AB";
     const ID: &str = "01K5GR7T2M9WPD0000000000AB";
     let cassettes = root.join("sessions").join(SESSION).join("cassettes");
     std::fs::create_dir_all(&cassettes).expect("mkdir");
@@ -434,7 +434,11 @@ fn session_new_then_list_then_alias() {
         .expect("spawn");
     assert_eq!(new.status.code(), Some(0), "{}", stderr(&new));
     let id = String::from_utf8_lossy(&new.stdout).trim().to_string();
-    assert_eq!(id.len(), 26, "a ULID is printed bare for scripting: {id:?}");
+    assert_eq!(
+        id.len(),
+        30,
+        "a ses_ id is printed bare for scripting: {id:?}"
+    );
 
     let aliased = Command::new(bin())
         .args(["session", "alias", &id, "monday"])
@@ -843,7 +847,7 @@ fn a_well_formed_but_unknown_session_exits_two_and_creates_nothing() {
     // `session new` creates sessions.
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("store");
-    const GHOST: &str = "01M2N4PCZZQC4J9B0DVAK40GJM";
+    const GHOST: &str = "ses_01M2N4PCZZQC4J9B0DVAK40GJM";
     let out = Command::new(bin())
         .args(["queue", "new", "ghost", "--session", GHOST])
         .env("CASSETTE_DATA_DIR", &root)
@@ -867,7 +871,7 @@ fn every_queue_command_rejects_an_unknown_session_with_exit_two() {
     // Before the shared gate, `list` exited 0 with "no cassettes" and `next`
     // exited 5 — telling an agent loop to idle when the truth was a typo.
     // One case per `QueueCmd` variant, so a ninth command has a row to add.
-    const GHOST: &str = "01M2N4PCZZQC4J9B0DVAK40GJM";
+    const GHOST: &str = "ses_01M2N4PCZZQC4J9B0DVAK40GJM";
     const CID: &str = "01K5GR7T2M9WPD0000000000AB";
     let commands: [&[&str]; 8] = [
         &["queue", "list", "--session", GHOST],
@@ -2627,4 +2631,18 @@ fn man_prints_the_top_page_and_out_dir_writes_one_per_subcommand() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(target.join("cassette.1").is_file());
     assert!(target.join("cassette-queue-write.1").is_file());
+}
+
+#[test]
+fn resume_with_a_cassette_id_is_simply_no_such_session() {
+    // `resume` takes free text (alias first), so a wrong-kind id is not a
+    // session: the ordinary "no session named" exit, no WrongKind message.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(bin())
+        .args(["resume", "cas_01K5GQ2R8VXM3T0000000000AB"])
+        .env("CASSETTE_DATA_DIR", dir.path().join("store"))
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("no session named"), "{}", stderr(&out));
 }

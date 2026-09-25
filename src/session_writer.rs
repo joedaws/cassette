@@ -131,7 +131,7 @@ impl<'a> SessionWriter<'a> {
         // cassette last without touching anybody else's file.
         let priority = priority::last(&open).unwrap_or(i64::MAX);
         let meta = CassetteMeta {
-            id: ids::new_id(),
+            id: ids::new(ids::IdKind::Cassette),
             topic: app.cassettes[idx].topic.clone(),
             priority,
             status: Status::Open,
@@ -460,7 +460,7 @@ mod tests {
         let mut app = App::new(None, None, None, session.clone());
         app.cassettes.clear();
         for i in 0..n {
-            let id = crate::store::ids::new_id();
+            let id = crate::store::ids::new(crate::store::ids::IdKind::Cassette);
             let m = CassetteMeta {
                 id: id.clone(),
                 topic: None,
@@ -1209,7 +1209,7 @@ mod tests {
     /// A cassette added to the store behind the TUI's back, as a concurrent
     /// agent's `queue new` + `queue write` would leave it.
     fn add_behind_the_tuis_back(store: &Store, session: &str, body: &str) -> String {
-        let id = crate::store::ids::new_id();
+        let id = crate::store::ids::new(crate::store::ids::IdKind::Cassette);
         let m = CassetteMeta {
             id: id.clone(),
             topic: Some("agentwork".to_string()),
