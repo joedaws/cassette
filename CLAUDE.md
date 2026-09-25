@@ -100,8 +100,8 @@ Once the app exists, a `session_writer::SessionWriter` is opened against the res
 
 Designs and implementation plans live in `docs/superpowers/specs/` as
 `YYYY-MM-DD-<topic>-design.md`, created through the `superpowers` skills
-(brainstorming -> writing-plans -> executing-plans). There is no external issue
-tracker; the spec files are the durable record.
+(brainstorming -> writing-plans -> executing-plans). The spec files are the durable
+record of a design.
 
 - Read the spec first and follow it — steps, file paths, and acceptance criteria were
   written against this repo. Verify claims about the code against the current source
@@ -123,11 +123,19 @@ tracker; the spec files are the durable record.
 - Promote durable decisions out of specs into real docs (`docs/distribution.md`, README).
   A spec is scaffolding, not documentation; git history is the archive.
 
+Work items are tracked in beads (`bd`): `bd ready` for what is unblocked, `bd show <id>`,
+`bd comments add <id> "…"` to log findings as you go, `bd close <id> --reason "…"` when
+done. The `.beads/` database is local to this checkout (excluded in `.git/info/exclude`,
+not committed), so a decision that has to outlive the machine belongs in a spec or doc
+too, not only in a bead.
+
 `docs/follow-up.md` is the backlog. Each phase spec carried an "Open items" list to the next
 phase; with the redesign closed there is no next phase, so they collect there — along with
 work deferred out of a phase (man page and completions) and design findings from the Stage 2
-multi-writer trial. No external issue tracker: that file is the durable record the way the
-spec files are for designs. If something there gets built, it gets a spec and the entry goes.
+multi-writer trial. That file is the committed record the way the spec files are for
+designs. If something there gets built, it gets a spec and the entry goes.
 
-`docs/plans/` holds older plan files from a retired tracker; they are named by issue
-number and those issues no longer exist. Treat them as reference, not as live work.
+`docs/plans/` holds older plan files from chainlink, the retired tracker; they are named by
+chainlink issue number. The issues still open were migrated to beads, where
+`bd show` lists `External: chainlink-N` and points at the matching plan file. Treat the plans
+as reference written against older code, not as live work.
