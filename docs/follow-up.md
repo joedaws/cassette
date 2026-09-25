@@ -105,6 +105,9 @@ Small, none blocking, each verified to still exist as of Phase 6.
 - **Other commands may panic writing to a closed pipe with large output** (`print!` on EPIPE,
   Phase 6's `export | head` lesson). `completions`/`man` are safe via `tolerate_broken_pipe`;
   the rest were not audited. Not reproduced.
+- **`export <SESSION>` and `session alias <ID>` report a wrong-kind id as "--session takes a
+  session id"** — `Store::require_session` hard-codes the slot name, though neither command
+  has a `--session` flag. Thread the slot through. (Found 2026-09-24, typed ids.)
 
 ## Owed verification (2026-09-24 build)
 
