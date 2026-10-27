@@ -6,9 +6,9 @@
 //! purpose: a later manual set will store its own frontmatter field and
 //! resolve from that, and nothing here should assume `Turn` is the only one.
 //! That is why the resolver is a method on the set rather than a free
-//! function. The names config spells sets and statuses with (`name`,
-//! `statuses`, `key`) arrive with `[status.<set>]` config, their first
-//! caller — landing them before it would be dead code.
+//! function. `name`, `statuses` and `key` are the spellings
+//! `[status.<set>]` config uses, and `glyphs_from_config` validates against
+//! them.
 //!
 //! Pure, like `App` and `Cassette`: no I/O, no store types, no ratatui. What
 //! the resolver needs from the store has already been folded onto the
@@ -17,7 +17,10 @@
 //! process holds it, and the time — arrives in `StatusContext`. `ui.rs` only
 //! maps the resulting `StatusId` to a glyph and a theme color.
 
+use std::collections::HashMap;
+
 use crate::cassette::Cassette;
+use crate::config::StatusSpec;
 
 /// A family of statuses with its own resolution rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +55,20 @@ pub struct StatusContext {
 }
 
 impl StatusSet {
+    /// The set's name as config spells it: the `<set>` in `[status.<set>]`.
+    pub fn name(self) -> &'static str {
+        match self {
+            StatusSet::Turn => "turn",
+        }
+    }
+
+    /// Every status in the set, in the order error messages list them.
+    pub fn statuses(self) -> &'static [StatusId] {
+        match self {
+            StatusSet::Turn => &[StatusId::Human, StatusId::Agent, StatusId::Busy],
+        }
+    }
+
     /// The status of `c`, or `None` for a closed cassette — closed is
     /// history, not work, and has no move left to make.
     pub fn resolve(self, c: &Cassette, cx: &StatusContext) -> Option<StatusId> {
@@ -94,6 +111,15 @@ fn resolve_turn(c: &Cassette, cx: &StatusContext) -> StatusId {
 }
 
 impl StatusId {
+    /// The status's name as config spells it: a key inside `[status.<set>]`.
+    pub fn key(self) -> &'static str {
+        match self {
+            StatusId::Human => "human",
+            StatusId::Agent => "agent",
+            StatusId::Busy => "busy",
+        }
+    }
+
     /// The glyph shown when config does not override it.
     pub fn default_glyph(self) -> &'static str {
         match self {
@@ -102,6 +128,86 @@ impl StatusId {
             StatusId::Busy => "●",
         }
     }
+}
+
+/// The glyphs to draw, resolved from config over the built-ins, plus whether
+/// the human-turn glyph pulses. Plain data, so `ui.rs` needs no config types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Glyphs {
+    human: String,
+    agent: String,
+    busy: String,
+    pub pulse: bool,
+}
+
+impl Glyphs {
+    pub fn glyph(&self, id: StatusId) -> &str {
+        match id {
+            StatusId::Human => &self.human,
+            StatusId::Agent => &self.agent,
+            StatusId::Busy => &self.busy,
+        }
+    }
+
+    fn slot(&mut self, id: StatusId) -> &mut String {
+        match id {
+            StatusId::Human => &mut self.human,
+            StatusId::Agent => &mut self.agent,
+            StatusId::Busy => &mut self.busy,
+        }
+    }
+}
+
+impl Default for Glyphs {
+    fn default() -> Self {
+        Glyphs {
+            human: StatusId::Human.default_glyph().to_string(),
+            agent: StatusId::Agent.default_glyph().to_string(),
+            busy: StatusId::Busy.default_glyph().to_string(),
+            pulse: true,
+        }
+    }
+}
+
+/// Validate the `[status.*]` tables and lay them over the defaults. Checked
+/// by hand rather than serde because `Config` ignores unknown keys by design,
+/// and a typo'd glyph name silently doing nothing is worse than an exit.
+pub fn glyphs_from_config(specs: &HashMap<String, StatusSpec>) -> Result<Glyphs, String> {
+    let sets = [StatusSet::Turn];
+    let mut glyphs = Glyphs::default();
+    // Sorted, so which of two mistakes is reported does not depend on hash order.
+    let mut names: Vec<&String> = specs.keys().collect();
+    names.sort();
+    for name in names {
+        let spec = &specs[name];
+        let Some(set) = sets.iter().find(|s| s.name() == name) else {
+            let known: Vec<&str> = sets.iter().map(|s| s.name()).collect();
+            return Err(format!(
+                "[status.{name}] is not a status set (known: {})",
+                known.join(", ")
+            ));
+        };
+        let mut keys: Vec<&String> = spec.glyphs.keys().collect();
+        keys.sort();
+        for key in keys {
+            let Some(id) = set.statuses().iter().find(|id| id.key() == key) else {
+                let known: Vec<&str> = set.statuses().iter().map(|id| id.key()).collect();
+                return Err(format!(
+                    "[status.{name}] has no status '{key}' (known: {})",
+                    known.join(", ")
+                ));
+            };
+            let value = spec.glyphs[key].trim();
+            if value.is_empty() {
+                return Err(format!("[status.{name}] {key} is an empty glyph"));
+            }
+            *glyphs.slot(*id) = value.to_string();
+        }
+        if let Some(pulse) = spec.pulse {
+            glyphs.pulse = pulse;
+        }
+    }
+    Ok(glyphs)
 }
 
 #[cfg(test)]
@@ -195,5 +301,52 @@ mod tests {
         let glyphs =
             [StatusId::Human, StatusId::Agent, StatusId::Busy].map(StatusId::default_glyph);
         assert_eq!(glyphs, ["✎", "⚙", "●"]);
+    }
+
+    fn specs(toml: &str) -> HashMap<String, StatusSpec> {
+        toml::from_str::<crate::config::Config>(toml)
+            .unwrap()
+            .status
+    }
+
+    #[test]
+    fn empty_config_gives_defaults() {
+        assert_eq!(glyphs_from_config(&HashMap::new()), Ok(Glyphs::default()));
+        assert!(Glyphs::default().pulse);
+    }
+
+    #[test]
+    fn overrides_one_glyph_keeps_others() {
+        let g = glyphs_from_config(&specs("[status.turn]\nagent = \"🤖\"\n")).unwrap();
+        assert_eq!(g.glyph(StatusId::Agent), "🤖");
+        assert_eq!(g.glyph(StatusId::Human), "✎");
+        assert_eq!(g.glyph(StatusId::Busy), "●");
+    }
+
+    #[test]
+    fn unknown_set_name_is_error() {
+        let e = glyphs_from_config(&specs("[status.trun]\nagent = \"x\"\n")).unwrap_err();
+        assert!(e.contains("trun") && e.contains("turn"), "{e}");
+    }
+
+    #[test]
+    fn unknown_status_key_is_error() {
+        let e = glyphs_from_config(&specs("[status.turn]\nhumna = \"x\"\n")).unwrap_err();
+        assert!(
+            e.contains("humna") && e.contains("human, agent, busy"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn empty_glyph_is_error() {
+        let e = glyphs_from_config(&specs("[status.turn]\nbusy = \"  \"\n")).unwrap_err();
+        assert!(e.contains("busy") && e.contains("empty"), "{e}");
+    }
+
+    #[test]
+    fn pulse_false_is_honoured() {
+        let g = glyphs_from_config(&specs("[status.turn]\npulse = false\n")).unwrap();
+        assert!(!g.pulse);
     }
 }

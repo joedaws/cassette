@@ -30,6 +30,20 @@ pub struct Config {
     /// Most open cassettes one session may hold; defaults to
     /// `store::MAX_OPEN` (36).
     pub max_open: Option<usize>,
+    /// Status glyph overrides: `[status.<set>]` tables, today only
+    /// `[status.turn]` with `human`/`agent`/`busy` glyphs and `pulse`.
+    /// Validated by `status::glyphs_from_config`, not here.
+    #[serde(default)]
+    pub status: HashMap<String, StatusSpec>,
+}
+
+/// One `[status.<set>]` table: the `pulse` switch plus every other key as a
+/// status-name → glyph pair, left unchecked until `glyphs_from_config`.
+#[derive(Debug, Deserialize, Default)]
+pub struct StatusSpec {
+    pub pulse: Option<bool>,
+    #[serde(flatten)]
+    pub glyphs: HashMap<String, String>,
 }
 
 /// XDG-style config path on every platform: `$XDG_CONFIG_HOME/cassette/config.toml`,
@@ -78,6 +92,16 @@ mod tests {
 
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn parses_status_table() {
+        let toml = "[status.turn]\npulse = false\nagent = \"🤖\"\n";
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let turn = &cfg.status["turn"];
+        assert_eq!(turn.pulse, Some(false));
+        assert_eq!(turn.glyphs.get("agent").map(String::as_str), Some("🤖"));
+        assert!(!turn.glyphs.contains_key("pulse"));
+    }
 
     #[test]
     fn config_path_honors_xdg_config_home_and_falls_back_to_dot_config() {

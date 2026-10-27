@@ -8,14 +8,14 @@ use ratatui::{
 
 use crate::app::{App, Mode, ReadOnly, GUTTER_WIDTH, MINIMIZED_ROWS};
 use crate::cassette::{char_width, pos_to_row_col, wrap_spans, Cassette, Side};
-use crate::status::StatusId;
+use crate::status::{Glyphs, StatusId};
 use crate::theme::Theme;
 
 // All colors come from the active `Theme` (side accents, unfocused cassette
 // colors, and — when set — focused text/background; the default theme keeps
 // the terminal's own colors for the focused cassette, issue #16).
 
-pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
+pub fn render(frame: &mut Frame, app: &App, theme: &Theme, glyphs: &Glyphs) {
     let area = frame.area();
     let rpc = app.rows_per_cassette();
 
@@ -58,7 +58,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
 
     for (chunk_idx, cassette_idx) in (first..first + n).enumerate() {
         let cassette = &app.cassettes[cassette_idx];
-        let status = app.turn_status(cassette_idx);
+        let status = app
+            .turn_status(cassette_idx)
+            .map(|id| status_mark(id, glyphs, app.anim_frame, theme));
         if cassette_idx == app.focus_idx {
             render_cassette_focused(
                 frame,
@@ -67,11 +69,18 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
                 cw,
                 app.visible_lines,
                 app.mode,
-                status,
+                status.as_ref(),
                 theme,
             );
         } else {
-            render_cassette_min(frame, chunks[chunk_idx], cassette, cw, status, theme);
+            render_cassette_min(
+                frame,
+                chunks[chunk_idx],
+                cassette,
+                cw,
+                status.as_ref(),
+                theme,
+            );
         }
     }
 
@@ -460,6 +469,30 @@ fn separator_text(app: &App, idx: usize) -> String {
     separator_pieces(&app.cassettes[idx], false, glyph).concat()
 }
 
+/// What `render_separator` needs to draw a status: the glyph text and its
+/// finished style, so the separator never learns about config or animation.
+struct StatusMark {
+    glyph: String,
+    style: Style,
+}
+
+/// The look of a status glyph. The human-turn glyph pulses — bold on even
+/// seconds, dim on odd — when `glyphs.pulse`, a quiet "your move" cue; the
+/// others never do, since a pulsing "hands off" would read as urgency.
+fn status_mark(status: StatusId, glyphs: &Glyphs, anim_frame: u64, theme: &Theme) -> StatusMark {
+    let modifier = if status == StatusId::Human && glyphs.pulse && anim_frame % 2 == 1 {
+        Modifier::DIM
+    } else {
+        Modifier::BOLD
+    };
+    StatusMark {
+        glyph: glyphs.glyph(status).to_string(),
+        style: Style::new()
+            .fg(status_color(status, theme))
+            .add_modifier(modifier),
+    }
+}
+
 /// The theme color a status glyph is drawn in. `ui.rs` only maps a status to
 /// its look; working out which status applies is `status.rs`'s job.
 fn status_color(status: StatusId, theme: &Theme) -> Color {
@@ -480,7 +513,7 @@ fn render_separator(
     ch: char,
     cassette: &Cassette,
     short: bool,
-    status: Option<StatusId>,
+    status: Option<&StatusMark>,
     theme: &Theme,
 ) {
     let sep_area = Rect { height: 1, ..area };
@@ -492,7 +525,7 @@ fn render_separator(
     let tag_style = Style::new().fg(accent);
     let label_style = Style::new().add_modifier(Modifier::BOLD);
 
-    let pieces = separator_pieces(cassette, short, status.map(StatusId::default_glyph));
+    let pieces = separator_pieces(cassette, short, status.map(|m| m.glyph.as_str()));
     // Cells, not chars: a topic in CJK, or a glyph that is two cells wide,
     // would otherwise overrun the row by the difference.
     let cells = |s: &str| -> usize { s.chars().map(char_width).sum() };
@@ -504,7 +537,7 @@ fn render_separator(
     for (i, label) in pieces.iter().enumerate().skip(1) {
         used += 1 + cells(label);
         let style = match status {
-            Some(status) if i == 1 => Style::new().fg(status_color(status, theme)),
+            Some(mark) if i == 1 => mark.style,
             _ => label_style,
         };
         spans.push(Span::raw(ch.to_string()));
@@ -587,7 +620,7 @@ fn render_cassette_focused(
     cw: usize,
     visible_lines: usize,
     mode: Mode,
-    status: Option<StatusId>,
+    status: Option<&StatusMark>,
     theme: &Theme,
 ) {
     render_separator(frame, area, '═', cassette, false, status, theme);
@@ -698,7 +731,7 @@ fn render_cassette_min(
     area: Rect,
     cassette: &Cassette,
     cw: usize,
-    status: Option<StatusId>,
+    status: Option<&StatusMark>,
     theme: &Theme,
 ) {
     render_separator(frame, area, '─', cassette, true, status, theme);
@@ -872,7 +905,7 @@ mod tests {
     fn drawn(app: &App) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
-            .draw(|f| render(f, app, &Theme::default()))
+            .draw(|f| render(f, app, &Theme::default(), &Glyphs::default()))
             .unwrap();
         let buf = terminal.backend().buffer();
         (0..24)
@@ -1158,7 +1191,7 @@ mod tests {
         app.resize(80, 24);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
-            .draw(|f| render(f, &app, &Theme::default()))
+            .draw(|f| render(f, &app, &Theme::default(), &Glyphs::default()))
             .unwrap();
         let buf = terminal.backend().buffer();
 
@@ -1183,7 +1216,7 @@ mod tests {
         let stats_row = |app: &App| -> String {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             terminal
-                .draw(|f| render(f, app, &Theme::default()))
+                .draw(|f| render(f, app, &Theme::default(), &Glyphs::default()))
                 .unwrap();
             let buf = terminal.backend().buffer();
             (0..80)
@@ -1227,7 +1260,9 @@ mod tests {
         let theme = crate::theme::resolve(Some("gruvbox"), &std::collections::HashMap::new())
             .expect("gruvbox is built in");
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        terminal.draw(|f| render(f, &app, &theme)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &theme, &Glyphs::default()))
+            .unwrap();
         let buf = terminal.backend().buffer();
 
         // Help row is the last row; insert help starts "Esc:normal".
@@ -1240,7 +1275,7 @@ mod tests {
 
         // Default theme: keys keep terminal fg, descriptions go DarkGray.
         terminal
-            .draw(|f| render(f, &app, &Theme::default()))
+            .draw(|f| render(f, &app, &Theme::default(), &Glyphs::default()))
             .unwrap();
         let buf = terminal.backend().buffer();
         assert_eq!(
@@ -1267,7 +1302,7 @@ mod tests {
         let styles = |app: &App| {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             terminal
-                .draw(|f| render(f, app, &Theme::default()))
+                .draw(|f| render(f, app, &Theme::default(), &Glyphs::default()))
                 .unwrap();
             let buf = terminal.backend().buffer();
             // Tag char inside "══╡ SIDE X ╞" at x=2; gutter digit at x=1, y=1.
@@ -1307,7 +1342,9 @@ mod tests {
         });
 
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
-        terminal.draw(|f| render(f, &app, &theme)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &theme, &Glyphs::default()))
+            .unwrap();
         let buf = terminal.backend().buffer();
 
         // Text cell 'h' at x=5, y=1: gruvbox fg on gruvbox bg.
@@ -1338,7 +1375,7 @@ mod tests {
         let row_text = |app: &App, y: u16| -> String {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             terminal
-                .draw(|f| render(f, app, &Theme::default()))
+                .draw(|f| render(f, app, &Theme::default(), &Glyphs::default()))
                 .unwrap();
             let buf = terminal.backend().buffer();
             (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect()
@@ -1573,7 +1610,7 @@ mod tests {
         app.cassettes[1].last_writer_human = Some(true);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
-            .draw(|f| render(f, &app, &Theme::default()))
+            .draw(|f| render(f, &app, &Theme::default(), &Glyphs::default()))
             .unwrap();
         let buf = terminal.backend().buffer();
         let row = (0..24)
@@ -1611,6 +1648,94 @@ mod tests {
         }
     }
 
+    /// The cell holding the human glyph on cassette 1's minimized separator,
+    /// rendered at `anim_frame` with `glyphs`: (symbol, style).
+    fn human_glyph_cell(glyphs: &Glyphs, anim_frame: u64) -> (String, ratatui::style::Style) {
+        let mut app = turn_app();
+        app.cassettes[1].last_writer_human = Some(false); // human's move
+        app.anim_frame = anim_frame;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &Theme::default(), glyphs))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        for y in 0..24 {
+            let row: String = (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            if row.contains("╡ A ╞") {
+                let x = (0..80)
+                    .find(|&x| buf[(x, y)].symbol() == "✎")
+                    .or_else(|| (0..80).find(|&x| buf[(x, y)].symbol() == "🤖"))
+                    .expect("a status glyph");
+                return (buf[(x, y)].symbol().to_string(), buf[(x, y)].style());
+            }
+        }
+        panic!("no minimized separator");
+    }
+
+    #[test]
+    fn pulse_alternates_human_glyph_style() {
+        let g = Glyphs::default();
+        let (even_sym, even) = human_glyph_cell(&g, 0);
+        let (odd_sym, odd) = human_glyph_cell(&g, 1);
+        assert_eq!(even_sym, odd_sym, "same glyph both frames");
+        assert!(even.add_modifier.contains(Modifier::BOLD));
+        assert!(odd.add_modifier.contains(Modifier::DIM));
+        assert_ne!(even, odd);
+    }
+
+    #[test]
+    fn pulse_off_keeps_style_constant() {
+        let g = crate::status::glyphs_from_config(
+            &toml::from_str::<crate::config::Config>("[status.turn]\npulse = false\n")
+                .unwrap()
+                .status,
+        )
+        .unwrap();
+        let (_, even) = human_glyph_cell(&g, 0);
+        let (_, odd) = human_glyph_cell(&g, 1);
+        assert_eq!(even, odd);
+        assert!(even.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn two_cell_glyph_does_not_overflow_separator() {
+        let mut app = turn_app();
+        app.cassettes[1].last_writer_human = Some(true); // agent's move
+        let g = crate::status::glyphs_from_config(
+            &toml::from_str::<crate::config::Config>("[status.turn]\nagent = \"🤖\"\n")
+                .unwrap()
+                .status,
+        )
+        .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &Theme::default(), &g))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let y = (0..24)
+            .find(|&y| {
+                (0..40)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .contains("╡ A ╞")
+            })
+            .expect("a minimized separator");
+        let row: String = (0..40).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        assert!(row.contains("🤖"), "{row}");
+        // The cell after a wide glyph is its blank continuation; skip it
+        // when summing display width. Overflow would push the fill past 40.
+        let mut width = 0;
+        let mut x = 0;
+        while x < 40 {
+            let w = buf[(x, y)].symbol().chars().map(char_width).sum::<usize>();
+            width += w;
+            x += w.max(1) as u16;
+        }
+        assert_eq!(width, 40, "{row}");
+        assert_eq!(buf[(39, y)].symbol(), "─", "fill ends at the edge: {row}");
+        assert!(row.contains("╡ topic ╞"), "label intact: {row}");
+    }
+
     /// With the cursor at the start of a long text the scroll clamp pins the
     /// viewport to the top, leaving the cursor row off-center: the fade must
     /// still be brightest at the cursor, not at the middle of the cassette.
@@ -1633,7 +1758,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
         terminal
-            .draw(|f| render(f, &app, &Theme::default()))
+            .draw(|f| render(f, &app, &Theme::default(), &Glyphs::default()))
             .unwrap();
         let buf = terminal.backend().buffer();
 

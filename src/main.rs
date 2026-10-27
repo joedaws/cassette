@@ -442,6 +442,10 @@ fn main() -> io::Result<()> {
         Ok(t) => t,
         Err(e) => die(&e),
     };
+    let glyphs = match status::glyphs_from_config(&cfg.status) {
+        Ok(g) => g,
+        Err(e) => die(&format!("config: {e}")),
+    };
     let daily_name: Option<String> = args.daily.then(|| {
         let fmt = cfg.daily_format.as_deref().unwrap_or("%Y-%m-%d");
         match daily_note_name(fmt) {
@@ -628,6 +632,7 @@ fn main() -> io::Result<()> {
             writer.as_mut(),
             store.as_ref(),
             &theme,
+            &glyphs,
         )
     }));
 
@@ -1053,6 +1058,7 @@ fn run(
     mut writer: Option<&mut session_writer::SessionWriter>,
     store: Option<&store::Store>,
     theme: &theme::Theme,
+    glyphs: &status::Glyphs,
 ) -> io::Result<()> {
     let tick_rate = Duration::from_secs(1);
     let mut last_tick = Instant::now();
@@ -1065,7 +1071,7 @@ fn run(
     let signals = install_signal_handlers()?;
 
     loop {
-        terminal.draw(|f| ui::render(f, app, theme))?;
+        terminal.draw(|f| ui::render(f, app, theme, glyphs))?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
@@ -1091,6 +1097,7 @@ fn run(
             app.tick_timer();
             app.tick_status();
             app.tick_idle();
+            app.tick_anim();
 
             // Per-tick lock retry runs BEFORE sync: a retry that wins the
             // lock already re-reads that cassette through `acquire`'s

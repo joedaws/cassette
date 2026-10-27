@@ -118,6 +118,8 @@ pub struct App {
     /// has none. `0` until first set, which can only make a claim look live
     /// for the instant before startup sets it.
     pub now: i64,
+    /// Seconds ticked since start; the human-turn glyph pulses on its parity.
+    pub anim_frame: u64,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
     /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
@@ -165,6 +167,7 @@ impl App {
             session,
             read_only: ReadOnly::No,
             now: 0,
+            anim_frame: 0,
             bell: false,
             suspend: false,
             status_ticks: None,
@@ -244,6 +247,11 @@ impl App {
     /// sessions are never nudged — wandering off is allowed there.
     pub fn idle_nudge(&self) -> bool {
         (self.timer_secs.is_some() || self.record) && self.idle_secs >= Self::IDLE_NUDGE_SECS
+    }
+
+    /// One second has passed: advance the frame the human-turn glyph pulses on.
+    pub fn tick_anim(&mut self) {
+        self.anim_frame = self.anim_frame.wrapping_add(1);
     }
 
     /// Count down a transient status message; clears it when time is up.
