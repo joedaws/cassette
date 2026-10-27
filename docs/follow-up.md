@@ -109,6 +109,20 @@ Small, none blocking, each verified to still exist as of Phase 6.
   session id"** — `Store::require_session` hard-codes the slot name, though neither command
   has a `--session` flag. Thread the slot through. (Found 2026-09-24, typed ids.)
 
+## Turn status follow-ups (2026-10-26)
+
+- **Manual status sets (CLI + TUI).** `StatusSet` is shaped for more than `Turn`; a manual set
+  would store its own frontmatter field and resolve from it, with a `queue` command and a TUI
+  binding to set it, and a config key to choose the set.
+- **Stale-read overwrite hazard.** An agent's `queue write` that lands after the human added
+  words to the same cassette replaces them. Claims make it less likely, not impossible.
+- **Second-TUI busy detection on unfocused cassettes.** The TUI only knows a lock is held by
+  another writer for the cassette it has focused; another TUI's focus elsewhere shows no `●`.
+- **`queue next --claim`.** Claim the cassette `next` returns in the same call, closing the gap
+  between `next` and `claim` when two agents run. Not built.
+- **Glyph values accept control characters.** `[status.turn]` validates only that a glyph is
+  non-empty, so `\n` or an escape sequence is accepted and will corrupt the separator row.
+
 ## Owed verification (2026-09-24 build)
 
 - **The release workflow's new packaging step has never run.** Publish a release (or

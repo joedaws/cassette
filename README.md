@@ -767,6 +767,30 @@ help_key = "#e6e1cf"      # key combos in the help line
 help_text = "#5c6773"     # descriptions in the help line
 ```
 
+### Cassette status
+
+Every open cassette shows one glyph in its separator line, saying whose move it is:
+
+| Glyph | Status | Meaning |
+|---|---|---|
+| `✎` (pulses) | human | your move, or a blank cassette waiting for words |
+| `⚙` | agent | you wrote last; waiting on an agent |
+| `●` | busy | focused (by you) or claimed by an agent that is reading or thinking |
+
+Closed cassettes show none. The status is derived, never stored. An agent marks a cassette
+picked up with `cassette queue claim` (agent-only, default 120 s); `queue write` releases the
+claim, `queue release` clears it, and an expired claim lapses by itself.
+
+```toml
+[status.turn]
+human = "✎"
+agent = "⚙"
+busy  = "●"
+pulse = true     # false turns the human glyph's pulse off
+```
+
+All keys are optional; an empty glyph or an unknown status name is a config error.
+
 ### Themes
 
 List every available theme (built-in and user-defined) with color swatches:
@@ -789,6 +813,8 @@ set — for example, keep gruvbox but change the side A accent:
 [themes.gruvbox]
 accent_a = "#ff8800"
 ```
+
+Themes also color the status glyphs: `status_human`, `status_agent` and `status_busy`.
 
 ## CLI reference
 

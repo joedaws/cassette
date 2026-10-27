@@ -105,8 +105,10 @@ Introduce the concept with one implementation:
 
 - A `StatusSet` (enum or trait — builder's call) with one member, `Turn`. Each set names its
   statuses, its default glyphs, and a pure `resolve(&Cassette, &StatusContext) -> StatusId`.
-  `StatusContext` carries what is not on the cassette: own-lock/read-only state, `now` for claim
-  expiry, and the TUI's writer id.
+  `StatusContext` carries what is not on the cassette: `{ held, now }` (own-lock/read-only
+  state, and `now` for claim expiry). *As built:* it has no writer id; the TUI's own claim is
+  dropped earlier, in `session_writer::annotate_from_store`, so `Cassette.claimed_until` is only
+  ever someone else's.
 - A later manual set will store its own frontmatter field and resolve from it. Nothing in the
   turn set should assume it is the only set. There is no config key for choosing a set yet,
   because there is only one.
@@ -172,7 +174,8 @@ signals "I'm on this" by focusing the cassette in the TUI, which already shows b
   semantics: a queue where every open, unlocked cassette is claimed by others is **3** (`Busy`,
   wait), not 5.
 - Optional convenience, builder's call: `queue next --claim` claims the cassette it returns in
-  the same call, closing the gap between "next" and "claim" when two agents run.
+  the same call, closing the gap between "next" and "claim" when two agents run. *As built:* not
+  built; recorded in `docs/follow-up.md`. `next` skips every live claim, the caller's own included.
 
 Both new commands: add to `QueueCmd`, its exhaustive `cassette_ids()`/`session()` matches,
 `cli.rs`, man/completions (generated, free), and CLAUDE.md's command list.
@@ -210,7 +213,8 @@ anyway. Claims are what make agent work visible for seconds.
 - **Pulse:** the `human` glyph alternates between its bright style and a dim one, driven off
   the existing 1 s tick in `main.rs` (an `App` frame counter, as the reel animation does). It
   pulses on every cassette in the `human` status, focused or not. It is not hidden on the off
-  beat, so the column never jumps. A 1 s period is fine. The loop does not speed up for this.
+  beat, so the column never jumps. *As built:* the pulse alternates bold/dim; the agent and busy
+  glyphs render bold and never pulse. A 1 s period is fine. The loop does not speed up for this.
 - Glyph width: `separator_pieces`' fill math must use `char_width`, not `chars().count()`, since
   a user's configured glyph may be two cells wide.
 
@@ -236,7 +240,7 @@ pulse = true             # false turns the human glyph's pulse off
 
 Update `.claude/skills/cassette-session/SKILL.md`:
 
-- Claim before thinking: `queue claim <id> --session <ID> --writer bot` (or `next --claim`),
+- Claim before thinking: `queue claim <id> --session <ID> --writer bot` (`next --claim` was not built),
   then read, think, `queue write`, which releases it. If you decide not to answer, `queue release`.
 - Pick a `--for` longer than your think time. Expiry is a crash safety net, not a timer to beat.
 - `claimed_by` in the JSON: never work on a cassette another writer has claimed.

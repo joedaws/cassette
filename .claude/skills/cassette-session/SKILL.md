@@ -27,11 +27,16 @@ whoami` shows what you are acting as.
 ## What to act on
 
 `waiting_on` is the inverse of whoever wrote last, so a cassette the human touched is
-**waiting on you**. Act on cassettes where `waiting_on == "agent"` **and** `busy == false`.
+**waiting on you**. Act on cassettes where `waiting_on == "agent"`, `busy == false` **and**
+`claimed_by` is null. Only writes change `waiting_on`: a `queue move`, `lock`, `close` or
+`topic` no longer flips it.
 
 ```bash
 cassette queue next --session <ID> --json    # highest-priority open, unlocked cassette
 ```
+
+`queue next` skips **every** live claim, including your own. To resume a cassette you have
+already claimed, use its id directly rather than asking `next` for it.
 
 Exit codes are the idle signal: **3** everything is busy (wait), **5** nothing open and
 unlocked (do nothing), **4** a sticky `queue lock` you must not write over, **6** queue full.
@@ -40,6 +45,36 @@ unlocked (do nothing), **4** a sticky `queue lock` you must not write over, **6*
   cassette, including the one the human is typing in right now.
 - **Writing is exclusive per cassette.** `busy == true` means the human is focused there.
   Never write it; you will get exit 3. Their cursor moving is the handoff.
+
+## Claim before you think
+
+Reading and thinking take seconds to minutes, and the human sees the cassette as ready for
+you the whole time. Mark it picked up first:
+
+```bash
+cassette queue claim <id> --session <ID> --writer bot [--for 300]   # default 120 s
+cassette queue write <id> --session <ID> --writer bot < reply.md   # writing releases the claim
+cassette queue release <id> --session <ID> --writer bot            # decided not to answer
+```
+
+- Pick `--for` longer than your think time. Expiry is a crash safety net, not a timer to beat;
+  an expired claim simply stops counting.
+- Never work a cassette whose `claimed_by` is someone else. Writing over another agent's live
+  claim is exit 4; a claim on the human's focused cassette is exit 3.
+- `claim` needs an explicit `--writer`; without it the command exits 2.
+
+## What the human sees
+
+Each open cassette carries one glyph in its separator line:
+
+| Glyph | Status | Meaning |
+|---|---|---|
+| `✎` (pulses) | human | the human's move |
+| `⚙` | agent | waiting on an agent |
+| `●` | busy | the human has it focused, or an agent holds a live claim |
+
+Closed cassettes show none. A blank cassette is always `✎`. The glyphs are configurable, so
+describe them by status name if the human may have changed them.
 
 ## How a session goes
 
