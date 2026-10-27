@@ -26,6 +26,7 @@ mod queue;
 mod session;
 mod session_writer;
 mod stats;
+mod status;
 mod store;
 mod theme;
 mod ui;
@@ -531,13 +532,20 @@ fn main() -> io::Result<()> {
     // all: `app.session` stays empty rather than naming a session that was
     // never created.
     let store = (!args.print_stdout).then(|| store::Store::new(store_root(args.json)));
-    let (session, created_here, loaded) = match &store {
-        Some(store) => resolve_session(store, &args, daily_name.as_deref()),
-        None => (String::new(), false, None),
+    // The writer is resolved before the session is opened, not after: loading
+    // an existing session annotates each cassette with whether a claim on it
+    // is somebody else's, and "somebody else" means "not this writer".
+    let tui_writer = store.as_ref().map(|s| resolve_tui_writer(s, &args));
+    let (session, created_here, loaded) = match (&store, &tui_writer) {
+        (Some(store), Some((writer_id, _, _))) => {
+            resolve_session(store, &args, daily_name.as_deref(), writer_id)
+        }
+        _ => (String::new(), false, None),
     };
 
     let visible_lines = args.visible_lines.or(cfg.visible_lines);
     let mut app = App::new(args.timer_secs, args.word_goal, visible_lines, session);
+    app.now = chrono::Utc::now().timestamp();
     app.record = args.record;
     if let Some(topics) = &template_topics {
         app.apply_topics(topics);
@@ -547,10 +555,20 @@ fn main() -> io::Result<()> {
         app.damaged = loaded.damaged;
     }
 
-    let mut writer = store.as_ref().map(|s| {
-        let (writer_id, writer_name) = resolve_tui_writer(s, &args);
-        session_writer::SessionWriter::open(s, &app.session, created_here, &writer_id, &writer_name)
-    });
+    let mut writer =
+        store
+            .as_ref()
+            .zip(tui_writer.as_ref())
+            .map(|(s, (writer_id, writer_name, kind))| {
+                session_writer::SessionWriter::open(
+                    s,
+                    &app.session,
+                    created_here,
+                    writer_id,
+                    writer_name,
+                    *kind,
+                )
+            });
     if let Some(w) = writer.as_mut() {
         // Every cassette on screen is a store cassette — the ones a template
         // seeded and the single empty one a bare launch starts with alike.
@@ -716,8 +734,12 @@ fn finish_session(app: &App, session: Option<&str>) {
 /// resolved this differently would attribute the same session to a
 /// different writer than the CLI does.
 ///
-/// Returns `(writer id, display name)`.
-fn resolve_tui_writer(store: &store::Store, args: &cli::Args) -> (String, String) {
+/// Returns `(writer id, display name, kind)` — the kind because each flush
+/// makes this writer a cassette's `last_writer`, which the turn status reads.
+fn resolve_tui_writer(
+    store: &store::Store,
+    args: &cli::Args,
+) -> (String, String, store::writers::Kind) {
     let (name, source) = resolve_writer_name(args.writer.as_deref())
         .unwrap_or_else(|msg| exit_usage(&msg, args.json));
     let resolved = match source {
@@ -729,7 +751,7 @@ fn resolve_tui_writer(store: &store::Store, args: &cli::Args) -> (String, String
             .map_err(queue::require_error_to_queue_error),
     };
     match resolved {
-        Ok((id, _kind)) => (id, name),
+        Ok((id, kind)) => (id, name, kind),
         Err(e) => exit_queue_err(&e, args.json),
     }
 }
@@ -764,6 +786,7 @@ fn resolve_session(
     store: &store::Store,
     args: &cli::Args,
     daily_name: Option<&str>,
+    own_writer: &str,
 ) -> (String, bool, Option<LoadedSession>) {
     let by_alias = |alias: &str| -> Option<String> {
         store
@@ -775,7 +798,7 @@ fn resolve_session(
             .map(|(id, _)| id)
     };
     let open = |id: String| -> (String, bool, Option<LoadedSession>) {
-        let (cassettes, damaged) = load_session_cassettes(store, &id);
+        let (cassettes, damaged) = load_session_cassettes(store, &id, own_writer);
         (id, false, Some(LoadedSession { cassettes, damaged }))
     };
 
@@ -870,6 +893,7 @@ fn create_session(store: &store::Store, args: &cli::Args, alias: Option<&str>) -
 fn load_session_cassettes(
     store: &store::Store,
     session: &str,
+    own_writer: &str,
 ) -> (Vec<cassette::Cassette>, Vec<(String, String)>) {
     let scan = store
         .scan_session(session)
@@ -885,6 +909,7 @@ fn load_session_cassettes(
     // registry read failure degrades to showing raw writer ids rather than
     // failing the load.
     let writers = store.writers().unwrap_or_default();
+    let now = chrono::Utc::now();
     let cassettes: Vec<cassette::Cassette> = scan
         .cassettes
         .into_iter()
@@ -893,16 +918,10 @@ fn load_session_cassettes(
             let mut loaded = cassette::Cassette::from_sides(
                 side_a.trim().to_string(),
                 side_b.trim().to_string(),
-                c.meta.topic,
+                c.meta.topic.clone(),
             );
+            session_writer::annotate_from_store(&mut loaded, &c.meta, &writers, own_writer, now);
             loaded.id = c.meta.id;
-            loaded.priority = c.meta.priority;
-            loaded.closed = c.meta.status == store::meta::Status::Closed;
-            loaded.locked_by = c
-                .meta
-                .locked_by
-                .as_deref()
-                .map(|id| store::writers::display_name(&writers, id));
             loaded
         })
         .collect();
@@ -1066,6 +1085,9 @@ fn run(
         }
 
         if last_tick.elapsed() >= tick_rate {
+            // Before anything this tick reads it, and before the next draw:
+            // a claim lapses on the first tick past its `claimed_until`.
+            app.now = chrono::Utc::now().timestamp();
             app.tick_timer();
             app.tick_status();
             app.tick_idle();
@@ -1432,6 +1454,8 @@ fn sync_external_writes(
     // Resolved once per tick, not once per changed cassette; a registry read
     // failure degrades to raw writer ids rather than skipping the merge.
     let writers = store.writers().unwrap_or_default();
+    let own_writer = writer.map_or("", session_writer::SessionWriter::writer_id);
+    let now = chrono::Utc::now();
     for stored in &scan.cassettes {
         if !changed_ids.contains(&stored.meta.id) {
             continue;
@@ -1456,13 +1480,7 @@ fn sync_external_writes(
             side_b.trim().to_string(),
             stored.meta.topic.clone(),
         );
-        incoming.locked_by = stored
-            .meta
-            .locked_by
-            .as_deref()
-            .map(|id| store::writers::display_name(&writers, id));
-        incoming.priority = stored.meta.priority;
-        incoming.closed = stored.meta.status == store::meta::Status::Closed;
+        session_writer::annotate_from_store(&mut incoming, &stored.meta, &writers, own_writer, now);
         app.merge_external(&stored.meta.id, incoming);
     }
 }
@@ -2140,6 +2158,7 @@ mod tests {
             false,
             crate::store::ids::TEST_WRITER,
             "w",
+            store::writers::Kind::Human,
         );
 
         follow_focus(&mut app, Some(&mut w));
@@ -2173,6 +2192,7 @@ mod tests {
             false,
             crate::store::ids::TEST_WRITER,
             "w",
+            store::writers::Kind::Human,
         );
 
         // Take the lock first, so the held-lock fast path is the one under
@@ -2232,6 +2252,7 @@ mod tests {
             false,
             crate::store::ids::TEST_WRITER,
             "w",
+            store::writers::Kind::Human,
         );
         try_acquire(&mut app, &mut w, 0);
 
@@ -2280,6 +2301,7 @@ mod tests {
             false,
             crate::store::ids::TEST_WRITER,
             "w",
+            store::writers::Kind::Human,
         );
         app.read_only = app::ReadOnly::Closed;
 
@@ -2522,6 +2544,7 @@ mod tests {
             true,
             crate::store::ids::TEST_WRITER,
             "w",
+            store::writers::Kind::Human,
         );
         writer.acquire(&mut app, 0).expect("acquire 0");
         app.focus_idx = 0;
@@ -2656,6 +2679,7 @@ mod tests {
             false,
             crate::store::ids::TEST_WRITER,
             "w",
+            store::writers::Kind::Human,
         );
         writer.acquire(&mut app, 0).expect("acquire");
         assert!(!app.read_only.is_read_only());
@@ -2693,6 +2717,7 @@ mod tests {
             false,
             crate::store::ids::TEST_WRITER,
             "w",
+            store::writers::Kind::Human,
         );
         app.read_only = app::ReadOnly::Busy {
             holder: Some("stale-holder".to_string()),
@@ -2745,6 +2770,7 @@ mod tests {
             false,
             crate::store::ids::TEST_WRITER,
             "w",
+            store::writers::Kind::Human,
         );
         try_acquire(&mut app, &mut writer, 0);
 
@@ -2779,7 +2805,8 @@ mod tests {
             resume: Some(Some(id.clone())),
             ..Default::default()
         };
-        let (session, created_here, loaded) = resolve_session(&store, &args, None);
+        let (session, created_here, loaded) =
+            resolve_session(&store, &args, None, store::ids::TEST_WRITER);
 
         assert_eq!(session, id, "the printed id opens the session it names");
         assert!(
@@ -2803,7 +2830,7 @@ mod tests {
             resume: Some(Some("monday".to_string())),
             ..Default::default()
         };
-        let (session, _, _) = resolve_session(&store, &args, None);
+        let (session, _, _) = resolve_session(&store, &args, None, store::ids::TEST_WRITER);
         assert_eq!(session, aliased);
     }
 

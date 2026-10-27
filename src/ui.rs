@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{App, Mode, ReadOnly, GUTTER_WIDTH, MINIMIZED_ROWS};
 use crate::cassette::{char_width, pos_to_row_col, wrap_spans, Cassette, Side};
+use crate::status::StatusId;
 use crate::theme::Theme;
 
 // All colors come from the active `Theme` (side accents, unfocused cassette
@@ -57,6 +58,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
 
     for (chunk_idx, cassette_idx) in (first..first + n).enumerate() {
         let cassette = &app.cassettes[cassette_idx];
+        let status = app.turn_status(cassette_idx);
         if cassette_idx == app.focus_idx {
             render_cassette_focused(
                 frame,
@@ -65,10 +67,11 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
                 cw,
                 app.visible_lines,
                 app.mode,
+                status,
                 theme,
             );
         } else {
-            render_cassette_min(frame, chunks[chunk_idx], cassette, cw, theme);
+            render_cassette_min(frame, chunks[chunk_idx], cassette, cw, status, theme);
         }
     }
 
@@ -417,14 +420,25 @@ fn sticky_lock_label_text(holder: &str) -> String {
     format!("╡ locked by {holder} ╞")
 }
 
+/// A status glyph's piece: padded with spaces but deliberately unframed —
+/// the `╡ … ╞` frames are for words, and a single glyph inside one would read
+/// as a label rather than a mark.
+fn status_glyph_text(glyph: &str) -> String {
+    format!(" {glyph} ")
+}
+
 /// A cassette's separator content, in display order: the side tag, then the
-/// topic label if set, then the sticky-lock label if set. No fill characters
-/// (those depend on the terminal width, which this doesn't take) — shared by
-/// `render_separator` (styles and joins these with `ch` fill) and
-/// `separator_text` (just concatenates them, for tests), so the two can never
-/// disagree about what the separator says.
-fn separator_pieces(cassette: &Cassette, short: bool) -> Vec<String> {
+/// status glyph if any (always piece 1 when present — `render_separator`
+/// styles it by that position), then the topic label if set, then the
+/// sticky-lock label if set. No fill characters (those depend on the terminal
+/// width, which this doesn't take) — shared by `render_separator` (styles and
+/// joins these with `ch` fill) and `separator_text` (just concatenates them,
+/// for tests), so the two can never disagree about what the separator says.
+fn separator_pieces(cassette: &Cassette, short: bool, glyph: Option<&str>) -> Vec<String> {
     let mut pieces = vec![side_tag_text(cassette.side, short).to_string()];
+    if let Some(glyph) = glyph {
+        pieces.push(status_glyph_text(glyph));
+    }
     if let Some(topic) = &cassette.topic {
         pieces.push(topic_label_text(topic));
     }
@@ -442,7 +456,18 @@ fn separator_pieces(cassette: &Cassette, short: bool) -> Vec<String> {
 /// same reason `queue::write::write_body` is.
 #[cfg(test)]
 fn separator_text(app: &App, idx: usize) -> String {
-    separator_pieces(&app.cassettes[idx], false).concat()
+    let glyph = app.turn_status(idx).map(StatusId::default_glyph);
+    separator_pieces(&app.cassettes[idx], false, glyph).concat()
+}
+
+/// The theme color a status glyph is drawn in. `ui.rs` only maps a status to
+/// its look; working out which status applies is `status.rs`'s job.
+fn status_color(status: StatusId, theme: &Theme) -> Color {
+    match status {
+        StatusId::Human => theme.status_human,
+        StatusId::Agent => theme.status_agent,
+        StatusId::Busy => theme.status_busy,
+    }
 }
 
 /// A cassette's top separator row: the active side's tag is woven into it
@@ -455,6 +480,7 @@ fn render_separator(
     ch: char,
     cassette: &Cassette,
     short: bool,
+    status: Option<StatusId>,
     theme: &Theme,
 ) {
     let sep_area = Rect { height: 1, ..area };
@@ -466,16 +492,23 @@ fn render_separator(
     let tag_style = Style::new().fg(accent);
     let label_style = Style::new().add_modifier(Modifier::BOLD);
 
-    let pieces = separator_pieces(cassette, short);
-    let mut used = 2 + pieces[0].chars().count();
+    let pieces = separator_pieces(cassette, short, status.map(StatusId::default_glyph));
+    // Cells, not chars: a topic in CJK, or a glyph that is two cells wide,
+    // would otherwise overrun the row by the difference.
+    let cells = |s: &str| -> usize { s.chars().map(char_width).sum() };
+    let mut used = 2 + cells(&pieces[0]);
     let mut spans = vec![
         Span::raw(ch.to_string().repeat(2)),
         Span::styled(pieces[0].clone(), tag_style),
     ];
-    for label in &pieces[1..] {
-        used += 1 + label.chars().count();
+    for (i, label) in pieces.iter().enumerate().skip(1) {
+        used += 1 + cells(label);
+        let style = match status {
+            Some(status) if i == 1 => Style::new().fg(status_color(status, theme)),
+            _ => label_style,
+        };
         spans.push(Span::raw(ch.to_string()));
-        spans.push(Span::styled(label.clone(), label_style));
+        spans.push(Span::styled(label.clone(), style));
     }
     spans.push(Span::raw(ch.to_string().repeat(total.saturating_sub(used))));
     frame.render_widget(Paragraph::new(Line::from(spans)), sep_area);
@@ -554,9 +587,10 @@ fn render_cassette_focused(
     cw: usize,
     visible_lines: usize,
     mode: Mode,
+    status: Option<StatusId>,
     theme: &Theme,
 ) {
-    render_separator(frame, area, '═', cassette, false, theme);
+    render_separator(frame, area, '═', cassette, false, status, theme);
 
     if area.height <= 1 {
         return;
@@ -664,9 +698,10 @@ fn render_cassette_min(
     area: Rect,
     cassette: &Cassette,
     cw: usize,
+    status: Option<StatusId>,
     theme: &Theme,
 ) {
-    render_separator(frame, area, '─', cassette, true, theme);
+    render_separator(frame, area, '─', cassette, true, status, theme);
 
     if area.height <= 1 {
         return;
@@ -1496,6 +1531,84 @@ mod tests {
 
         assert_ne!(busy, sticky);
         assert!(sticky.contains("joseph"), "{sticky}");
+    }
+
+    /// Two cassettes in a session, focus on the first, the second written
+    /// with words so the blank rule does not decide its status.
+    fn turn_app() -> App {
+        let mut app = App::new(
+            None,
+            None,
+            Some(5),
+            "01JTESTSESSN00000000000000".to_string(),
+        );
+        app.resize(80, 24);
+        app.add_cassette();
+        app.cassettes[1] = Cassette::from_sides("words".to_string(), String::new(), None);
+        app.cassettes[1].topic = Some("topic".to_string());
+        app.focus_idx = 0;
+        app
+    }
+
+    #[test]
+    fn separator_shows_status_glyph_after_side_tag() {
+        // A human wrote last, so it is the agent's move: ⚙, placed between
+        // the side tag and the topic label.
+        let mut app = turn_app();
+        app.cassettes[1].last_writer_human = Some(true);
+        let text = crate::ui::separator_text(&app, 1);
+        assert!(text.contains("╡ SIDE A ╞ ⚙ ╡ topic ╞"), "{text}");
+
+        // An agent wrote last: the human's move.
+        app.cassettes[1].last_writer_human = Some(false);
+        let text = crate::ui::separator_text(&app, 1);
+        assert!(text.contains("╡ SIDE A ╞ ✎ ╡ topic ╞"), "{text}");
+
+        // The focused cassette is held, so busy.
+        let text = crate::ui::separator_text(&app, 0);
+        assert!(text.contains("╡ SIDE A ╞ ● "), "{text}");
+
+        // And the rendered row carries it, on a minimized separator too,
+        // with the fill still reaching the right edge.
+        app.cassettes[1].last_writer_human = Some(true);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| render(f, &app, &Theme::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let row = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .find(|r| r.contains("╡ A ╞"))
+            .expect("a minimized separator");
+        assert!(row.contains("╡ A ╞─ ⚙ ─╡ topic ╞"), "{row}");
+        assert!(row.ends_with('─'), "fill reaches the edge: {row}");
+    }
+
+    #[test]
+    fn closed_separator_has_no_glyph() {
+        let mut app = turn_app();
+        app.cassettes[1].closed = true;
+        let text = crate::ui::separator_text(&app, 1);
+        for glyph in ["✎", "⚙", "●"] {
+            assert!(!text.contains(glyph), "{text}");
+        }
+    }
+
+    #[test]
+    fn no_glyph_in_offline_mode() {
+        // `-o` has no session and no other writer: nothing to show.
+        let mut app = turn_app();
+        app.session = String::new();
+        for idx in 0..2 {
+            let text = crate::ui::separator_text(&app, idx);
+            for glyph in ["✎", "⚙", "●"] {
+                assert!(!text.contains(glyph), "{text}");
+            }
+        }
     }
 
     /// With the cursor at the start of a long text the scroll clamp pins the

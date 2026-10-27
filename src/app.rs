@@ -1,6 +1,7 @@
 use std::time::SystemTime;
 
 use crate::cassette::{Cassette, Side};
+use crate::status::{StatusContext, StatusId, StatusSet};
 
 /// Default number of text lines shown per cassette (excluding the separator row).
 pub const VISIBLE_LINES: usize = 5;
@@ -111,6 +112,12 @@ pub struct App {
     /// `SessionWriter::acquire`'s outcome and from the focused cassette's
     /// own `closed` flag.
     pub read_only: ReadOnly,
+    /// Wall-clock unix seconds, for claim expiry in `turn_status`. Plain data
+    /// set by `main.rs` — right after `App::new` and on every 1 s tick before
+    /// drawing — because reading the clock here would be I/O in a type that
+    /// has none. `0` until first set, which can only make a claim look live
+    /// for the instant before startup sets it.
+    pub now: i64,
     /// One-shot request for a terminal bell, consumed by `main.rs`.
     pub bell: bool,
     /// One-shot request to suspend the process (Ctrl+Z), consumed by `main.rs`.
@@ -157,6 +164,7 @@ impl App {
             idle_secs: 0,
             session,
             read_only: ReadOnly::No,
+            now: 0,
             bell: false,
             suspend: false,
             status_ticks: None,
@@ -179,6 +187,27 @@ impl App {
     fn clear_status(&mut self) {
         self.status_msg = None;
         self.status_ticks = None;
+    }
+
+    /// The turn status of cassette `idx` (`status.rs`), or `None` for a
+    /// closed cassette, an index past the end, or `-o` mode.
+    ///
+    /// `-o` has no session: nothing persists, so no other writer can ever
+    /// share a cassette and "whose move is it" has no answer worth a glyph.
+    ///
+    /// Held means the focused cassette whenever it is not closed. That covers
+    /// both ways focus can be held: this process holds the lock, or it is
+    /// read-only `Busy` because another writer does — busy either way.
+    pub fn turn_status(&self, idx: usize) -> Option<StatusId> {
+        if self.session.is_empty() {
+            return None;
+        }
+        let c = self.cassettes.get(idx)?;
+        let cx = StatusContext {
+            held: idx == self.focus_idx && self.read_only != ReadOnly::Closed,
+            now: self.now,
+        };
+        StatusSet::Turn.resolve(c, &cx)
     }
 
     /// True when nothing has been written on any side of any cassette.
@@ -403,9 +432,12 @@ impl App {
                     || self.cassettes[idx].closed != incoming.closed;
                 self.cassettes[idx].priority = incoming.priority;
                 self.cassettes[idx].closed = incoming.closed;
-                if self.cassettes[idx].locked_by != incoming.locked_by {
-                    self.cassettes[idx].locked_by = incoming.locked_by;
-                }
+                self.cassettes[idx].locked_by = incoming.locked_by;
+                // A claim landing or lapsing (`queue claim`/`release`) is
+                // frontmatter only, like a sticky lock, and so is the last
+                // writer's kind; both feed the turn status.
+                self.cassettes[idx].last_writer_human = incoming.last_writer_human;
+                self.cassettes[idx].claimed_until = incoming.claimed_until;
                 if requeued {
                     self.sort_queue();
                 }
@@ -456,6 +488,8 @@ impl App {
             merged.priority = incoming.priority;
             merged.closed = incoming.closed;
             merged.locked_by = incoming.locked_by;
+            merged.last_writer_human = incoming.last_writer_human;
+            merged.claimed_until = incoming.claimed_until;
             self.cassettes[idx] = merged;
             self.sort_queue();
         } else {
@@ -1410,6 +1444,89 @@ mod tests {
             "",
             "and the undo stack must survive, exactly as the plain no-op case does"
         );
+    }
+
+    #[test]
+    fn merge_external_carries_turn_fields_through_a_full_rebuild() {
+        // Same hazard as `locked_by`: the rebuild constructs a fresh
+        // `Cassette` from text, so the turn status's inputs revert to `None`
+        // — "unknown writer, unclaimed" — unless the branch copies them.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
+
+        let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        incoming.last_writer_human = Some(true);
+        incoming.claimed_until = Some(1_800_000_000);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
+
+        assert_eq!(app.cassettes[0].last_writer_human, Some(true));
+        assert_eq!(app.cassettes[0].claimed_until, Some(1_800_000_000));
+    }
+
+    #[test]
+    fn merge_external_updates_turn_fields_in_the_no_op_short_circuit() {
+        // `queue claim` changes only frontmatter, exactly like `queue lock`:
+        // the prose is untouched, so the short circuit fires — and must not
+        // swallow the claim (or a changed last writer) along with the
+        // rebuild the text didn't need.
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.cassettes[0].id = "cas_aaa00000000000000000000000".to_string();
+        app.modify_focused(|c| {
+            c.snapshot();
+            c.insert_str("hello world");
+            c.move_word_back();
+        });
+        app.clear_dirty(0);
+        let cursor_before = app.cassettes[0].cursor_pos();
+
+        let mut incoming = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        incoming.last_writer_human = Some(false);
+        incoming.claimed_until = Some(1_800_000_000);
+        app.merge_external("cas_aaa00000000000000000000000", incoming);
+
+        assert_eq!(app.cassettes[0].last_writer_human, Some(false));
+        assert_eq!(app.cassettes[0].claimed_until, Some(1_800_000_000));
+        assert_eq!(
+            app.cassettes[0].cursor_pos(),
+            cursor_before,
+            "text/topic were unchanged, so the cursor must not move"
+        );
+
+        // And a released claim clears in place too.
+        let mut released = Cassette::from_sides("hello world".to_string(), String::new(), None);
+        released.last_writer_human = Some(false);
+        app.merge_external("cas_aaa00000000000000000000000", released);
+        assert_eq!(app.cassettes[0].claimed_until, None);
+    }
+
+    #[test]
+    fn turn_status_is_none_without_a_session() {
+        // `-o` persists nothing, so no other writer can share the cassette
+        // and "whose move" has no answer worth a glyph.
+        let app = App::new(None, None, None, String::new());
+        assert_eq!(app.turn_status(0), None);
+    }
+
+    #[test]
+    fn focused_cassette_is_busy() {
+        let mut app = App::new(None, None, None, "01JTESTSESSN00000000000000".to_string());
+        app.add_cassette();
+        app.focus_idx = 0;
+        assert_eq!(app.turn_status(0), Some(StatusId::Busy), "we hold it");
+        assert_eq!(
+            app.turn_status(1),
+            Some(StatusId::Human),
+            "an unfocused blank cassette waits for the human"
+        );
+
+        // Read-only because another writer holds the lock is still held.
+        app.read_only = ReadOnly::Busy { holder: None };
+        assert_eq!(app.turn_status(0), Some(StatusId::Busy));
+
+        // A closed focused cassette has no status at all.
+        app.cassettes[0].closed = true;
+        app.read_only = ReadOnly::Closed;
+        assert_eq!(app.turn_status(0), None);
     }
 
     #[test]

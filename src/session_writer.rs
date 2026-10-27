@@ -29,10 +29,57 @@
 use std::io;
 
 use crate::app::App;
+use crate::cassette::Cassette;
 use crate::output;
 use crate::store::lock::{Attribution, LockError, LockGuard};
 use crate::store::meta::{self, CassetteMeta, Status};
+use crate::store::writers::{self, Kind, Writers};
 use crate::store::{ids, priority, Store};
+
+/// Copy everything the TUI shows about a cassette's *metadata* from its
+/// stored frontmatter onto the in-memory `Cassette`: the sticky lock (as a
+/// display name), priority, closed, the last writer's kind, and a live claim
+/// by anyone other than `own_writer`.
+///
+/// One function because there are three places a `Cassette` is built from
+/// stored metadata — `refresh_from_disk` here, and `main.rs`'s
+/// `load_session_cassettes` and `sync_external_writes` — and each used to set
+/// these fields inline. A field added to one site and forgotten at another
+/// is exactly the bug `merge_external`'s rebuild once had with `priority`;
+/// with one helper there is nowhere to forget it. It touches no text, which
+/// is also what lets the no-op short circuits apply it in place.
+///
+/// Writer ids resolve through `writers`; an id the registry doesn't know
+/// shows as the raw id (`locked_by`) or an unknown kind (`last_writer_human:
+/// None`, which the turn status reads as the human's move). `own_writer`'s
+/// claim is dropped because "claimed" is shown as busy — someone else is on
+/// it — and the TUI's own writer is not someone else. Claims are agent-only,
+/// so that only matters for a TUI launched with an agent's `--writer`, but
+/// the guard costs nothing. `now` decides liveness; an expired claim is no
+/// claim, the same reading `meta::claim_live` gives the queue commands.
+pub(crate) fn annotate_from_store(
+    c: &mut Cassette,
+    meta: &CassetteMeta,
+    writers: &Writers,
+    own_writer: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    c.locked_by = meta
+        .locked_by
+        .as_deref()
+        .map(|id| writers::display_name(writers, id));
+    c.priority = meta.priority;
+    c.closed = meta.status == Status::Closed;
+    c.last_writer_human = writers
+        .writers
+        .get(&meta.last_writer)
+        .map(|w| w.kind == Kind::Human);
+    c.claimed_until = meta::claim_live(meta, now)
+        .filter(|by| *by != own_writer)
+        .and(meta.claimed_until.as_deref())
+        .and_then(|until| chrono::DateTime::parse_from_rfc3339(until).ok())
+        .map(|until| until.timestamp());
+}
 
 /// Writes an `App`'s cassettes into one store session, holding the focused
 /// cassette's lock for as long as it stays focused.
@@ -47,6 +94,11 @@ pub struct SessionWriter<'a> {
     /// contender sees stamped in the lock anchor.
     writer: String,
     name: String,
+    /// Whether `writer` is registered as a `human`. Each flush makes it the
+    /// cassette's `last_writer`, and the turn status needs that writer's
+    /// kind; knowing it here lets `flush_held` set it in memory instead of
+    /// re-reading `writers.toml` after every autosave.
+    writer_is_human: bool,
     /// The guard currently held, if any. `None` when nothing is held —
     /// before the first `acquire`, after `finish`, or when acquiring failed
     /// and the session is read-only.
@@ -72,12 +124,15 @@ impl<'a> SessionWriter<'a> {
     /// cassette. Resolving them here instead would either re-implement that
     /// precedence — dropping `--writer` and its rule that an explicitly
     /// named writer must already be registered — or make `open` fallible.
+    /// `kind` is that same resolution's registered kind, for the reason
+    /// `writer_is_human` gives.
     pub fn open(
         store: &'a Store,
         session: &str,
         created_here: bool,
         writer: &str,
         name: &str,
+        kind: Kind,
     ) -> Self {
         let (writer, name) = (writer.to_string(), name.to_string());
         SessionWriter {
@@ -86,6 +141,7 @@ impl<'a> SessionWriter<'a> {
             created_here,
             writer,
             name,
+            writer_is_human: kind == Kind::Human,
             guard: None,
         }
     }
@@ -93,6 +149,12 @@ impl<'a> SessionWriter<'a> {
     /// The store session being written.
     pub fn session(&self) -> &str {
         &self.session
+    }
+
+    /// The registry id this writer attributes its writes to. `main.rs`'s
+    /// live sync needs it to tell the TUI's own claim from anyone else's.
+    pub fn writer_id(&self) -> &str {
+        &self.writer
     }
 
     /// The id of the cassette whose lock is currently held, if any.
@@ -148,6 +210,10 @@ impl<'a> SessionWriter<'a> {
         // The minted priority replaces the `i64::MAX` "not yet minted"
         // sentinel, so this cassette now sorts where the store says.
         app.cassettes[idx].priority = meta.priority;
+        // We are its creator and so its `last_writer`. Blank, it shows as the
+        // human's move whatever this says; recorded anyway so the field is
+        // never a lie about the file.
+        app.cassettes[idx].last_writer_human = Some(self.writer_is_human);
         app.clear_dirty(idx);
         Ok(())
     }
@@ -246,18 +312,12 @@ impl<'a> SessionWriter<'a> {
         let (disk_a, disk_b) = crate::queue::json::split_sides(&stored.body);
         let (disk_a, disk_b) = (disk_a.trim(), disk_b.trim());
         // Resolved once here rather than on every render: `Cassette` carries
-        // no store knowledge of its own, so the id-to-name lookup (the same
-        // fallback-to-raw-id `store::writers::display_name` gives
-        // `queue::write::write_permitted`'s sticky-lock message) happens the
-        // one time this cassette's data is read from disk.
-        let locked_by = stored
-            .meta
-            .locked_by
-            .as_deref()
-            .map(|id| match self.store.writers() {
-                Ok(w) => crate::store::writers::display_name(&w, id),
-                Err(_) => id.to_string(),
-            });
+        // no store knowledge of its own, so the id-to-name and id-to-kind
+        // lookups happen the one time this cassette's data is read from
+        // disk. A registry read failure degrades to raw ids and an unknown
+        // kind rather than failing the acquire.
+        let writers = self.store.writers().unwrap_or_default();
+        let now = chrono::Utc::now();
         if disk_a == c.side_a_text().trim()
             && disk_b == c.side_b_text().trim()
             && stored.meta.topic == c.topic
@@ -265,25 +325,26 @@ impl<'a> SessionWriter<'a> {
             // Text and topic are unchanged, so the cursor/undo short-circuit
             // still applies — but a sticky lock is metadata, not prose, and
             // can change (`queue lock`/`unlock`) with nothing else moving.
-            // Priority and status are the same kind of thing: `queue move`
-            // and `queue close` move them with the prose untouched.
-            if app.cassettes[idx].locked_by != locked_by {
-                app.cassettes[idx].locked_by = locked_by;
-            }
-            app.cassettes[idx].priority = stored.meta.priority;
-            app.cassettes[idx].closed = stored.meta.status == Status::Closed;
+            // Priority, status, a claim and the last writer's kind are the
+            // same kind of thing (`queue move`/`close`/`claim`), so they are
+            // all applied in place: `annotate_from_store` touches no text.
+            annotate_from_store(
+                &mut app.cassettes[idx],
+                &stored.meta,
+                &writers,
+                &self.writer,
+                now,
+            );
             return Ok(());
         }
         let id = c.id.clone();
-        let mut fresh = crate::cassette::Cassette::from_sides(
+        let mut fresh = Cassette::from_sides(
             disk_a.to_string(),
             disk_b.to_string(),
-            stored.meta.topic,
+            stored.meta.topic.clone(),
         );
         fresh.id = id;
-        fresh.locked_by = locked_by;
-        fresh.priority = stored.meta.priority;
-        fresh.closed = stored.meta.status == Status::Closed;
+        annotate_from_store(&mut fresh, &stored.meta, &writers, &self.writer, now);
         app.cassettes[idx] = fresh;
         app.clear_dirty(idx);
         Ok(())
@@ -343,6 +404,9 @@ impl<'a> SessionWriter<'a> {
         meta.last_writer = self.writer.clone();
         meta.updated_at = meta::now_utc();
         guard.write(&meta, &output::cassette_body(c))?;
+        // The turn just ended was ours: set its kind in memory rather than
+        // re-reading, since the file now says exactly what we wrote.
+        app.cassettes[idx].last_writer_human = Some(self.writer_is_human);
         app.clear_dirty(idx);
         Ok(())
     }
@@ -442,7 +506,6 @@ impl<'a> SessionWriter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cassette::Cassette;
     use crate::store::meta::{CassetteMeta, Status};
     use std::io::Write;
 
@@ -489,8 +552,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.finish(&mut app).expect("finish");
         assert!(
             store.list_sessions().expect("list").sessions.is_empty(),
@@ -504,8 +573,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w =
-            SessionWriter::open(&store, &session, false, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            false,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.finish(&mut app).expect("finish");
         assert_eq!(store.list_sessions().expect("list").sessions.len(), 1);
     }
@@ -515,8 +590,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("words that must survive quit"));
 
@@ -547,8 +628,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("text"));
         w.flush_focused(&mut app).expect("flush");
@@ -564,6 +651,142 @@ mod tests {
     }
 
     #[test]
+    fn flush_sets_last_writer_human_from_tui_writer_kind() {
+        // After our own flush the last writer *is* us, so the turn status
+        // learns our kind in memory — no re-read, and no waiting for a sync
+        // tick that skips the held cassette anyway.
+        for (kind, expected) in [
+            (crate::store::writers::Kind::Human, Some(true)),
+            (crate::store::writers::Kind::Agent, Some(false)),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let store = Store::new(dir.path().to_path_buf());
+            let (mut app, session) = fixture(&store, 1);
+            let mut w = SessionWriter::open(
+                &store,
+                &session,
+                true,
+                crate::store::ids::TEST_WRITER,
+                "w",
+                kind,
+            );
+            w.acquire(&mut app, 0).expect("acquire");
+            assert_eq!(
+                app.cassettes[0].last_writer_human, None,
+                "nothing flushed yet"
+            );
+            app.modify_focused(|c| c.insert_str("text"));
+            w.flush_focused(&mut app).expect("flush");
+            assert_eq!(app.cassettes[0].last_writer_human, expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn autosave_preserves_a_claim() {
+        // Claim fields belong to the queue commands. An agent may claim the
+        // cassette the human is typing in (a soft mark — it never blocks a
+        // human), and the next autosave must not wipe it from stale memory.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 1);
+        let bot = crate::store::ids::new(crate::store::ids::IdKind::Writer);
+        let until = "2999-01-01T00:00:00Z".to_string();
+        {
+            let guard = store
+                .lock(
+                    &session,
+                    &app.cassettes[0].id,
+                    &Attribution::for_now(&bot, "bot"),
+                )
+                .expect("seed lock");
+            let mut stored = guard.read().expect("read");
+            stored.meta.claimed_by = Some(bot.clone());
+            stored.meta.claimed_until = Some(until.clone());
+            guard.write(&stored.meta, &stored.body).expect("seed claim");
+        }
+
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            crate::store::writers::Kind::Human,
+        );
+        w.acquire(&mut app, 0).expect("acquire");
+        app.modify_focused(|c| c.insert_str("typed over a claim"));
+        w.flush_focused(&mut app).expect("flush");
+
+        let scan = store.scan_session(&session).expect("scan");
+        assert_eq!(
+            scan.cassettes[0].meta.claimed_by.as_deref(),
+            Some(bot.as_str())
+        );
+        assert_eq!(
+            scan.cassettes[0].meta.claimed_until.as_deref(),
+            Some(until.as_str())
+        );
+        assert!(scan.cassettes[0].body.contains("typed over a claim"));
+    }
+
+    #[test]
+    fn annotate_drops_own_claim() {
+        use crate::store::writers::{Kind, Writer, Writers};
+        let own = crate::store::ids::new(crate::store::ids::IdKind::Writer);
+        let bot = crate::store::ids::new(crate::store::ids::IdKind::Writer);
+        let mut writers = Writers::default();
+        for (id, name, kind) in [(&own, "joseph", Kind::Human), (&bot, "bot", Kind::Agent)] {
+            writers.writers.insert(
+                id.clone(),
+                Writer {
+                    name: name.to_string(),
+                    kind,
+                    created: meta::now_utc(),
+                },
+            );
+        }
+        let now = chrono::Utc::now();
+        let until = now + chrono::Duration::seconds(120);
+        let meta_claimed_by = |claimant: &str| CassetteMeta {
+            id: crate::store::ids::new(crate::store::ids::IdKind::Cassette),
+            topic: None,
+            priority: 10,
+            status: Status::Open,
+            locked_by: Some(own.clone()),
+            claimed_by: Some(claimant.to_string()),
+            claimed_until: Some(until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            created_by: own.clone(),
+            last_writer: own.clone(),
+            updated_at: meta::now_utc(),
+        };
+
+        // Our own claim is not "someone else is on it".
+        let mut c = Cassette::new();
+        annotate_from_store(&mut c, &meta_claimed_by(&own), &writers, &own, now);
+        assert_eq!(c.claimed_until, None);
+
+        // Anyone else's live claim is carried, as unix seconds.
+        let mut c = Cassette::new();
+        annotate_from_store(&mut c, &meta_claimed_by(&bot), &writers, &own, now);
+        assert_eq!(c.claimed_until, Some(until.timestamp()));
+        // And the rest of the store-derived fields land alongside it.
+        assert_eq!(c.last_writer_human, Some(true));
+        assert_eq!(c.locked_by.as_deref(), Some("joseph"));
+        assert_eq!(c.priority, 10);
+        assert!(!c.closed);
+
+        // An expired claim, or a last writer the registry doesn't know, is
+        // no claim and an unknown kind.
+        let mut stale = meta_claimed_by(&bot);
+        stale.claimed_until = Some("2000-01-01T00:00:00Z".to_string());
+        stale.last_writer = crate::store::ids::TEST_WRITER.to_string();
+        let mut c = Cassette::new();
+        annotate_from_store(&mut c, &stale, &writers, &own, now);
+        assert_eq!(c.claimed_until, None);
+        assert_eq!(c.last_writer_human, None);
+    }
+
+    #[test]
     fn moving_focus_flushes_the_cassette_being_left() {
         // Text typed into cassette 0 must reach disk when focus moves to 1,
         // not wait for the next 30-second autosave. `acquire` *is* the
@@ -574,8 +797,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 2);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.acquire(&mut app, 0).expect("acquire 0");
 
         app.focus_idx = 0;
@@ -702,8 +931,14 @@ mod tests {
         let root = dir.path().join("store");
         let store = Store::new(root.clone());
         let (mut app, session) = fixture(&store, 2);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.acquire(&mut app, 0)
             .expect("acquire 0: the TUI focuses cassette 0");
         let held_id = app.cassettes[0].id.clone();
@@ -805,8 +1040,14 @@ mod tests {
             .expect("spawn queue lock");
         assert_eq!(lock.status.code(), Some(0), "{lock:?}");
 
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.acquire(&mut app, 0).expect("acquire 0");
 
         assert_eq!(
@@ -910,8 +1151,14 @@ mod tests {
         let err = String::from_utf8_lossy(&loser_out.stderr);
         assert!(err.contains("is open by"), "{err}");
 
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         crate::try_acquire(&mut app, &mut w, 0);
         assert!(
             app.read_only.is_read_only(),
@@ -993,8 +1240,14 @@ mod tests {
         let root = dir.path().join("store");
         let store = Store::new(root.clone());
         let (mut app, session) = fixture(&store, 2);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
 
         // The human writes on cassette 0 …
         w.acquire(&mut app, 0).expect("acquire 0");
@@ -1064,8 +1317,14 @@ mod tests {
         let root = dir.path().join("store");
         let store = Store::new(root.clone());
         let (mut app, session) = fixture(&store, 2);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
 
         w.acquire(&mut app, 0).expect("acquire 0");
         app.focus_idx = 0;
@@ -1118,8 +1377,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 2);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.acquire(&mut app, 0).expect("acquire 0");
         app.focus_idx = 0;
         app.modify_focused(|c| {
@@ -1153,8 +1418,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.acquire(&mut app, 0).expect("acquire");
         w.acquire(&mut app, 0)
             .expect("re-acquiring the held cassette must not fail");
@@ -1169,8 +1440,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 2);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
 
         w.acquire(&mut app, 1).expect("hold cassette 1");
         let held = app.cassettes[1].id.clone();
@@ -1195,7 +1472,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let w = SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         app.add_cassette();
         assert!(app.cassettes[1].id.is_empty(), "pure code mints no ids");
 
@@ -1217,8 +1501,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::new(dir.path().to_path_buf());
         let (mut app, session) = fixture(&store, 1);
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.acquire(&mut app, 0).expect("acquire");
         app.modify_focused(|c| c.insert_str("something"));
         w.finish(&mut app).expect("finish");
@@ -1258,8 +1548,14 @@ mod tests {
         let agent_id =
             add_behind_the_tuis_back(&store, &session, "## Side A\n\nwords the agent wrote\n");
 
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.finish(&mut app).expect("finish");
 
         assert_eq!(
@@ -1286,8 +1582,14 @@ mod tests {
         let (mut app, session) = fixture(&store, 1);
         add_behind_the_tuis_back(&store, &session, "");
 
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.finish(&mut app).expect("finish");
 
         assert_eq!(store.list_sessions().expect("list").sessions.len(), 1);
@@ -1308,8 +1610,14 @@ mod tests {
             )
             .expect("another holder takes the lock");
 
-        let mut w =
-            SessionWriter::open(&store, &session, true, crate::store::ids::TEST_WRITER, "w");
+        let mut w = SessionWriter::open(
+            &store,
+            &session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        );
         w.finish(&mut app).expect("finish");
 
         assert_eq!(store.list_sessions().expect("list").sessions.len(), 1);

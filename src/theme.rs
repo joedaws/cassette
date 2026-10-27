@@ -22,6 +22,12 @@ pub struct Theme {
     pub help_key: Option<Color>,
     /// Descriptions in the help line, dimmer than the keys.
     pub help_text: Option<Color>,
+    /// Turn status glyphs (`status.rs`). Human is the call to action, so it
+    /// takes a color that stands out; agent is calm, because there is
+    /// nothing for the human to do; busy reads as "hands off".
+    pub status_human: Color,
+    pub status_agent: Color,
+    pub status_busy: Color,
 }
 
 impl Default for Theme {
@@ -35,6 +41,9 @@ impl Default for Theme {
             accent_b: Color::DarkGray,
             help_key: None,
             help_text: Some(Color::DarkGray),
+            status_human: Color::Cyan,
+            status_agent: Color::DarkGray,
+            status_busy: Color::Red,
         }
     }
 }
@@ -52,6 +61,9 @@ pub struct ThemeSpec {
     pub accent_b: Option<String>,
     pub help_key: Option<String>,
     pub help_text: Option<String>,
+    pub status_human: Option<String>,
+    pub status_agent: Option<String>,
+    pub status_busy: Option<String>,
 }
 
 /// `"#rrggbb"` hex or an ANSI color name (`yellow`, `darkgray`, …).
@@ -106,6 +118,9 @@ pub fn builtins() -> Vec<(&'static str, Theme)> {
                 accent_b: rgb(0x6272a4),
                 help_key: Some(rgb(0xf8f8f2)),
                 help_text: Some(rgb(0x6272a4)),
+                status_human: rgb(0x8be9fd),
+                status_agent: rgb(0x6272a4),
+                status_busy: rgb(0xff5555),
             },
         ),
         (
@@ -119,6 +134,9 @@ pub fn builtins() -> Vec<(&'static str, Theme)> {
                 accent_b: rgb(0x83a598),
                 help_key: Some(rgb(0xebdbb2)),
                 help_text: Some(rgb(0x928374)),
+                status_human: rgb(0x8ec07c),
+                status_agent: rgb(0x928374),
+                status_busy: rgb(0xfb4934),
             },
         ),
         (
@@ -132,6 +150,9 @@ pub fn builtins() -> Vec<(&'static str, Theme)> {
                 accent_b: rgb(0x88c0d0),
                 help_key: Some(rgb(0xd8dee9)),
                 help_text: Some(rgb(0x616e88)),
+                status_human: rgb(0x88c0d0),
+                status_agent: rgb(0x4c566a),
+                status_busy: rgb(0xbf616a),
             },
         ),
         (
@@ -145,6 +166,9 @@ pub fn builtins() -> Vec<(&'static str, Theme)> {
                 accent_b: rgb(0x268bd2),
                 help_key: Some(rgb(0x839496)),
                 help_text: Some(rgb(0x586e75)),
+                status_human: rgb(0x2aa198),
+                status_agent: rgb(0x586e75),
+                status_busy: rgb(0xdc322f),
             },
         ),
         (
@@ -158,6 +182,9 @@ pub fn builtins() -> Vec<(&'static str, Theme)> {
                 accent_b: rgb(0x268bd2),
                 help_key: Some(rgb(0x657b83)),
                 help_text: Some(rgb(0x93a1a1)),
+                status_human: rgb(0x2aa198),
+                status_agent: rgb(0x586e75),
+                status_busy: rgb(0xdc322f),
             },
         ),
     ]
@@ -195,6 +222,15 @@ fn apply_spec(mut base: Theme, spec: &ThemeSpec, name: &str) -> Result<Theme, St
     }
     if let Some(c) = parse("help_text", &spec.help_text)? {
         base.help_text = Some(c);
+    }
+    if let Some(c) = parse("status_human", &spec.status_human)? {
+        base.status_human = c;
+    }
+    if let Some(c) = parse("status_agent", &spec.status_agent)? {
+        base.status_agent = c;
+    }
+    if let Some(c) = parse("status_busy", &spec.status_busy)? {
+        base.status_busy = c;
     }
     Ok(base)
 }
@@ -305,6 +341,36 @@ mod tests {
             Some(Color::Rgb(0x28, 0x28, 0x28)),
             "rest stays gruvbox"
         );
+    }
+
+    #[test]
+    fn status_colors_default_and_override() {
+        let t = Theme::default();
+        assert_eq!(
+            (t.status_human, t.status_agent, t.status_busy),
+            (Color::Cyan, Color::DarkGray, Color::Red)
+        );
+        // Every built-in picks three distinct colors, so the glyphs stay
+        // tellable apart by color as well as by shape.
+        for (name, t) in builtins() {
+            assert!(
+                t.status_human != t.status_agent
+                    && t.status_agent != t.status_busy
+                    && t.status_human != t.status_busy,
+                "{name}"
+            );
+        }
+        let mut user = HashMap::new();
+        user.insert(
+            "nord".to_string(),
+            ThemeSpec {
+                status_busy: Some("#010203".to_string()),
+                ..ThemeSpec::default()
+            },
+        );
+        let t = resolve(Some("nord"), &user).unwrap();
+        assert_eq!(t.status_busy, Color::Rgb(1, 2, 3), "overridden");
+        assert_eq!(t.status_human, rgb(0x88c0d0), "rest stays nord");
     }
 
     #[test]

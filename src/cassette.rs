@@ -57,10 +57,29 @@ pub struct Cassette {
     /// Closed cassettes fold away in the TUI and open read-only; reopening is
     /// a CLI act, so the TUI never writes this back either.
     pub closed: bool,
+    /// Whether this cassette's `last_writer` is a `human` writer — the one
+    /// fact the turn status (`status.rs`) needs about who ended the last
+    /// turn. A plain `Option<bool>` resolved from `writers.toml` by whoever
+    /// built this cassette from stored metadata, for the same reason
+    /// `locked_by` carries a name: this module imports nothing. `None` when
+    /// it cannot be resolved (an unknown writer id) or there is no store at
+    /// all (`-o`), which the resolver reads as "the human's move". After the
+    /// TUI's own flush it is set in memory to the TUI writer's kind, without
+    /// a re-read.
+    pub last_writer_human: Option<bool>,
+    /// When a live claim on this cassette (`queue claim`) by **another**
+    /// writer runs out, in unix seconds. `None` when unclaimed, and also for
+    /// a claim held by the TUI's own writer — `session_writer::
+    /// annotate_from_store` drops that one, so a claim here always means
+    /// "someone else is on it". Kept as the expiry rather than a bool so the
+    /// status flips back on the tick after it lapses, with no file change.
+    pub claimed_until: Option<i64>,
 }
 
 // Hand-written rather than derived: `priority` defaults to `i64::MAX`, the
-// "not yet minted" sentinel, and every constructor funnels through here.
+// "not yet minted" sentinel, and every constructor funnels through here —
+// which is also what leaves the store-derived turn fields `None` for
+// `from_sides` and friends until a caller annotates them.
 impl Default for Cassette {
     fn default() -> Self {
         Self {
@@ -77,6 +96,8 @@ impl Default for Cassette {
             locked_by: None,
             priority: i64::MAX,
             closed: false,
+            last_writer_human: None,
+            claimed_until: None,
         }
     }
 }
