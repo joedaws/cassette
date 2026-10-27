@@ -563,15 +563,13 @@ pub fn claim(
     let acting = resolve_acting(store, who_name, source)?;
     let writer = acting.id.clone();
     if acting.source == WriterSource::Env || acting.authority != Kind::Agent {
-        let hint = acting.hint(who_name);
-        let hint = if hint.is_empty() {
-            " — pass --writer <agent> to claim as a registered agent".to_string()
-        } else {
-            hint
-        };
-        return Err(QueueError::Usage(format!(
-            "queue claim is agent-only — a claim needs an explicit agent identity{hint}"
-        )));
+        // Not `Acting::hint`: that tells a downgraded human to pass their
+        // own name, which here would only buy a second refusal.
+        return Err(QueueError::Usage(
+            "queue claim is agent-only — a claim needs an explicit agent identity; \
+             pass --writer <agent-name>"
+                .to_string(),
+        ));
     }
     let until = i64::try_from(secs)
         .ok()
@@ -1386,7 +1384,12 @@ mod tests {
         let (_d, store, sid, id) = claim_fixture(Status::Open);
         // `joseph` is a registered human: `$USER` alone must not claim as him.
         match claim(&store, &sid, id, "joseph", WriterSource::Env, 60) {
-            Err(QueueError::Usage(m)) => assert!(m.contains("--writer"), "{m}"),
+            Err(QueueError::Usage(m)) => {
+                assert!(m.contains("--writer"), "{m}");
+                // The generic human-downgrade hint would point a human at
+                // a command they may never run.
+                assert!(!m.contains("act as yourself"), "{m}");
+            }
             other => panic!("expected Usage, got {other:?}"),
         }
         // Nor may a registered agent reached through `$USER`.

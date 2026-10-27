@@ -29,7 +29,8 @@ whoami` shows what you are acting as.
 `waiting_on` is the inverse of whoever wrote last, so a cassette the human touched is
 **waiting on you**. Act on cassettes where `waiting_on == "agent"`, `busy == false` **and**
 `claimed_by` is null. Only writes change `waiting_on`: a `queue move`, `lock`, `close` or
-`topic` no longer flips it.
+`topic` no longer flips it. An empty cassette is the human's prompt — don't write into it, even
+when `waiting_on == "agent"`.
 
 ```bash
 cassette queue next --session <ID> --json    # highest-priority open, unlocked cassette
@@ -73,7 +74,7 @@ Each open cassette carries one glyph in its separator line:
 | `⚙` | agent | waiting on an agent |
 | `●` | busy | the human has it focused, or an agent holds a live claim |
 
-Closed cassettes show none. A blank cassette is always `✎`. The glyphs are configurable, so
+Closed cassettes show none. A blank cassette is `✎` unless busy. The glyphs are configurable, so
 describe them by status name if the human may have changed them.
 
 ## How a session goes
