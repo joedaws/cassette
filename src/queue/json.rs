@@ -41,6 +41,10 @@ pub struct CassetteView {
     pub words: usize,
     pub busy: bool,
     pub sticky_lock: Option<WriterRef>,
+    /// Who holds a live soft claim (`queue claim`); `None` once it expires.
+    /// Distinct from `busy` (flock held) and `sticky_lock` (durable, human).
+    pub claimed_by: Option<WriterRef>,
+    pub claimed_until: Option<String>,
     pub created_by: Option<WriterRef>,
     pub last_writer: Option<WriterRef>,
     pub waiting_on: Option<&'static str>,
@@ -210,6 +214,8 @@ mod tests {
             words: 2,
             busy: false,
             sticky_lock: None,
+            claimed_by: None,
+            claimed_until: None,
             created_by: Some(WriterRef {
                 name: "joseph".into(),
                 kind: "human",
@@ -227,6 +233,8 @@ mod tests {
         assert_eq!(j["id"], "cas_01K5GR7T2M9WPD0000000000AB");
         assert_eq!(j["status"], "open");
         assert_eq!(j["sticky_lock"], serde_json::Value::Null);
+        assert_eq!(j["claimed_by"], serde_json::Value::Null);
+        assert_eq!(j["claimed_until"], serde_json::Value::Null);
         assert_eq!(j["created_by"]["kind"], "human");
         assert_eq!(j["waiting_on"], "agent");
         assert_eq!(j["side_b"], "");

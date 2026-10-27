@@ -196,6 +196,11 @@ pub fn build_view(
     let created_by = resolve(&c.meta.created_by);
     let last_writer = resolve(&c.meta.last_writer);
     let sticky_lock = c.meta.locked_by.as_deref().and_then(resolve);
+    // An expired claim reads as none, in both fields: `claim_live` is the one
+    // judge of liveness, so the JSON never shows a stale `claimed_until`.
+    let live_claim = crate::store::meta::claim_live(&c.meta, chrono::Utc::now());
+    let claimed_by = live_claim.and_then(resolve);
+    let claimed_until = live_claim.and(c.meta.claimed_until.clone());
     let waiting_on = json::waiting_on(last_writer.as_ref());
     let (side_a, side_b) = json::split_sides(&c.body);
     let words = json::count_words(&side_a, &side_b);
@@ -208,6 +213,8 @@ pub fn build_view(
         words,
         busy,
         sticky_lock,
+        claimed_by,
+        claimed_until,
         created_by,
         last_writer,
         waiting_on,
@@ -311,15 +318,21 @@ fn open_candidates(store: &Store, session: &str) -> Result<Vec<StoredCassette>, 
     Ok(open)
 }
 
-/// The first of `candidates` whose lock `Store::is_free` reports free, or
-/// `None` when every one is currently held. Shared by `next` and
+/// The first of `candidates` that is neither claimed (`queue claim`, live)
+/// nor has its lock held per `Store::is_free`, or `None` when every one is.
+/// The claim test is a pure read of meta, ahead of the probe syscall. A claim
+/// is skipped whoever holds it: `next` takes no `--writer`. Shared by `next` and
 /// `next_view` for the same reason as `open_candidates`.
 fn first_free<'a>(
     store: &Store,
     session: &str,
     candidates: &'a [StoredCassette],
 ) -> Result<Option<&'a StoredCassette>, QueueError> {
+    let now = chrono::Utc::now();
     for c in candidates {
+        if crate::store::meta::claim_live(&c.meta, now).is_some() {
+            continue;
+        }
         let free = store
             .is_free(session, &c.meta.id)
             .map_err(|e| QueueError::Io(format!("cannot check lock on '{}': {e}", c.meta.id)))?;
@@ -705,5 +718,111 @@ mod tests {
             Err(QueueError::Empty(_)) => {}
             other => panic!("expected Empty, got {other:?}"),
         }
+    }
+
+    fn claimed(id: &str, priority: i64, by: &str, until: &str) -> CassetteMeta {
+        let mut m = meta(id, priority, Status::Open);
+        m.claimed_by = Some(by.to_string());
+        m.claimed_until = Some(until.to_string());
+        m
+    }
+
+    const FUTURE: &str = "2999-01-01T00:00:00Z";
+    const PAST: &str = "2000-01-01T00:00:00Z";
+
+    #[test]
+    fn next_skips_cassette_claimed_by_another() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let c = claimed(
+            "cas_aaa00000000000000000000000",
+            10,
+            "wri_01K5GQ00000000000000000002",
+            FUTURE,
+        );
+        store.add_cassette(&sid, &c, "").expect("add");
+        store
+            .add_cassette(
+                &sid,
+                &meta("cas_bbb00000000000000000000000", 20, Status::Open),
+                "",
+            )
+            .expect("add");
+        assert_eq!(
+            next(&store, &sid).expect("next"),
+            "cas_bbb00000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn next_returns_busy_when_only_claimed_remain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let c = claimed(
+            "cas_aaa00000000000000000000000",
+            10,
+            "wri_01K5GQ00000000000000000002",
+            FUTURE,
+        );
+        store.add_cassette(&sid, &c, "").expect("add");
+        match next(&store, &sid) {
+            Err(QueueError::Busy(_)) => {}
+            other => panic!("expected Busy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn next_ignores_expired_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let c = claimed(
+            "cas_aaa00000000000000000000000",
+            10,
+            "wri_01K5GQ00000000000000000002",
+            PAST,
+        );
+        store.add_cassette(&sid, &c, "").expect("add");
+        assert_eq!(
+            next(&store, &sid).expect("next"),
+            "cas_aaa00000000000000000000000"
+        );
+    }
+
+    fn view_of(store: &Store, sid: &str, c: &CassetteMeta) -> json::CassetteView {
+        let writers = store.writers().expect("writers");
+        build_view(store, sid, &stored(c.clone()), &writers).expect("view")
+    }
+
+    #[test]
+    fn view_reports_live_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let bot = store
+            .ensure_writer("bot", crate::store::writers::Kind::Agent)
+            .expect("agent");
+        let c = claimed("cas_aaa00000000000000000000000", 10, &bot, FUTURE);
+        store.add_cassette(&sid, &c, "").expect("add");
+        let v = view_of(&store, &sid, &c);
+        let by = v.claimed_by.expect("live claim shown");
+        assert_eq!((by.name.as_str(), by.kind), ("bot", "agent"));
+        assert_eq!(v.claimed_until.as_deref(), Some(FUTURE));
+    }
+
+    #[test]
+    fn view_hides_expired_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let bot = store
+            .ensure_writer("bot", crate::store::writers::Kind::Agent)
+            .expect("agent");
+        let c = claimed("cas_aaa00000000000000000000000", 10, &bot, PAST);
+        store.add_cassette(&sid, &c, "").expect("add");
+        let v = view_of(&store, &sid, &c);
+        assert!(v.claimed_by.is_none() && v.claimed_until.is_none());
     }
 }

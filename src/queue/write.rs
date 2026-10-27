@@ -69,6 +69,31 @@ fn write_permitted(
     }
 }
 
+/// Whether `acting` may write over a live soft claim (`queue claim`) held by
+/// `claimed_by`, already filtered through `claim_live` so an expired claim
+/// arrives as `None`. An agent may write only its own claim; a human is never
+/// blocked. Same authority-not-kind rule as `write_permitted`.
+fn claim_permitted(
+    store: &Store,
+    acting: &Acting,
+    who_name: &str,
+    claimed_by: Option<&str>,
+) -> Result<(), QueueError> {
+    match (acting.authority, claimed_by) {
+        (Kind::Agent, Some(holder)) if holder != acting.id => {
+            let name = store
+                .writers()
+                .map(|w| store::writers::display_name(&w, holder))
+                .unwrap_or_else(|_| holder.to_string());
+            Err(QueueError::Sticky(format!(
+                "cassette is claimed by '{name}' — wait for it to write, release, or expire{}",
+                acting.hint(who_name)
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Rebuild a cassette body in canonical form from its two sides: `## Side A`
 /// always, `## Side B` only when non-empty. The write-side counterpart of
 /// `json::split_sides`, which reads this same shape back apart — the two
@@ -175,8 +200,18 @@ fn read_check_and_write(
     };
     write_permitted(store, acting, who_name, current.meta.locked_by.as_deref())?;
 
+    let live_claim = store::meta::claim_live(&current.meta, chrono::Utc::now()).map(str::to_string);
+    claim_permitted(store, acting, who_name, live_claim.as_deref())?;
+
     let body = apply_write(&current.body, request.incoming, request.side, request.mode);
     let mut m = current.meta;
+    // Writing is the claimant's turn ending, and an expired claim is just
+    // litter: clear both. A human writing over someone else's live claim
+    // leaves it, since it is not theirs to end.
+    if live_claim.as_deref().is_none_or(|h| h == acting.id) {
+        m.claimed_by = None;
+        m.claimed_until = None;
+    }
     m.last_writer = acting.id.clone();
     m.updated_at = store::meta::now_utc();
     if let Err(e) = guard.write(&m, &body) {
@@ -539,5 +574,105 @@ mod tests {
         let body = &store.scan_session(&sid).expect("scan").cassettes[0].body;
         assert!(body.contains("first"), "the original text survives: {body}");
         assert!(body.contains("second"), "{body}");
+    }
+
+    /// An open, unlocked cassette claimed by `by` until `until`, plus agents
+    /// `bot`/`bot2` and human `joseph` registered. Returns the claimant's id.
+    fn claimed_cassette(store: &Store, by: &str, until: &str) -> (String, String) {
+        let sid = store
+            .create_session(&crate::store::session::SessionMeta {
+                alias: None,
+                created: crate::store::meta::now_utc(),
+                timer_secs: None,
+                word_goal: None,
+            })
+            .expect("create session");
+        store.ensure_writer("joseph", Kind::Human).expect("human");
+        store.ensure_writer("bot2", Kind::Agent).expect("agent");
+        let claimant = store.ensure_writer(by, Kind::Agent).expect("agent");
+        let id = "cas_aaa00000000000000000000000".to_string();
+        let m = CassetteMeta {
+            id: id.clone(),
+            topic: None,
+            priority: 10,
+            status: Status::Open,
+            locked_by: None,
+            claimed_by: Some(claimant),
+            claimed_until: Some(until.to_string()),
+            created_by: crate::store::ids::TEST_WRITER.to_string(),
+            last_writer: crate::store::ids::TEST_WRITER.to_string(),
+            updated_at: "2026-09-16T09:00:00Z".to_string(),
+        };
+        store.add_cassette(&sid, &m, "original\n").expect("add");
+        (sid, id)
+    }
+
+    fn meta_of(store: &Store, sid: &str) -> CassetteMeta {
+        store
+            .scan_session(sid)
+            .expect("scan")
+            .cassettes
+            .remove(0)
+            .meta
+    }
+
+    fn write_as(store: &Store, sid: &str, id: &str, who: &str) -> Result<(), QueueError> {
+        write_body(
+            store,
+            sid,
+            id,
+            "new prose\n",
+            Side::A,
+            WriteMode::Replace,
+            who,
+            WriterSource::Flag,
+        )
+    }
+
+    const FUTURE: &str = "2999-01-01T00:00:00Z";
+    const PAST: &str = "2000-01-01T00:00:00Z";
+
+    #[test]
+    fn holder_write_clears_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (sid, id) = claimed_cassette(&store, "bot", FUTURE);
+        write_as(&store, &sid, &id, "bot").expect("holder writes");
+        let m = meta_of(&store, &sid);
+        assert_eq!((m.claimed_by, m.claimed_until), (None, None));
+    }
+
+    #[test]
+    fn agent_write_over_other_agents_live_claim_is_sticky() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (sid, id) = claimed_cassette(&store, "bot", FUTURE);
+        match write_as(&store, &sid, &id, "bot2") {
+            Err(QueueError::Sticky(msg)) => assert!(msg.contains("bot"), "{msg}"),
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+        let scan = store.scan_session(&sid).expect("scan");
+        assert!(scan.cassettes[0].body.contains("original"));
+        assert!(scan.cassettes[0].meta.claimed_by.is_some());
+    }
+
+    #[test]
+    fn agent_write_over_expired_claim_succeeds_and_clears_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (sid, id) = claimed_cassette(&store, "bot", PAST);
+        write_as(&store, &sid, &id, "bot2").expect("expired claim is free");
+        let m = meta_of(&store, &sid);
+        assert_eq!((m.claimed_by, m.claimed_until), (None, None));
+    }
+
+    #[test]
+    fn human_write_over_claim_keeps_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (sid, id) = claimed_cassette(&store, "bot", FUTURE);
+        write_as(&store, &sid, &id, "joseph").expect("human may write");
+        let m = meta_of(&store, &sid);
+        assert!(m.claimed_by.is_some() && m.claimed_until.is_some());
     }
 }
