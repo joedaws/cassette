@@ -261,8 +261,9 @@ fn close_message_line(message: &str) -> Result<String, QueueError> {
 /// 4. Read through the guard and check `close_permitted` against the
 ///    cassette's `locked_by`. An agent facing a set `locked_by` gets
 ///    `Sticky` (exit 4); a human may proceed.
-/// 5. Set `status = Closed`, `last_writer`, `updated_at`, append the
-///    blockquote line when `-m` was given, and write through the guard.
+/// 5. Set `status = Closed` and `updated_at`, append the blockquote line
+///    when `-m` was given, and write through the guard. `last_writer` is
+///    left alone for `retopic`'s reason: closing is housekeeping, not a turn.
 pub fn close(
     store: &Store,
     session: &str,
@@ -288,7 +289,6 @@ pub fn close(
 
     let mut m = current.meta;
     m.status = Status::Closed;
-    m.last_writer = writer;
     m.updated_at = crate::store::meta::now_utc();
 
     let mut body = current.body;
@@ -373,6 +373,8 @@ pub fn retopic(
 /// session already holds `max_open` open cassettes, checked before the lock
 /// is taken for the same reason `new` checks before computing a priority: a
 /// full queue should never pay for a lock acquisition it cannot use.
+///
+/// Leaves `last_writer` alone, as `retopic` does: reopening is not a turn.
 pub fn reopen(
     store: &Store,
     session: &str,
@@ -404,7 +406,6 @@ pub fn reopen(
 
     let mut m = current.meta;
     m.status = Status::Open;
-    m.last_writer = writer;
     m.updated_at = crate::store::meta::now_utc();
 
     guard
@@ -433,6 +434,8 @@ pub fn reopen(
 ///    second blockquote on a re-close, and that is the pattern not to
 ///    repeat); held by another writer is `Sticky` (exit 4) — a human may not
 ///    steal another writer's lock, only clear it (see `unlock`).
+///
+/// Leaves `last_writer` alone, as `retopic` does: claiming is not a turn.
 pub fn lock(
     store: &Store,
     session: &str,
@@ -468,7 +471,6 @@ pub fn lock(
         None => {
             let mut m = current.meta;
             m.locked_by = Some(writer.clone());
-            m.last_writer = writer;
             m.updated_at = crate::store::meta::now_utc();
             guard
                 .write(&m, &current.body)
@@ -486,7 +488,8 @@ pub fn lock(
 /// non-human `Usage` (exit 2) before acquiring anything, acquire (`Busy`,
 /// exit 3), then read through the guard. An already-unlocked cassette is a
 /// **no-op that performs no write**, matching `lock`'s own no-op and, again,
-/// the pattern 4b's close-on-closed should not have set.
+/// the pattern 4b's close-on-closed should not have set. Leaves
+/// `last_writer` alone, as `retopic` does: clearing a claim is not a turn.
 pub fn unlock(
     store: &Store,
     session: &str,
@@ -519,7 +522,6 @@ pub fn unlock(
 
     let mut m = current.meta;
     m.locked_by = None;
-    m.last_writer = writer;
     m.updated_at = crate::store::meta::now_utc();
     guard
         .write(&m, &current.body)
@@ -537,6 +539,10 @@ pub fn unlock(
 /// another writer. Every caller (today, `new` above; `queue move` in Task 8
 /// as well) must therefore compute its placement first, release every guard
 /// it holds, renumber, and retry.
+///
+/// Rewrites `priority` and `updated_at` only; `last_writer` is untouched, as
+/// in `retopic` — reordering is housekeeping, not a turn. `who` is just the
+/// attribution the locks are taken under.
 pub fn renumber_all(store: &Store, session: &str, who: &Attribution) -> Result<(), QueueError> {
     let scan = store
         .scan_session(session)
@@ -576,7 +582,6 @@ pub fn renumber_all(store: &Store, session: &str, who: &Attribution) -> Result<(
             )));
         };
         m.priority = p;
-        m.last_writer = who.writer.clone();
         m.updated_at = crate::store::meta::now_utc();
         guard
             .write(&m, &current.body)
@@ -756,8 +761,8 @@ fn compute_move_target(
 ///    releases every lock itself — then recompute exactly once. A second
 ///    `None` is `QueueError::Io`: unrepresentable even freshly renumbered.
 /// 3. Lock only `id`, re-read it through the guard, set the new priority
-///    plus `last_writer`/`updated_at`, and write. **One lock, held only for
-///    this step.**
+///    plus `updated_at` (not `last_writer`: a move is not a turn, as in
+///    `retopic`), and write. **One lock, held only for this step.**
 ///
 /// The scans in steps 1 and 2 are unlocked on purpose, not an oversight: a
 /// concurrent writer may change a priority between the read and the write in
@@ -810,7 +815,6 @@ pub fn move_cassette(
         .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
     let mut m = current.meta;
     m.priority = priority;
-    m.last_writer = writer;
     m.updated_at = crate::store::meta::now_utc();
     guard
         .write(&m, &current.body)
@@ -1124,6 +1128,100 @@ mod tests {
         assert_eq!(topic_value("   ").unwrap(), None);
         assert_eq!(topic_value("").unwrap(), None);
         assert!(matches!(topic_value("a\nb"), Err(QueueError::Usage(_))));
+    }
+
+    /// A session with one cassette whose `last_writer` is `TEST_WRITER`, and
+    /// a registered human `joseph` (a different writer) to act as.
+    fn turn_fixture(status: Status) -> (tempfile::TempDir, Store, String, &'static str) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let sid = new_session(&store);
+        let id = "cas_aaa00000000000000000000000";
+        store
+            .add_cassette(&sid, &meta(id, 10, status), "## Side A\n\nhello\n")
+            .expect("add");
+        store
+            .ensure_writer("joseph", crate::store::writers::Kind::Human)
+            .expect("register");
+        (dir, store, sid, id)
+    }
+
+    fn assert_housekeeping_only(store: &Store, sid: &str, id: &str) {
+        let c = store
+            .scan_session(sid)
+            .expect("scan")
+            .cassettes
+            .into_iter()
+            .find(|c| c.meta.id == id)
+            .expect("found");
+        assert_eq!(
+            c.meta.last_writer,
+            crate::store::ids::TEST_WRITER,
+            "housekeeping is not a turn"
+        );
+        assert_ne!(c.meta.updated_at, "2026-09-15T09:00:00Z");
+    }
+
+    #[test]
+    fn close_does_not_stamp_last_writer() {
+        let (_d, store, sid, id) = turn_fixture(Status::Open);
+        close(&store, &sid, id, None, "joseph", WriterSource::Flag).expect("close");
+        assert_housekeeping_only(&store, &sid, id);
+    }
+
+    #[test]
+    fn reopen_does_not_stamp_last_writer() {
+        let (_d, store, sid, id) = turn_fixture(Status::Closed);
+        reopen(&store, &sid, id, "joseph", WriterSource::Flag, 36).expect("reopen");
+        assert_housekeeping_only(&store, &sid, id);
+    }
+
+    #[test]
+    fn lock_does_not_stamp_last_writer() {
+        let (_d, store, sid, id) = turn_fixture(Status::Open);
+        lock(&store, &sid, id, "joseph", WriterSource::Flag).expect("lock");
+        assert_housekeeping_only(&store, &sid, id);
+    }
+
+    #[test]
+    fn unlock_does_not_stamp_last_writer() {
+        let (_d, store, sid, id) = turn_fixture(Status::Open);
+        lock(&store, &sid, id, "joseph", WriterSource::Flag).expect("lock");
+        unlock(&store, &sid, id, "joseph", WriterSource::Flag).expect("unlock");
+        assert_housekeeping_only(&store, &sid, id);
+    }
+
+    #[test]
+    fn move_does_not_stamp_last_writer() {
+        let (_d, store, sid, id) = turn_fixture(Status::Open);
+        let other = "cas_bbb00000000000000000000000";
+        store
+            .add_cassette(&sid, &meta(other, 20, Status::Open), "")
+            .expect("add");
+        move_cassette(
+            &store,
+            &sid,
+            id,
+            MoveAnchor::After(other.to_string()),
+            "joseph",
+            WriterSource::Flag,
+        )
+        .expect("move");
+        assert_housekeeping_only(&store, &sid, id);
+    }
+
+    #[test]
+    fn renumber_all_does_not_stamp_last_writer() {
+        let (_d, store, sid, id) = turn_fixture(Status::Open);
+        let other = "cas_bbb00000000000000000000000";
+        store
+            .add_cassette(&sid, &meta(other, 20, Status::Open), "")
+            .expect("add");
+        let joseph = store.require_writer("joseph").expect("registered").0;
+        let who = Attribution::for_now(&joseph, "joseph");
+        renumber_all(&store, &sid, &who).expect("renumber");
+        assert_housekeeping_only(&store, &sid, id);
+        assert_housekeeping_only(&store, &sid, other);
     }
 
     #[test]
