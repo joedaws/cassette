@@ -95,6 +95,15 @@ pub enum QueueCmd {
         id: String,
         session: String,
     },
+    Claim {
+        id: String,
+        session: String,
+        secs: u64,
+    },
+    Release {
+        id: String,
+        session: String,
+    },
 }
 
 impl QueueCmd {
@@ -111,7 +120,9 @@ impl QueueCmd {
             | QueueCmd::Reopen { id, .. }
             | QueueCmd::Topic { id, .. }
             | QueueCmd::Lock { id, .. }
-            | QueueCmd::Unlock { id, .. } => vec![(id.as_str(), "<ID>")],
+            | QueueCmd::Unlock { id, .. }
+            | QueueCmd::Claim { id, .. }
+            | QueueCmd::Release { id, .. } => vec![(id.as_str(), "<ID>")],
             QueueCmd::Move { id, anchor, .. } => {
                 let (a, slot) = match anchor {
                     crate::queue::edit::MoveAnchor::Before(a) => (a.as_str(), "--before"),
@@ -142,7 +153,9 @@ impl QueueCmd {
             | QueueCmd::Topic { session, .. }
             | QueueCmd::Move { session, .. }
             | QueueCmd::Lock { session, .. }
-            | QueueCmd::Unlock { session, .. } => session,
+            | QueueCmd::Unlock { session, .. }
+            | QueueCmd::Claim { session, .. }
+            | QueueCmd::Release { session, .. } => session,
         }
     }
 }
@@ -400,6 +413,30 @@ enum QueueAction {
         #[arg(long, value_name = "ID")]
         session: String,
     },
+    /// mark a cassette picked up by an agent; shows as busy until written, released, or expired
+    Claim {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// seconds the claim lasts before it expires
+        #[arg(
+            long = "for",
+            value_name = "SECS",
+            default_value_t = crate::queue::edit::DEFAULT_CLAIM_SECS,
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        secs: u64,
+    },
+    /// clear a claim: your own, or any when acting as a human
+    Release {
+        #[arg(value_name = "ID")]
+        id: String,
+        /// session the cassette lives in
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -600,6 +637,10 @@ impl Cli {
                     }
                     QueueAction::Lock { id, session } => QueueCmd::Lock { id, session },
                     QueueAction::Unlock { id, session } => QueueCmd::Unlock { id, session },
+                    QueueAction::Claim { id, session, secs } => {
+                        QueueCmd::Claim { id, session, secs }
+                    }
+                    QueueAction::Release { id, session } => QueueCmd::Release { id, session },
                     QueueAction::Move {
                         id,
                         session,

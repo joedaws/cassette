@@ -89,6 +89,8 @@ mod tests {
             priority,
             status,
             locked_by: None,
+            claimed_by: None,
+            claimed_until: None,
             created_by: String::new(),
             last_writer: String::new(),
             updated_at: String::new(),

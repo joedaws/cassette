@@ -2711,3 +2711,64 @@ fn an_unmigrated_store_lists_nothing_and_says_what_it_skipped() {
         );
     }
 }
+
+#[test]
+fn claim_without_writer_exits_2() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let new = Command::new(bin())
+        .args(["session", "new"])
+        .env("CASSETTE_DATA_DIR", &root)
+        .output()
+        .expect("spawn");
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    // `$USER` alone names a writer but carries no authority to claim.
+    let out = Command::new(bin())
+        .args(["queue", "claim", ID, "--session", &sid])
+        .env("CASSETTE_DATA_DIR", &root)
+        .env("USER", "someone")
+        .env_remove("CASSETTE_WRITER")
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--writer"), "{}", stderr(&out));
+}
+
+#[test]
+fn claim_then_release_round_trip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("store");
+    let cassette = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("CASSETTE_DATA_DIR", &root)
+            .env_remove("USER")
+            .env_remove("CASSETTE_WRITER")
+            .output()
+            .expect("spawn")
+    };
+
+    let reg = cassette(&["writer", "register", "--name", "bot", "--kind", "agent"]);
+    assert_eq!(reg.status.code(), Some(0), "{}", stderr(&reg));
+    let new = cassette(&["session", "new"]);
+    let sid = String::from_utf8_lossy(&new.stdout).trim().to_string();
+    const ID: &str = "cas_01K5GR7T2M9WPD0000000000AB";
+    write_fixture_cassette(&root, &sid, ID, "gratitude");
+
+    let claim = cassette(&["--writer", "bot", "queue", "claim", ID, "--session", &sid]);
+    assert_eq!(claim.status.code(), Some(0), "{}", stderr(&claim));
+    let shown = cassette(&["queue", "show", ID, "--session", &sid]);
+    let text = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(text.contains("claimed_by: wri_"), "{text}");
+    assert!(text.contains("claimed_until: 20"), "{text}");
+
+    let rel = cassette(&["--writer", "bot", "queue", "release", ID, "--session", &sid]);
+    assert_eq!(rel.status.code(), Some(0), "{}", stderr(&rel));
+    let shown = cassette(&["queue", "show", ID, "--session", &sid]);
+    let text = String::from_utf8_lossy(&shown.stdout).to_string();
+    assert!(text.contains("claimed_by:\n"), "{text}");
+    assert!(text.contains("claimed_until:\n"), "{text}");
+}

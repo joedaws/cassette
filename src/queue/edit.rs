@@ -124,6 +124,8 @@ pub fn new(
         priority,
         status: Status::Open,
         locked_by: None,
+        claimed_by: None,
+        claimed_until: None,
         created_by: writer.clone(),
         last_writer: writer,
         updated_at: crate::store::meta::now_utc(),
@@ -528,6 +530,130 @@ pub fn unlock(
         .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
 }
 
+/// How long `queue claim` holds a cassette when `--for` is not given.
+pub const DEFAULT_CLAIM_SECS: u64 = 120;
+
+/// `cassette queue claim <ID> --session <ID> [--for <SECS>]`: mark a cassette
+/// picked up by an agent. It shows as busy until the claimant writes,
+/// releases, or the claim expires — which is what keeps a crashed agent from
+/// leaving a cassette stuck.
+///
+/// Agent-only, the mirror image of `lock`: a human says "I'm on this" by
+/// focusing the cassette in the TUI. Order of operations follows `lock`:
+/// 1. Resolve the writer and refuse **before acquiring anything** unless it
+///    is an explicit (`Flag`) agent. An `Env` source is what an agent
+///    inherits from the human's shell, and would store the human's own id as
+///    `claimed_by` — a claim the resolver would never show as busy.
+/// 2. Acquire the cassette's lock. `Busy` (exit 3): a human is focused there.
+/// 3. Read through the guard: a closed cassette is `Usage` (nothing to pick
+///    up), a sticky `locked_by` is `Sticky` as for `write`, and a live claim
+///    by a *different* writer is `Sticky` (exit 4) — a soft claim, but still a
+///    claim. Re-claiming your own extends it; an expired one is free.
+///
+/// Leaves `last_writer` **and** `updated_at` alone: a claim is not a turn and
+/// not a change to the cassette's words.
+pub fn claim(
+    store: &Store,
+    session: &str,
+    id: &str,
+    who_name: &str,
+    source: WriterSource,
+    secs: u64,
+) -> Result<(), QueueError> {
+    let acting = resolve_acting(store, who_name, source)?;
+    let writer = acting.id.clone();
+    if acting.source == WriterSource::Env || acting.authority != Kind::Agent {
+        let hint = acting.hint(who_name);
+        let hint = if hint.is_empty() {
+            " — pass --writer <agent> to claim as a registered agent".to_string()
+        } else {
+            hint
+        };
+        return Err(QueueError::Usage(format!(
+            "queue claim is agent-only — a claim needs an explicit agent identity{hint}"
+        )));
+    }
+    let until = i64::try_from(secs)
+        .ok()
+        .and_then(chrono::Duration::try_seconds)
+        .and_then(|d| chrono::Utc::now().checked_add_signed(d))
+        .ok_or_else(|| QueueError::Usage(format!("--for {secs} is too long a claim")))?;
+    let who = Attribution::for_now(&writer, who_name);
+
+    let guard = store
+        .lock(session, id, &who)
+        .map_err(|e| lock_error_to_queue_error(id, e))?;
+
+    let current = guard
+        .read()
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+    if current.meta.status == Status::Closed {
+        return Err(QueueError::Usage(format!(
+            "'{id}' is closed — reopen it before claiming"
+        )));
+    }
+    close_permitted(&acting, who_name, current.meta.locked_by.as_deref())?;
+    if let Some(holder) = crate::store::meta::claim_live(&current.meta, chrono::Utc::now()) {
+        if holder != writer {
+            return Err(QueueError::Sticky(format!(
+                "'{id}' is already claimed by '{holder}' — wait for it to write, release, or expire"
+            )));
+        }
+    }
+
+    let mut m = current.meta;
+    m.claimed_by = Some(writer);
+    m.claimed_until = Some(until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    guard
+        .write(&m, &current.body)
+        .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
+}
+
+/// `cassette queue release <ID> --session <ID>`: clear a claim. An agent may
+/// clear only its own (`Sticky`, exit 4, against another's live one); a human
+/// may clear any, as with `unlock`. Releasing an unclaimed cassette, or one
+/// whose claim has already expired, is a **no-op that performs no write**.
+///
+/// Same order as `claim`: resolve, acquire (`Busy`, exit 3), read through the
+/// guard. Leaves `last_writer` and `updated_at` alone, as `claim` does.
+pub fn release(
+    store: &Store,
+    session: &str,
+    id: &str,
+    who_name: &str,
+    source: WriterSource,
+) -> Result<(), QueueError> {
+    let acting = resolve_acting(store, who_name, source)?;
+    let writer = acting.id.clone();
+    let who = Attribution::for_now(&writer, who_name);
+
+    let guard = store
+        .lock(session, id, &who)
+        .map_err(|e| lock_error_to_queue_error(id, e))?;
+
+    let current = guard
+        .read()
+        .map_err(|e| QueueError::Io(format!("cannot read '{id}': {e}")))?;
+
+    // Not live (never claimed, expired, or garbage): nothing to release.
+    let Some(holder) = crate::store::meta::claim_live(&current.meta, chrono::Utc::now()) else {
+        return Ok(());
+    };
+    if acting.authority == Kind::Agent && holder != writer {
+        return Err(QueueError::Sticky(format!(
+            "'{id}' is claimed by '{holder}' — only that writer or a human may release it{}",
+            acting.hint(who_name)
+        )));
+    }
+
+    let mut m = current.meta;
+    m.claimed_by = None;
+    m.claimed_until = None;
+    guard
+        .write(&m, &current.body)
+        .map_err(|e| QueueError::Io(format!("cannot write '{id}': {e}")))
+}
+
 /// Give every cassette in `session` fresh sparse priorities, in queue order.
 /// The one caller of `Store::lock_many` in the crate.
 ///
@@ -854,6 +980,8 @@ mod tests {
             priority,
             status,
             locked_by: None,
+            claimed_by: None,
+            claimed_until: None,
             created_by: crate::store::ids::TEST_WRITER.to_string(),
             last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-15T09:00:00Z".to_string(),
@@ -1160,6 +1288,200 @@ mod tests {
             "housekeeping is not a turn"
         );
         assert_ne!(c.meta.updated_at, "2026-09-15T09:00:00Z");
+    }
+
+    /// `turn_fixture` plus two registered agents, `bot` and `bot2`.
+    fn claim_fixture(status: Status) -> (tempfile::TempDir, Store, String, &'static str) {
+        let (d, store, sid, id) = turn_fixture(status);
+        for name in ["bot", "bot2"] {
+            store.ensure_writer(name, Kind::Agent).expect("agent");
+        }
+        (d, store, sid, id)
+    }
+
+    fn meta_of(store: &Store, sid: &str, id: &str) -> CassetteMeta {
+        store
+            .scan_session(sid)
+            .expect("scan")
+            .cassettes
+            .into_iter()
+            .find(|c| c.meta.id == id)
+            .expect("found")
+            .meta
+    }
+
+    fn writer_id(store: &Store, name: &str) -> String {
+        store.require_writer(name).expect("registered").0
+    }
+
+    fn claim_as(store: &Store, sid: &str, id: &str, who: &str) -> Result<(), QueueError> {
+        claim(store, sid, id, who, WriterSource::Flag, DEFAULT_CLAIM_SECS)
+    }
+
+    #[test]
+    fn claim_sets_claimant_and_expiry() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        claim_as(&store, &sid, id, "bot").expect("claim");
+        let m = meta_of(&store, &sid, id);
+        assert_eq!(m.claimed_by, Some(writer_id(&store, "bot")));
+        let until = chrono::DateTime::parse_from_rfc3339(m.claimed_until.as_deref().unwrap())
+            .expect("rfc3339");
+        let want = chrono::Utc::now() + chrono::Duration::seconds(DEFAULT_CLAIM_SECS as i64);
+        assert!(
+            (until.with_timezone(&chrono::Utc) - want)
+                .num_seconds()
+                .abs()
+                <= 5,
+            "{until} vs {want}"
+        );
+        assert_eq!(m.last_writer, crate::store::ids::TEST_WRITER, "not a turn");
+        assert_eq!(m.updated_at, "2026-09-15T09:00:00Z", "not a write either");
+    }
+
+    #[test]
+    fn claim_by_same_agent_extends() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        claim(&store, &sid, id, "bot", WriterSource::Flag, 10).expect("claim");
+        let first = meta_of(&store, &sid, id).claimed_until.unwrap();
+        claim(&store, &sid, id, "bot", WriterSource::Flag, 600).expect("extend");
+        let second = meta_of(&store, &sid, id).claimed_until.unwrap();
+        assert!(second > first, "{second} should be later than {first}");
+    }
+
+    #[test]
+    fn claim_over_other_agents_live_claim_is_sticky() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        claim_as(&store, &sid, id, "bot").expect("claim");
+        match claim_as(&store, &sid, id, "bot2") {
+            Err(QueueError::Sticky(_)) => {}
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+        assert_eq!(
+            meta_of(&store, &sid, id).claimed_by,
+            Some(writer_id(&store, "bot"))
+        );
+    }
+
+    #[test]
+    fn claim_over_expired_claim_succeeds() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        let mut m = meta_of(&store, &sid, id);
+        m.claimed_by = Some(writer_id(&store, "bot"));
+        m.claimed_until = Some("2020-01-01T00:00:00Z".to_string());
+        let body = store
+            .lock(&sid, id, &Attribution::for_now("t", "t"))
+            .unwrap();
+        let cur = body.read().unwrap();
+        body.write(&m, &cur.body).unwrap();
+        drop(body);
+        claim_as(&store, &sid, id, "bot2").expect("expired claims are free");
+        assert_eq!(
+            meta_of(&store, &sid, id).claimed_by,
+            Some(writer_id(&store, "bot2"))
+        );
+    }
+
+    #[test]
+    fn claim_from_env_source_is_usage() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        // `joseph` is a registered human: `$USER` alone must not claim as him.
+        match claim(&store, &sid, id, "joseph", WriterSource::Env, 60) {
+            Err(QueueError::Usage(m)) => assert!(m.contains("--writer"), "{m}"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+        // Nor may a registered agent reached through `$USER`.
+        match claim(&store, &sid, id, "bot", WriterSource::Env, 60) {
+            Err(QueueError::Usage(m)) => assert!(m.contains("--writer"), "{m}"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+        assert_eq!(meta_of(&store, &sid, id).claimed_by, None);
+    }
+
+    #[test]
+    fn claim_by_human_is_usage() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        match claim_as(&store, &sid, id, "joseph") {
+            Err(QueueError::Usage(_)) => {}
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_on_held_cassette_is_busy() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        let _held = store
+            .lock(&sid, id, &Attribution::for_now("t", "t"))
+            .expect("hold");
+        match claim_as(&store, &sid, id, "bot") {
+            Err(QueueError::Busy(_)) => {}
+            other => panic!("expected Busy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_on_closed_cassette_is_usage() {
+        let (_d, store, sid, id) = claim_fixture(Status::Closed);
+        match claim_as(&store, &sid, id, "bot") {
+            Err(QueueError::Usage(m)) => assert!(m.contains("closed"), "{m}"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_on_sticky_locked_cassette_is_sticky() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        lock(&store, &sid, id, "joseph", WriterSource::Flag).expect("lock");
+        match claim_as(&store, &sid, id, "bot") {
+            Err(QueueError::Sticky(_)) => {}
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn release_clears_own_claim() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        claim_as(&store, &sid, id, "bot").expect("claim");
+        release(&store, &sid, id, "bot", WriterSource::Flag).expect("release");
+        let m = meta_of(&store, &sid, id);
+        assert_eq!((m.claimed_by, m.claimed_until), (None, None));
+        assert_eq!(m.last_writer, crate::store::ids::TEST_WRITER);
+        assert_eq!(m.updated_at, "2026-09-15T09:00:00Z");
+    }
+
+    #[test]
+    fn release_unclaimed_is_noop_no_write() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        let path = store
+            .cassette_path(&sid, id)
+            .expect("path")
+            .expect("exists");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        release(&store, &sid, id, "bot", WriterSource::Flag).expect("noop");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before,
+            "no write"
+        );
+    }
+
+    #[test]
+    fn release_other_agents_live_claim_is_sticky() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        claim_as(&store, &sid, id, "bot").expect("claim");
+        match release(&store, &sid, id, "bot2", WriterSource::Flag) {
+            Err(QueueError::Sticky(_)) => {}
+            other => panic!("expected Sticky, got {other:?}"),
+        }
+        assert!(meta_of(&store, &sid, id).claimed_by.is_some());
+    }
+
+    #[test]
+    fn human_release_clears_any_claim() {
+        let (_d, store, sid, id) = claim_fixture(Status::Open);
+        claim_as(&store, &sid, id, "bot").expect("claim");
+        release(&store, &sid, id, "joseph", WriterSource::Flag).expect("release");
+        assert_eq!(meta_of(&store, &sid, id).claimed_by, None);
     }
 
     #[test]

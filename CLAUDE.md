@@ -29,6 +29,8 @@ cargo run -- queue next --session <ID> --json              # next open, unlocked
 cargo run -- queue write <ID> --session <ID> --side a      # replace (or --append to) one side, read from stdin
 cargo run -- queue lock <ID> --session <ID>                # sticky-lock a cassette to yourself (human-only)
 cargo run -- queue topic <ID> --session <ID> "new title"  # set a cassette's topic ("" clears it)
+cargo run -- --writer bot queue claim <ID> --session <ID> [--for 120]  # agent-only: mark a cassette picked up (busy until written/released/expired)
+cargo run -- --writer bot queue release <ID> --session <ID>  # clear your claim (a human may clear any)
 ```
 
 ## Architecture

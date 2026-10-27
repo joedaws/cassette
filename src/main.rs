@@ -401,6 +401,29 @@ fn main() -> io::Result<()> {
                     Err(e) => exit_queue_err(&e, args.json),
                 }
             }
+            // `claim` is agent-only and `release` is own-claim-or-human:
+            // both resolve the writer, since the refusal turns on its
+            // `Kind` and on whether the name came from `--writer`.
+            cli::QueueCmd::Claim { id, session, secs } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => exit_usage(&msg, args.json),
+                };
+                match queue::edit::claim(&store, session, id, &who_name, writer_source, *secs) {
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
+                }
+            }
+            cli::QueueCmd::Release { id, session } => {
+                let (who_name, writer_source) = match resolve_writer_name(args.writer.as_deref()) {
+                    Ok(w) => w,
+                    Err(msg) => exit_usage(&msg, args.json),
+                };
+                match queue::edit::release(&store, session, id, &who_name, writer_source) {
+                    Ok(()) => exit_queue_ok(None),
+                    Err(e) => exit_queue_err(&e, args.json),
+                }
+            }
         }
     }
 
@@ -2068,6 +2091,8 @@ mod tests {
             priority,
             status: store::meta::Status::Open,
             locked_by: None,
+            claimed_by: None,
+            claimed_until: None,
             created_by: crate::store::ids::TEST_WRITER.to_string(),
             last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: store::meta::now_utc(),

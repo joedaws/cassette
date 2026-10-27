@@ -745,6 +745,8 @@ mod tests {
             priority,
             status: Status::Open,
             locked_by: None,
+            claimed_by: None,
+            claimed_until: None,
             created_by: crate::store::ids::TEST_WRITER.to_string(),
             last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: meta::now_utc(),

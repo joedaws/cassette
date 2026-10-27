@@ -42,6 +42,13 @@ pub struct CassetteMeta {
     pub status: Status,
     /// Sticky lock: the writer id holding it, or `None`.
     pub locked_by: Option<String>,
+    /// Soft claim: the agent writer id that has picked this cassette up, or
+    /// `None`. Only meaningful while `claimed_until` is in the future — see
+    /// `claim_live`, which is the one way to read it.
+    pub claimed_by: Option<String>,
+    /// RFC3339 UTC, seconds precision. Kept as the raw string so a hand-edited
+    /// typo survives a rewrite; `claim_live` reads an unparseable one as no claim.
+    pub claimed_until: Option<String>,
     pub created_by: String,
     pub last_writer: String,
     /// RFC3339 UTC, seconds precision.
@@ -79,6 +86,18 @@ pub fn build_frontmatter(m: &CassetteMeta) -> String {
             .map(|w| format!(" {}", one_line(w)))
             .unwrap_or_default()
     ));
+    for (key, value) in [
+        ("claimed_by", &m.claimed_by),
+        ("claimed_until", &m.claimed_until),
+    ] {
+        s.push_str(&format!(
+            "{key}:{}\n",
+            value
+                .as_deref()
+                .map(|v| format!(" {}", one_line(v)))
+                .unwrap_or_default()
+        ));
+    }
     s.push_str(&format!("created_by: {}\n", one_line(&m.created_by)));
     s.push_str(&format!("last_writer: {}\n", one_line(&m.last_writer)));
     s.push_str(&format!("updated_at: {}\n", one_line(&m.updated_at)));
@@ -114,6 +133,8 @@ fn parse_block(block: &str) -> Option<CassetteMeta> {
     let mut priority = 0i64;
     let mut status = Status::Open;
     let mut locked_by = None;
+    let mut claimed_by = None;
+    let mut claimed_until = None;
     let mut created_by = String::new();
     let mut last_writer = String::new();
     let mut updated_at = String::new();
@@ -137,6 +158,8 @@ fn parse_block(block: &str) -> Option<CassetteMeta> {
             "priority" => priority = value.parse().unwrap_or(0),
             "status" => status = Status::parse(value),
             "locked_by" => locked_by = (!value.is_empty()).then(|| value.to_string()),
+            "claimed_by" => claimed_by = (!value.is_empty()).then(|| value.to_string()),
+            "claimed_until" => claimed_until = (!value.is_empty()).then(|| value.to_string()),
             "created_by" => created_by = value.to_string(),
             "last_writer" => last_writer = value.to_string(),
             "updated_at" => updated_at = value.to_string(),
@@ -152,6 +175,7 @@ fn parse_block(block: &str) -> Option<CassetteMeta> {
     if !is_writer(&created_by)
         || !is_writer(&last_writer)
         || locked_by.as_deref().is_some_and(|v| !is_writer(v))
+        || claimed_by.as_deref().is_some_and(|v| !is_writer(v))
     {
         return None;
     }
@@ -162,6 +186,8 @@ fn parse_block(block: &str) -> Option<CassetteMeta> {
         priority,
         status,
         locked_by,
+        claimed_by,
+        claimed_until,
         created_by,
         last_writer,
         updated_at,
@@ -183,6 +209,17 @@ pub fn split(content: &str) -> (Option<CassetteMeta>, &str) {
     (Some(meta), body)
 }
 
+/// The claimant's writer id, iff the claim is live at `now`: `claimed_by` is
+/// set and `claimed_until` parses and is still in the future. Expiry is
+/// evaluated here, at read time — nobody sweeps expired claims off disk — and
+/// an unparseable `claimed_until` reads as no claim, so a typo cannot wedge a
+/// cassette on busy.
+pub fn claim_live(m: &CassetteMeta, now: chrono::DateTime<chrono::Utc>) -> Option<&str> {
+    let by = m.claimed_by.as_deref()?;
+    let until = chrono::DateTime::parse_from_rfc3339(m.claimed_until.as_deref()?).ok()?;
+    (until > now).then_some(by)
+}
+
 /// `2026-09-13T14:02:11Z` — RFC3339, UTC, seconds precision.
 pub fn now_utc() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -199,6 +236,8 @@ mod tests {
             priority: 20,
             status: Status::Open,
             locked_by: None,
+            claimed_by: None,
+            claimed_until: None,
             created_by: crate::store::ids::TEST_WRITER.to_string(),
             last_writer: crate::store::ids::TEST_WRITER.to_string(),
             updated_at: "2026-09-13T14:02:11Z".to_string(),
@@ -362,6 +401,74 @@ mod tests {
         // A file we cannot identify must not silently become a cassette
         // with an empty id that later collides.
         assert!(split("---\ntopic: x\n---\n").0.is_none());
+    }
+
+    const CLAIMANT: &str = "wri_01K5GQ00000000000000000002";
+
+    #[test]
+    fn frontmatter_round_trips_a_claim() {
+        let mut m = meta();
+        m.claimed_by = Some(CLAIMANT.to_string());
+        m.claimed_until = Some("2026-10-26T14:05:00Z".to_string());
+        let text = build_frontmatter(&m);
+        assert!(
+            text.contains(&format!(
+                "\nlocked_by:\nclaimed_by: {CLAIMANT}\nclaimed_until: 2026-10-26T14:05:00Z\ncreated_by:"
+            )),
+            "{text}"
+        );
+        assert_eq!(split(&text).0.expect("parses"), m);
+
+        let bare = build_frontmatter(&meta());
+        assert!(
+            bare.contains("\nlocked_by:\nclaimed_by:\nclaimed_until:\ncreated_by:"),
+            "{bare}"
+        );
+        let parsed = split(&bare).0.expect("parses");
+        assert_eq!((parsed.claimed_by, parsed.claimed_until), (None, None));
+    }
+
+    #[test]
+    fn missing_claim_keys_parse_as_unclaimed() {
+        // A file written before claims existed.
+        let content = "---\nid: cas_01K5GR7T2M9WPD0000000000AB\ntopic: x\npriority: 10\nstatus: open\n\
+                       locked_by:\ncreated_by: wri_01K5GQ00000000000000000001\n\
+                       last_writer: wri_01K5GQ00000000000000000001\nupdated_at: 2026-09-24T09:00:00Z\n---\n\n";
+        let m = split(content).0.expect("parses");
+        assert_eq!((m.claimed_by, m.claimed_until), (None, None));
+    }
+
+    #[test]
+    fn non_writer_claimed_by_is_damaged() {
+        let mut m = meta();
+        m.claimed_by = Some("bot".to_string());
+        assert!(split(&build_frontmatter(&m)).0.is_none());
+    }
+
+    #[test]
+    fn unparseable_claimed_until_is_not_live() {
+        let mut m = meta();
+        m.claimed_by = Some(CLAIMANT.to_string());
+        m.claimed_until = Some("soon".to_string());
+        assert_eq!(claim_live(&m, chrono::Utc::now()), None);
+        m.claimed_until = None;
+        assert_eq!(claim_live(&m, chrono::Utc::now()), None);
+    }
+
+    #[test]
+    fn claim_live_respects_expiry() {
+        let mut m = meta();
+        m.claimed_by = Some(CLAIMANT.to_string());
+        m.claimed_until = Some("2026-10-26T14:05:00Z".to_string());
+        let until = chrono::DateTime::parse_from_rfc3339("2026-10-26T14:05:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let one = chrono::Duration::seconds(1);
+        assert_eq!(claim_live(&m, until - one), Some(CLAIMANT));
+        assert_eq!(claim_live(&m, until), None);
+        // No claimant: an expiry alone is not a claim.
+        m.claimed_by = None;
+        assert_eq!(claim_live(&m, until - one), None);
     }
 
     #[test]
