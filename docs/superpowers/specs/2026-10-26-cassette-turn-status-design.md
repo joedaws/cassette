@@ -87,9 +87,17 @@ edit.rs tests, e.g. `edit.rs:1150` asserts on `last_writer`.
 Closed cassettes show no glyph.
 
 This reproduces the human's rule without a new transition. Tabbing through a cassette without
-typing writes nothing, so `last_writer` and the status are unchanged. Typing makes it dirty,
+typing writes nothing, so `last_writer` and the status are unchanged. Typing changes the body,
 and autosave stamps the human as `last_writer`. It shows busy while focused, because it is
 held, and `agent` once they leave. Seen from the TUI: ✎ → ● while you're in it → ⚙ after Tab.
+
+*As built:* "without typing" could not rest on the `dirty` flag, which cursor motion, an
+insert-mode snapshot and a side flip all set — as first built, scrolling through an agent's
+reply and tabbing out flipped it to ⚙. `flush_held` now compares content under the lock before
+writing (each side trimmed, as `refresh_from_disk` compares and `build_body` writes): body and
+topic unchanged writes nothing, which also covers typing and undoing back to the stored text;
+a changed body stamps `last_writer`; a topic-only change writes `topic` and `updated_at` but not
+`last_writer`. A TUI retitle is not a turn, the same rule `queue topic` follows.
 
 The TUI needs the last writer's *kind* per cassette. Following the existing `locked_by`
 precedent, `Cassette` gains a plain scalar, resolved from `writers.toml` wherever `locked_by`

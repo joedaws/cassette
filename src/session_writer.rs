@@ -399,14 +399,35 @@ impl<'a> SessionWriter<'a> {
         if !c.dirty {
             return Ok(());
         }
-        let mut meta = guard.read()?.meta;
+        // `dirty` means "a closure ran", not "the words changed": cursor
+        // motion, an insert-mode snapshot and a flip all mark it. So the
+        // content is compared before anything is written — the same trimmed
+        // per-side comparison `refresh_from_disk` uses. Trimming loses
+        // nothing a write would keep: `build_body` trims each side too.
+        // Reading a reply, or typing and undoing back to it, writes nothing.
+        let stored = guard.read()?;
+        let (disk_a, disk_b) = crate::queue::json::split_sides(&stored.body);
+        let body_changed =
+            disk_a.trim() != c.side_a_text().trim() || disk_b.trim() != c.side_b_text().trim();
+        let topic_changed = stored.meta.topic != c.topic;
+        if !body_changed && !topic_changed {
+            app.clear_dirty(idx);
+            return Ok(());
+        }
+        let mut meta = stored.meta;
         meta.topic = c.topic.clone();
-        meta.last_writer = self.writer.clone();
         meta.updated_at = meta::now_utc();
+        // Only new words end a turn. A retitle alone is not one — the rule
+        // `queue topic` follows — so it leaves `last_writer` as it was.
+        if body_changed {
+            meta.last_writer = self.writer.clone();
+        }
         guard.write(&meta, &output::cassette_body(c))?;
-        // The turn just ended was ours: set its kind in memory rather than
-        // re-reading, since the file now says exactly what we wrote.
-        app.cassettes[idx].last_writer_human = Some(self.writer_is_human);
+        if body_changed {
+            // The turn just ended was ours: set its kind in memory rather
+            // than re-reading, since the file now says exactly what we wrote.
+            app.cassettes[idx].last_writer_human = Some(self.writer_is_human);
+        }
         app.clear_dirty(idx);
         Ok(())
     }
@@ -679,6 +700,169 @@ mod tests {
             w.flush_focused(&mut app).expect("flush");
             assert_eq!(app.cassettes[0].last_writer_human, expected, "{kind:?}");
         }
+    }
+
+    /// Seed cassette `idx` as an agent's reply: `body` on disk, `last_writer`
+    /// a fresh writer id, and an `updated_at` far enough in the past that any
+    /// rewrite at all changes it. Returns that writer id and the stored
+    /// cassette as it now sits on disk, for a before/after comparison.
+    fn seed_agent_reply(
+        store: &Store,
+        session: &str,
+        app: &App,
+        idx: usize,
+        body: &str,
+    ) -> (String, crate::store::StoredCassette) {
+        let bot = crate::store::ids::new(crate::store::ids::IdKind::Writer);
+        let guard = store
+            .lock(
+                session,
+                &app.cassettes[idx].id,
+                &Attribution::for_now(&bot, "bot"),
+            )
+            .expect("seed lock");
+        let mut stored = guard.read().expect("read");
+        stored.meta.last_writer = bot.clone();
+        stored.meta.updated_at = "2000-01-01T00:00:00Z".to_string();
+        guard.write(&stored.meta, body).expect("seed reply");
+        (bot, guard.read().expect("re-read"))
+    }
+
+    fn stored(store: &Store, session: &str, id: &str) -> crate::store::StoredCassette {
+        store
+            .scan_session(session)
+            .expect("scan")
+            .cassettes
+            .into_iter()
+            .find(|c| c.meta.id == id)
+            .expect("cassette")
+    }
+
+    fn human_writer<'a>(store: &'a Store, session: &'a str) -> SessionWriter<'a> {
+        SessionWriter::open(
+            store,
+            session,
+            true,
+            crate::store::ids::TEST_WRITER,
+            "w",
+            Kind::Human,
+        )
+    }
+
+    #[test]
+    fn motion_only_then_leave_does_not_stamp_last_writer() {
+        // Reading an agent's reply is not answering it. Tab in, move the
+        // cursor about, Tab out: the turn must still be the human's (✎), so
+        // the file must not be rewritten under the human's name.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 2);
+        let (bot, before) = seed_agent_reply(
+            &store,
+            &session,
+            &app,
+            0,
+            "## Side A\n\nthe agent's reply\n",
+        );
+        let mut w = human_writer(&store, &session);
+        w.acquire(&mut app, 0).expect("acquire 0");
+        app.focus_idx = 0;
+        app.modify_focused(|c| {
+            c.snapshot(); // entering insert mode, then leaving it
+            c.move_left();
+            c.flip();
+            c.flip();
+        });
+
+        w.acquire(&mut app, 1).expect("leave 0");
+
+        let after = stored(&store, &session, &app.cassettes[0].id);
+        assert_eq!(after.meta.last_writer, bot, "motion is not a turn");
+        assert_eq!(after.meta, before.meta, "the file is not rewritten");
+        assert_eq!(after.body, before.body);
+        assert!(!app.cassettes[0].dirty, "nothing left to flush");
+    }
+
+    #[test]
+    fn topic_only_edit_does_not_stamp_last_writer() {
+        // A retitle is not a turn — the same rule `queue topic` follows — so
+        // the topic is written but the last writer stays the agent's.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 1);
+        let (bot, before) = seed_agent_reply(
+            &store,
+            &session,
+            &app,
+            0,
+            "## Side A\n\nthe agent's reply\n",
+        );
+        let mut w = human_writer(&store, &session);
+        w.acquire(&mut app, 0).expect("acquire");
+        let human_before = app.cassettes[0].last_writer_human;
+        app.modify_focused(|c| c.topic = Some("retitled".to_string()));
+        w.flush_focused(&mut app).expect("flush");
+
+        let after = stored(&store, &session, &app.cassettes[0].id);
+        assert_eq!(after.meta.topic.as_deref(), Some("retitled"));
+        assert_eq!(after.meta.last_writer, bot, "a retitle is not a turn");
+        assert_ne!(after.meta.updated_at, before.meta.updated_at);
+        assert_eq!(after.body, before.body);
+        assert_eq!(app.cassettes[0].last_writer_human, human_before);
+        assert!(!app.cassettes[0].dirty);
+    }
+
+    #[test]
+    fn typing_still_stamps_last_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 1);
+        seed_agent_reply(
+            &store,
+            &session,
+            &app,
+            0,
+            "## Side A\n\nthe agent's reply\n",
+        );
+        let mut w = human_writer(&store, &session);
+        w.acquire(&mut app, 0).expect("acquire");
+        app.modify_focused(|c| c.insert_str(" and the human's answer"));
+        w.flush_focused(&mut app).expect("flush");
+
+        let after = stored(&store, &session, &app.cassettes[0].id);
+        assert_eq!(after.meta.last_writer, crate::store::ids::TEST_WRITER);
+        assert!(after.body.contains("the human's answer"), "{}", after.body);
+        assert_eq!(app.cassettes[0].last_writer_human, Some(true));
+    }
+
+    #[test]
+    fn undo_back_to_disk_text_writes_nothing() {
+        // Typing then undoing it all leaves exactly what is on disk; the
+        // flush has nothing to say and must not claim the turn.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::new(dir.path().to_path_buf());
+        let (mut app, session) = fixture(&store, 1);
+        let (bot, before) = seed_agent_reply(
+            &store,
+            &session,
+            &app,
+            0,
+            "## Side A\n\nthe agent's reply\n",
+        );
+        let mut w = human_writer(&store, &session);
+        w.acquire(&mut app, 0).expect("acquire");
+        app.modify_focused(|c| {
+            c.snapshot();
+            c.insert_str(" second thoughts");
+        });
+        app.modify_focused(|c| c.undo());
+        w.flush_focused(&mut app).expect("flush");
+
+        let after = stored(&store, &session, &app.cassettes[0].id);
+        assert_eq!(after.meta.last_writer, bot);
+        assert_eq!(after.meta, before.meta);
+        assert_eq!(after.body, before.body);
+        assert!(!app.cassettes[0].dirty);
     }
 
     #[test]
