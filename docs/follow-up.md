@@ -113,7 +113,18 @@ Small, none blocking, each verified to still exist as of Phase 6.
 
 - **Manual status sets (CLI + TUI).** `StatusSet` is shaped for more than `Turn`; a manual set
   would store its own frontmatter field and resolve from it, with a `queue` command and a TUI
-  binding to set it, and a config key to choose the set.
+  binding to set it, and a config key to choose the set. From the 2026-10-28 trial session
+  (`turn-trial`): the first one wanted is a **progress** set — `revisit` ↻ / `settled` ✓ — for
+  circling back through a puzzle of cassettes. It answers a different question from turn, so it
+  shows **alongside** the turn glyph (two marks per cassette, relaxing "one status at a time"
+  to "one per set"). Marking a cassette must **not** reorder the stack — cassettes teleporting
+  is jarring, and position is how the human remembers where a thought lives; focus moves
+  instead (a "jump to next ↻" key, wrapping). Optionally fold `settled` away like closed.
+- **Faster navigation between cassettes.** Tab/Shift+Tab steps one at a time — fine for three,
+  a chore for eight or more (trial-session finding). Candidates, cheapest first: jump by
+  number (`3` in normal mode, `:12`), by status (`]` next ✎, `]r` next ↻, `[` back), by topic
+  (a `/` filter that jumps on Enter, like the `cassette sessions` picker). "Jump to next ↻"
+  above depends on this, so it likely comes first.
 - **Stale-read overwrite hazard.** An agent's `queue write` that lands after the human added
   words to the same cassette replaces them. Claims make it less likely, not impossible.
 - **Second-TUI busy detection on unfocused cassettes.** The TUI only knows a lock is held by
